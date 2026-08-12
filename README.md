@@ -10,6 +10,10 @@ Redis, наоборот, запускается отдельный: сервис
 
 ## Запуск
 
+Подробная production-инструкция для установки в `/opt/stack`, подключения
+существующих PostgreSQL/Qdrant/Ollama и запуска пяти контейнеров находится в
+[DEPLOYMENT.md](DEPLOYMENT.md).
+
 ```bash
 cp .env.example .env
 # заполнить POSTGRES_DSN, Seldon, LLM и catalog credentials
