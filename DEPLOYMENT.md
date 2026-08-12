@@ -27,14 +27,14 @@ git pull --ff-only
 Создать один раз:
 
 ```bash
-docker network inspect tender-services >/dev/null 2>&1 || \
-  docker network create tender-services
+docker network inspect ai-net >/dev/null 2>&1 || \
+  docker network create ai-net
 ```
 
 В `.env` оставить:
 
 ```dotenv
-TENDER_EXTERNAL_NETWORK=tender-services
+TENDER_EXTERNAL_NETWORK=ai-net
 ```
 
 Посмотреть реальные имена контейнеров:
@@ -47,9 +47,9 @@ docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
 фактические, если они отличаются:
 
 ```bash
-docker network connect tender-services tenders-tender-postgres-1
-docker network connect tender-services qdrant
-docker network connect tender-services ollama
+docker network connect ai-net tenders-tender-postgres-1
+docker network connect ai-net qdrant
+docker network connect ai-net ollama
 ```
 
 Повторный `network connect` выдаёт `endpoint already exists` — это безопасно и
@@ -64,12 +64,12 @@ services:
   service-name:
     networks:
       - default
-      - tender-services
+      - ai-net
 
 networks:
-  tender-services:
+  ai-net:
     external: true
-    name: tender-services
+    name: ai-net
 ```
 
 ## 3. Основные значения `.env`
@@ -107,14 +107,14 @@ WORKER_MEMORY_LIMIT=4g
 После создания network проверить разрешение имён:
 
 ```bash
-docker run --rm --network tender-services curlimages/curl:8.10.1 \
+docker run --rm --network ai-net curlimages/curl:8.10.1 \
   --fail --silent --show-error http://ollama:11434/api/tags
 ```
 
 Qdrant без API key:
 
 ```bash
-docker run --rm --network tender-services curlimages/curl:8.10.1 \
+docker run --rm --network ai-net curlimages/curl:8.10.1 \
   --fail --silent --show-error http://qdrant:6333/collections/products
 ```
 
@@ -190,7 +190,7 @@ TENDER_PYTHON_API_KEY=<то же значение, что API_KEY Python-сер�
 TENDER_MAX_ACTIVE=5
 ```
 
-Если n8n подключён к `tender-services`, используйте внутренний адрес без
+Если n8n подключён к `ai-net`, используйте внутренний адрес без
 публикации наружу:
 
 ```dotenv

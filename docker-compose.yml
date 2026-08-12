@@ -26,7 +26,7 @@ services:
     networks:
       - default
       - tender-queue
-      - tender-services
+      - ai-net
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/health"]
       interval: 30s
@@ -55,7 +55,7 @@ services:
     networks:
       - default
       - tender-queue
-      - tender-services
+      - ai-net
     mem_limit: ${WORKER_MEMORY_LIMIT:-4g}
     healthcheck:
       test: ["CMD-SHELL", "celery -A app.celery_app:celery_app inspect ping --destination celery@$$HOSTNAME --timeout=10 | grep -q pong"]
@@ -72,6 +72,6 @@ volumes:
 networks:
   tender-queue:
     internal: true
-  tender-services:
+  ai-net:
     external: true
-    name: ${TENDER_EXTERNAL_NETWORK:-tender-services}
+    name: ${TENDER_EXTERNAL_NETWORK:-ai-net}
