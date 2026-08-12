@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*.log
+
+# Standalone partial-migration prototype; the full Python worker is used instead.
+document-processor/

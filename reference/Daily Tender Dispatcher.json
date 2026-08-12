@@ -1,0 +1,302 @@
+{
+  "name": "Daily Tender Dispatcher",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Dispatcher с окном максимум 10\n\n1. Один раз выполните ветку создания таблиц.\n2. Dispatcher читает CSV и создаёт один логический batch.\n3. Каждый тендер записывается как отдельный job со статусом `queued`.\n4. Dispatcher **не запускает** Tender Worker.\n5. Controller/Finalizer каждые 60 секунд считает активные jobs.\n6. Одновременно разрешено не более 10 jobs в `dispatching + processing`.\n7. Остальные jobs остаются в PostgreSQL и не создают executions в Redis.",
+        "height": 360,
+        "width": 620
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1360,
+        1232
+      ],
+      "id": "2de2f7f2-e096-4ed2-a270-dc541cf78098",
+      "name": "Инструкция — async архитектура"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        608,
+        1296
+      ],
+      "id": "75572835-05bf-4bae-9fcb-10809feb7c1d",
+      "name": "Ручной запуск — создать таблицы"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS tender_autofill_batches (\n  batch_id TEXT PRIMARY KEY,\n  batch_date DATE,\n  expected_count INTEGER NOT NULL DEFAULT 0,\n  valid_count INTEGER NOT NULL DEFAULT 0,\n  invalid_count INTEGER NOT NULL DEFAULT 0,\n  completed_count INTEGER NOT NULL DEFAULT 0,\n  failed_count INTEGER NOT NULL DEFAULT 0,\n  dispatched_count INTEGER NOT NULL DEFAULT 0,\n  status TEXT NOT NULL DEFAULT 'created',\n  source_files JSONB NOT NULL DEFAULT '[]'::jsonb,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  dispatched_at TIMESTAMPTZ,\n  finished_at TIMESTAMPTZ,\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n\nCREATE TABLE IF NOT EXISTS tender_autofill_jobs (\n  record_key TEXT PRIMARY KEY,\n  batch_id TEXT NOT NULL,\n  report_id INTEGER,\n  report_name TEXT,\n  seldon_id TEXT,\n  etp_id TEXT,\n  row_number INTEGER,\n  status TEXT NOT NULL DEFAULT 'queued',\n  attempt INTEGER NOT NULL DEFAULT 0,\n  input_valid BOOLEAN NOT NULL DEFAULT TRUE,\n  input_json JSONB NOT NULL DEFAULT '{}'::jsonb,\n  report_fields JSONB NOT NULL DEFAULT '{}'::jsonb,\n  result_json JSONB,\n  error_message TEXT NOT NULL DEFAULT '',\n  worker_execution_id TEXT,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  started_at TIMESTAMPTZ,\n  finished_at TIMESTAMPTZ,\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n\nCREATE INDEX IF NOT EXISTS idx_tender_autofill_jobs_batch\n  ON tender_autofill_jobs (batch_id);\n\nCREATE INDEX IF NOT EXISTS idx_tender_autofill_jobs_status\n  ON tender_autofill_jobs (status);\n\nCREATE INDEX IF NOT EXISTS idx_tender_autofill_jobs_batch_status\n  ON tender_autofill_jobs (batch_id, status);\n\nCREATE INDEX IF NOT EXISTS idx_tender_autofill_jobs_report\n  ON tender_autofill_jobs (report_id);\n\nCREATE INDEX IF NOT EXISTS idx_tender_autofill_jobs_queue_order\n  ON tender_autofill_jobs (status, created_at, row_number);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        864,
+        1296
+      ],
+      "id": "40231c2a-c172-4202-82c6-704ef62dae21",
+      "name": "Postgres — создать таблицы",
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Выполните один раз. Нода создаёт таблицы batches/jobs и индексы. После перехода на window=10 Dispatcher только пишет queued jobs; запуском Tender Worker занимается Controller/Finalizer."
+    },
+    {
+      "parameters": {
+        "formTitle": "Daily Tender Preprocessor — 1–3 CSV Seldon",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "CSV 223-ФЗ (необязательно)",
+              "fieldType": "file",
+              "fieldName": "file223",
+              "acceptFileTypes": ".csv"
+            },
+            {
+              "fieldLabel": "CSV Гос (44/94-ФЗ) (необязательно)",
+              "fieldType": "file",
+              "fieldName": "fileGos",
+              "acceptFileTypes": ".csv"
+            },
+            {
+              "fieldLabel": "CSV Коммерческие (необязательно)",
+              "fieldType": "file",
+              "fieldName": "fileKom",
+              "acceptFileTypes": ".csv"
+            },
+            {
+              "fieldLabel": "Лимит строк из каждого файла для теста (0 = все)",
+              "fieldType": "number",
+              "fieldName": "testLimit",
+              "placeholder": "Например: 1, 3 или 10",
+              "defaultValue": 0
+            }
+          ]
+        },
+        "options": {
+          "respondWithOptions": {
+            "values": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        608,
+        1696
+      ],
+      "id": "8b65cdc4-328e-4a9c-b294-c18cc4a0d98f",
+      "name": "On form submission",
+      "webhookId": "a3a602e8-1d17-4c34-9a38-5444fcf4c00c",
+      "notesInFlow": true,
+      "notes": "Можно загрузить любой один, два или все три CSV. Для экономии токенов задайте тестовый лимит строк на каждый загруженный файл; 0 означает обработать все строки."
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first();\nconst binary = input.binary || {};\nconst rawTestLimit =\n  input.json?.testLimit ??\n  input.json?.['Лимит строк из каждого файла для теста (0 = все)'] ??\n  0;\nconst parsedTestLimit = Number(rawTestLimit);\nconst testLimitPerFile = Number.isFinite(parsedTestLimit)\n  ? Math.max(0, Math.floor(parsedTestLimit))\n  : 0;\nconst preferredKeys = ['file223', 'fileGos', 'fileKom'];\nconst binaryKeys = [\n  ...preferredKeys.filter((key) => binary[key]),\n  ...Object.keys(binary).filter((key) => !preferredKeys.includes(key)),\n];\n\nif (!binaryKeys.length) {\n  throw new Error(\n    'CSV-файлы не найдены в binary-данных Form Trigger. ' +\n    'Загрузите хотя бы один CSV: 223, gos или kom.'\n  );\n}\n\nfunction decodeCsv(source) {\n  try {\n    return new TextDecoder('utf-8', { fatal: true }).decode(source);\n  } catch {}\n\n  try {\n    return new TextDecoder('windows-1251').decode(source);\n  } catch (error) {\n    throw new Error(\n      'Не удалось прочитать CSV как UTF-8 или Windows-1251: ' +\n      error.message\n    );\n  }\n}\n\nfunction detectDelimiter(text) {\n  const firstLines = String(text || '')\n    .replace(/^\\uFEFF/, '')\n    .split(/\\r?\\n/)\n    .filter((line) => line.trim() !== '')\n    .slice(0, 5);\n\n  const candidates = [';', '\\t', ','];\n  let best = ';';\n  let bestScore = -1;\n\n  for (const delimiter of candidates) {\n    const score = firstLines.reduce(\n      (sum, line) => sum + line.split(delimiter).length - 1,\n      0\n    );\n\n    if (score > bestScore) {\n      best = delimiter;\n      bestScore = score;\n    }\n  }\n\n  return best;\n}\n\nfunction parseCsv(text, delimiter) {\n  const source = String(text || '').replace(/^\\uFEFF/, '');\n  const table = [];\n  let row = [];\n  let value = '';\n  let quoted = false;\n\n  for (let i = 0; i < source.length; i++) {\n    const char = source[i];\n\n    if (quoted) {\n      if (char === '\"') {\n        if (source[i + 1] === '\"') {\n          value += '\"';\n          i++;\n        } else {\n          quoted = false;\n        }\n      } else {\n        value += char;\n      }\n      continue;\n    }\n\n    if (char === '\"') {\n      quoted = true;\n      continue;\n    }\n\n    if (char === delimiter) {\n      row.push(value);\n      value = '';\n      continue;\n    }\n\n    if (char === '\\r' || char === '\\n') {\n      if (char === '\\r' && source[i + 1] === '\\n') i++;\n      row.push(value);\n      table.push(row);\n      row = [];\n      value = '';\n      continue;\n    }\n\n    value += char;\n  }\n\n  if (value !== '' || row.length) {\n    row.push(value);\n    table.push(row);\n  }\n\n  return table;\n}\n\nfunction clean(value) {\n  return String(value ?? '')\n    .replace(/^\\uFEFF/, '')\n    .trim();\n}\n\nfunction makeColumnDefinitions(rawHeaders) {\n  const used = new Map();\n  let blankNumber = 0;\n\n  return rawHeaders.map((rawHeader, index) => {\n    const header = clean(rawHeader);\n    let key;\n\n    if (!header) {\n      blankNumber++;\n      // В текущих файлах пустая вторая колонка исторически называлась \"0\".\n      key = blankNumber === 1 ? '0' : `__blank_${index + 1}`;\n    } else {\n      const count = used.get(header) || 0;\n      used.set(header, count + 1);\n      key = count === 0 ? header : `${header}_${count + 1}`;\n    }\n\n    return {\n      index,\n      header,\n      key,\n    };\n  });\n}\n\nfunction reportIdFromFile(fileName, columnDefinitions, dataRows) {\n  const lowerName = String(fileName || '')\n    .toLowerCase()\n    .replace(/ё/g, 'е');\n\n  if (/(^|[_\\-\\s])223([_\\-\\s.]|$)/.test(lowerName)) return 1;\n  if (/(^|[_\\-\\s])(gos|гос)([_\\-\\s.]|$)/.test(lowerName)) return 2;\n  if (/(^|[_\\-\\s])(kom|ком)([_\\-\\s.]|$)/.test(lowerName)) return 3;\n\n  const keys = new Set(columnDefinitions.map((column) => column.key));\n\n  if (keys.has('Электронная площадка') && keys.has('Организатор')) {\n    return 1;\n  }\n\n  if (keys.has('Размер обеспечения контракта') && keys.has('Торговая площадка')) {\n    return 2;\n  }\n\n  if (keys.has('Источник') && keys.has('Название заказчика')) {\n    return 3;\n  }\n\n  const lawIndex = columnDefinitions.find(\n    (column) => column.key === 'Код ФЗ'\n  )?.index;\n\n  if (lawIndex !== undefined) {\n    for (const values of dataRows.slice(0, 10)) {\n      const law = clean(values[lawIndex]).toLowerCase();\n\n      if (law.includes('223')) return 1;\n      if (law === '44' || law.includes('44') || law.includes('94')) return 2;\n      if (law.includes('commercial') || law.includes('ком')) return 3;\n    }\n  }\n\n  return null;\n}\n\nfunction purchaseTypeFromReportId(reportId) {\n  if (reportId === 1) return '223-ФЗ';\n  if (reportId === 2) return '44/94-ФЗ';\n  if (reportId === 3) return 'Коммерческие закупки';\n  return null;\n}\n\nfunction expectedLabel(reportId) {\n  if (reportId === 1) return '223';\n  if (reportId === 2) return 'gos';\n  if (reportId === 3) return 'kom';\n  return 'unknown';\n}\n\nconst allTenders = [];\nconst fileSummaries = [];\nconst seenReportIds = new Map();\n\nfor (const binaryKey of binaryKeys) {\n  const fileInfo = binary[binaryKey] || {};\n  const fileName = String(\n    fileInfo.fileName ||\n    fileInfo.file_name ||\n    `${binaryKey}.csv`\n  );\n\n  const extension = fileName.split('.').pop().toLowerCase();\n\n  if (extension !== 'csv') {\n    throw new Error(`Ожидался CSV-файл, получен: ${fileName}`);\n  }\n\n  const buffer = await this.helpers.getBinaryDataBuffer(0, binaryKey);\n  const text = decodeCsv(buffer);\n  const delimiter = detectDelimiter(text);\n  const matrix = parseCsv(text, delimiter);\n\n  if (matrix.length < 2) {\n    throw new Error(`CSV ${fileName} не содержит строк данных.`);\n  }\n\n  const rawHeaders = matrix[0];\n  const columnDefinitions = makeColumnDefinitions(rawHeaders);\n  const dataRows = matrix\n    .slice(1)\n    .filter((values) => values.some((value) => clean(value) !== ''));\n\n  const selectedDataRows = testLimitPerFile > 0\n    ? dataRows.slice(0, testLimitPerFile)\n    : dataRows;\n\n  const reportId = reportIdFromFile(\n    fileName,\n    columnDefinitions,\n    dataRows\n  );\n\n  if (![1, 2, 3].includes(reportId)) {\n    throw new Error(\n      `Не удалось определить тип файла ${fileName}. ` +\n      'Ожидается 223, gos или kom.'\n    );\n  }\n\n  if (seenReportIds.has(reportId)) {\n    throw new Error(\n      `Загружено два файла типа ${expectedLabel(reportId)}: ` +\n      `${seenReportIds.get(reportId)} и ${fileName}.`\n    );\n  }\n\n  seenReportIds.set(reportId, fileName);\n\n  for (let rowIndex = 0; rowIndex < selectedDataRows.length; rowIndex++) {\n    const values = selectedDataRows[rowIndex];\n    const row = {};\n    const reportFields = {};\n\n    for (const column of columnDefinitions) {\n      const value = clean(values[column.index]);\n      row[column.key] = value;\n      reportFields[column.key] = value;\n    }\n\n    // Совместимость трёх схем Seldon с tender_autofill.\n    if (!row['Организатор'] && row['Название заказчика']) {\n      row['Организатор'] = row['Название заказчика'];\n    }\n\n    if (!row['Электронная площадка'] && row['Торговая площадка']) {\n      row['Электронная площадка'] = row['Торговая площадка'];\n    }\n\n    if (\n      !row['ИНН заказчика/организатора'] &&\n      row['ИНН заказчика']\n    ) {\n      row['ИНН заказчика/организатора'] = row['ИНН заказчика'];\n    }\n\n    const id = clean(\n      row.ID ??\n      row.SeldonID ??\n      row.SeldonId\n    );\n\n    row.reportId = reportId;\n    row.purchaseType = purchaseTypeFromReportId(reportId);\n    row.seldonId = id || null;\n    row.lawCode = clean(row['Код ФЗ']) || null;\n    row.toCode = clean(row['Код ТО']) || null;\n    row.reportFields = reportFields;\n\n    row.sourceFile = `form-upload://${fileName}`;\n    row.sourceFileName = fileName;\n    row.sourceBinaryKey = binaryKey;\n    row.sourceRowNumber = rowIndex + 2;\n    row.sourceColumnCount = columnDefinitions.length;\n    row.sourceColumnDefinitions = columnDefinitions;\n\n    allTenders.push(row);\n  }\n\n  fileSummaries.push({\n    binaryKey,\n    fileName,\n    reportId,\n    reportName: expectedLabel(reportId),\n    sourceRowCount: dataRows.length,\n    rowCount: selectedDataRows.length,\n    testLimitApplied: testLimitPerFile > 0,\n    columnCount: columnDefinitions.length,\n    delimiter,\n    headers: columnDefinitions.map((column) => ({\n      header: column.header,\n      key: column.key,\n      index: column.index,\n    })),\n  });\n}\n\nif (!allTenders.length) {\n  throw new Error('В загруженных CSV-файлах не найдено ни одного тендера.');\n}\n\nconst datesFromNames = fileSummaries\n  .map((file) => file.fileName.match(/\\d{4}-\\d{2}-\\d{2}/)?.[0])\n  .filter(Boolean);\n\nconst uniqueDates = [...new Set(datesFromNames)];\n\nconst batchDate =\n  uniqueDates.length === 1\n    ? uniqueDates[0]\n    : new Intl.DateTimeFormat('en-CA', {\n        timeZone: 'Europe/Moscow',\n        year: 'numeric',\n        month: '2-digit',\n        day: '2-digit',\n      }).format(new Date());\n\nconst generatedAt = new Date().toISOString();\nconst batchId =\n  `form-${batchDate}-${generatedAt.replace(/[-:.TZ]/g, '').slice(0, 14)}`;\n\nreturn [{\n  json: {\n    batchId,\n    batchDate,\n    generatedAt,\n    count: allTenders.length,\n    fileCount: fileSummaries.length,\n    loadedReportIds: [...seenReportIds.keys()].sort((a, b) => a - b),\n    testLimitPerFile,\n    files: fileSummaries,\n    tenders: allTenders,\n    sourceFile: `form-upload://${fileSummaries.map((file) => file.reportName).join('+')}`,\n  },\n}];"
+      },
+      "id": "2da577da-069e-48db-982d-b22568fb9934",
+      "name": "Прочитать CSV из формы и собрать пакет",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        864,
+        1696
+      ],
+      "notesInFlow": true,
+      "notes": "Читает любой один, два или три CSV. Поля формы необязательны, но должен быть загружен хотя бы один файл. Параметр testLimit ограничивает число обрабатываемых строк отдельно для каждого файла; 0 — без ограничения."
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "0de4ce79-1f2a-4149-9f79-4f3e844bac76",
+      "name": "When Executed by Seldon Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        864,
+        2016
+      ],
+      "notesInFlow": true,
+      "disabled": true,
+      "notes": "Необязательный вход для запуска пакета из другого workflow. Ожидается объект {batchId, batchDate, files, tenders:[...]}. Для обычной загрузки CSV используется Form Trigger."
+    },
+    {
+      "parameters": {
+        "jsCode": "function firstPresent(...values) {\n  for (const value of values) {\n    if (value !== undefined && value !== null) return value;\n  }\n  return undefined;\n}\n\nfunction pickNonEmpty(obj, keys) {\n  for (const key of keys) {\n    const value = obj?.[key];\n\n    if (\n      value !== undefined &&\n      value !== null &&\n      String(value).trim() !== ''\n    ) {\n      return value;\n    }\n  }\n\n  return null;\n}\n\nfunction emptyToNull(value) {\n  if (value === undefined || value === null) return null;\n  const text = String(value).trim();\n\n  if (\n    !text ||\n    ['null', '[null]', 'undefined', '[undefined]'].includes(text.toLowerCase())\n  ) {\n    return null;\n  }\n\n  return text;\n}\n\nfunction resolveReportId(row) {\n  const explicit = Number(\n    pickNonEmpty(row, ['reportId', 'report_id', 'ReportId'])\n  );\n\n  if ([1, 2, 3].includes(explicit)) return explicit;\n\n  const type = String(\n    pickNonEmpty(row, [\n      'purchaseType',\n      'purchase_type',\n      'tenderType',\n      'type',\n      'Тип закупки',\n      'ТипЗакупки',\n    ]) || ''\n  )\n    .trim()\n    .toLowerCase()\n    .replace(/ё/g, 'е')\n    .replace(/[–—]/g, '-');\n\n  if (['223-фз', '223 фз', '223', '1'].includes(type)) return 1;\n\n  if (\n    [\n      '44/94-фз',\n      '44/94 фз',\n      '44-фз',\n      '44 фз',\n      '94-фз',\n      '94 фз',\n      '44',\n      '94',\n      '2',\n      'гос',\n    ].includes(type)\n  ) {\n    return 2;\n  }\n\n  if (\n    [\n      'коммерческие закупки',\n      'коммерческая закупка',\n      'коммерческие',\n      'commercial',\n      'kom',\n      '3',\n    ].includes(type)\n  ) {\n    return 3;\n  }\n\n  const law = String(\n    pickNonEmpty(row, ['lawCode', 'Код ФЗ', 'federalLaw']) || ''\n  ).toLowerCase();\n\n  if (law.includes('223')) return 1;\n  if (law === '44' || law.includes('44') || law.includes('94')) return 2;\n  if (law.includes('commercial') || law.includes('ком')) return 3;\n\n  return null;\n}\n\nconst REPORT_COLUMNS = {\n  1: [\n    { header: 'ID', key: 'ID' },\n    { header: '', key: '0' },\n    { header: 'Осталось дней', key: 'Осталось дней' },\n    { header: 'Статус закупки', key: 'Статус закупки' },\n    { header: 'Электронная площадка', key: 'Электронная площадка' },\n    { header: 'Способ закупки', key: 'Способ закупки' },\n    { header: 'Наименование', key: 'Наименование' },\n    { header: 'Организатор', key: 'Организатор' },\n    { header: 'Начальная цена', key: 'Начальная цена' },\n    { header: 'Конечная цена', key: 'Конечная цена' },\n    { header: 'Валюта', key: 'Валюта' },\n    { header: 'Дата начала приёма заявок', key: 'Дата начала приёма заявок' },\n    { header: 'Дата окончания приёма заявок', key: 'Дата окончания приёма заявок' },\n    { header: 'Дата изменения', key: 'Дата изменения' },\n    { header: '№ извещения', key: '№ извещения' },\n    { header: 'Ссылка на тендер', key: 'Ссылка на тендер' },\n    { header: 'Регион заказчика/организатора', key: 'Регион заказчика/организатора' },\n    { header: 'ИНН заказчика/организатора', key: 'ИНН заказчика/организатора' },\n    { header: 'Дата проведения аукциона', key: 'Дата проведения аукциона' },\n    { header: 'Размер обеспечения заявки', key: 'Размер обеспечения заявки' },\n    { header: 'Код ТО', key: 'Код ТО' },\n    { header: 'Код ФЗ', key: 'Код ФЗ' },\n  ],\n  2: [\n    { header: 'ID', key: 'ID' },\n    { header: 'Степень завершения', key: 'Степень завершения' },\n    { header: 'Осталось дней', key: 'Осталось дней' },\n    { header: 'Статус закупки', key: 'Статус закупки' },\n    { header: '№ извещения', key: '№ извещения' },\n    { header: 'Способ закупки', key: 'Способ закупки' },\n    { header: 'Наименование', key: 'Наименование' },\n    { header: 'Название заказчика', key: 'Название заказчика' },\n    { header: 'Начальная цена', key: 'Начальная цена' },\n    { header: 'Конечная цена', key: 'Конечная цена' },\n    { header: 'Валюта', key: 'Валюта' },\n    { header: 'Дата начала приёма заявок', key: 'Дата начала приёма заявок' },\n    { header: 'Дата окончания приёма заявок', key: 'Дата окончания приёма заявок' },\n    { header: 'Дата изменения', key: 'Дата изменения' },\n    { header: 'Ссылка на тендер', key: 'Ссылка на тендер' },\n    { header: 'Регион заказчика/организатора', key: 'Регион заказчика/организатора' },\n    { header: 'ИНН заказчика', key: 'ИНН заказчика' },\n    { header: 'Размер обеспечения заявки', key: 'Размер обеспечения заявки' },\n    { header: 'Дата проведения аукциона', key: 'Дата проведения аукциона' },\n    { header: 'Размер обеспечения контракта', key: 'Размер обеспечения контракта' },\n    { header: 'Торговая площадка', key: 'Торговая площадка' },\n    { header: 'Код ТО', key: 'Код ТО' },\n    { header: 'Код ФЗ', key: 'Код ФЗ' },\n  ],\n  3: [\n    { header: 'ID', key: 'ID' },\n    { header: '', key: '0' },\n    { header: 'Степень завершения', key: 'Степень завершения' },\n    { header: 'Осталось дней', key: 'Осталось дней' },\n    { header: 'Статус закупки', key: 'Статус закупки' },\n    { header: 'Способ закупки', key: 'Способ закупки' },\n    { header: 'Источник', key: 'Источник' },\n    { header: 'Наименование', key: 'Наименование' },\n    { header: 'Название заказчика', key: 'Название заказчика' },\n    { header: 'Начальная цена', key: 'Начальная цена' },\n    { header: 'Валюта', key: 'Валюта' },\n    { header: 'Дата начала приёма заявок', key: 'Дата начала приёма заявок' },\n    { header: 'Дата окончания приёма заявок', key: 'Дата окончания приёма заявок' },\n    { header: 'Дата изменения', key: 'Дата изменения' },\n    { header: 'Ссылка на тендер', key: 'Ссылка на тендер' },\n    { header: 'Регион заказчика/организатора', key: 'Регион заказчика/организатора' },\n    { header: 'ИНН заказчика', key: 'ИНН заказчика' },\n    { header: 'Код ТО', key: 'Код ТО' },\n    { header: 'Код ФЗ', key: 'Код ФЗ' },\n  ],\n};\n\nfunction buildReportFields(row, reportId) {\n  const supplied =\n    row?.reportFields &&\n    typeof row.reportFields === 'object' &&\n    !Array.isArray(row.reportFields)\n      ? row.reportFields\n      : {};\n\n  const result = { ...supplied };\n\n  for (const column of REPORT_COLUMNS[reportId] || []) {\n    result[column.key] = firstPresent(\n      supplied[column.key],\n      column.header ? supplied[column.header] : undefined,\n      row?.[column.key],\n      column.header ? row?.[column.header] : undefined,\n      ''\n    );\n  }\n\n  if (!result.ID) {\n    result.ID = firstPresent(\n      row?.ID,\n      row?.SeldonID,\n      row?.SeldonId,\n      row?.seldonId,\n      ''\n    );\n  }\n\n  if (!result['Код ТО']) {\n    result['Код ТО'] = firstPresent(row?.toCode, '');\n  }\n\n  if (!result['Код ФЗ']) {\n    result['Код ФЗ'] = firstPresent(\n      row?.lawCode,\n      reportId === 1 ? '223' : reportId === 2 ? '44' : 'Commercial'\n    );\n  }\n\n  return result;\n}\n\nconst rows = [];\n\nfor (const item of $input.all()) {\n  const payload = item.json || {};\n\n  if (Array.isArray(payload.tenders)) {\n    for (const tender of payload.tenders) {\n      rows.push({\n        row: tender || {},\n        batchId: payload.batchId || null,\n        batchDate: payload.batchDate || null,\n        generatedAt: payload.generatedAt || null,\n        sourceFile: payload.sourceFile || tender?.sourceFile || null,\n      });\n    }\n  } else {\n    rows.push({\n      row: payload,\n      batchId: payload.batchId || null,\n      batchDate: payload.batchDate || null,\n      generatedAt: payload.generatedAt || null,\n      sourceFile: payload.sourceFile || null,\n    });\n  }\n}\n\nreturn rows.map((entry, index) => {\n  const row = entry.row;\n  const reportId = resolveReportId(row);\n\n  const purchaseType =\n    pickNonEmpty(row, [\n      'purchaseType',\n      'purchase_type',\n      'tenderType',\n      'type',\n      'Тип закупки',\n      'ТипЗакупки',\n    ]) ||\n    (reportId === 1\n      ? '223-ФЗ'\n      : reportId === 2\n        ? '44/94-ФЗ'\n        : reportId === 3\n          ? 'Коммерческие закупки'\n          : null);\n\n  const seldonId = emptyToNull(\n    pickNonEmpty(row, [\n      'seldonId',\n      'seldon_id',\n      'SeldonId',\n      'SeldonID',\n      'Seldon ID',\n      'ID',\n    ])\n  );\n\n  const noticeOrEtpId = emptyToNull(\n    pickNonEmpty(row, [\n      'etpId',\n      'etp_id',\n      'EtpId',\n      'Номер извещения',\n      '№ извещения',\n      'purchaseNumber',\n      'notificationNumber',\n    ])\n  );\n\n  const etpId = seldonId ? null : noticeOrEtpId;\n  const toCode = emptyToNull(\n    pickNonEmpty(row, ['toCode', 'Код ТО'])\n  );\n\n  const lawCode =\n    emptyToNull(pickNonEmpty(row, ['lawCode', 'Код ФЗ'])) ||\n    (reportId === 1 ? '223' : reportId === 2 ? '44' : reportId === 3 ? 'Commercial' : null);\n\n  const reportFields = buildReportFields(row, reportId);\n  const errors = [];\n\n  if (!reportId) {\n    errors.push('не определён reportId/purchaseType');\n  }\n\n  if ((seldonId ? 1 : 0) + (etpId ? 1 : 0) !== 1) {\n    errors.push('должен быть заполнен ровно один из seldonId/etpId');\n  }\n\n  const rowNumber = index + 1;\n  const batchResultKey = reportId\n    ? `daily:${entry.batchId || 'direct'}:${reportId}:${seldonId || ('etp:' + etpId)}`\n    : `daily:${entry.batchId || 'direct'}:invalid:${rowNumber}`;\n\n  return {\n    json: {\n      ...row,\n      batchId: entry.batchId,\n      batchDate: entry.batchDate,\n      batchGeneratedAt: entry.generatedAt,\n      rowNumber,\n      purchaseType: purchaseType ? String(purchaseType).trim() : null,\n      sectionName:\n        String(row.sectionName || row['Раздел ТО'] || '').trim() || null,\n      filterName:\n        String(row.filterName || row['Исходное имя фильтра'] || '').trim() || null,\n      reportId,\n      seldonId,\n      etpId,\n      toCode,\n      lawCode,\n      reportFields,\n      seldonPurchase:\n        row.seldonPurchase ||\n        row.purchase ||\n        row.rawPurchase ||\n        null,\n      batchMode: true,\n\n      // tender_autofill пока ожидает batchCacheKey для возврата результата.\n      // Это только идентификатор строки запуска; Data Table в этом workflow больше нет.\n      batchCacheKey: batchResultKey,\n      batchResultKey,\n\n      sourceFile:\n        entry.sourceFile ||\n        row.sourceFile ||\n        `form-upload://${row.sourceFileName || 'unknown.csv'}`,\n      inputValid: errors.length === 0,\n      inputError: errors.join('; '),\n    },\n  };\n});"
+      },
+      "id": "5e96584d-43e7-4bea-858e-977d97d4cfb3",
+      "name": "Развернуть и нормализовать JSON-пакет",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        1696
+      ],
+      "notesInFlow": true,
+      "notes": "Разворачивает пакет из трёх CSV, сохраняет reportFields по точным схемам 223/gos/kom и передаёт тендеры в цикл по одному."
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input\n  .all()\n  .map(item => item.json || {})\n  .filter(row => row && typeof row === 'object');\n\nif (!rows.length) {\n  throw new Error('После нормализации не найдено ни одного тендера.');\n}\n\nfunction firstDefined(...values) {\n  for (const value of values) {\n    if (\n      value !== undefined &&\n      value !== null &&\n      String(value).trim() !== ''\n    ) {\n      return value;\n    }\n  }\n\n  return null;\n}\n\nfunction reportName(reportId) {\n  if (Number(reportId) === 1) return '223';\n  if (Number(reportId) === 2) return 'gos';\n  if (Number(reportId) === 3) return 'kom';\n  return 'unknown';\n}\n\nlet packageInput = {};\n\ntry {\n  packageInput =\n    $('Прочитать CSV из формы и собрать пакет').first().json || {};\n} catch {}\n\nconst first = rows[0];\n\nconst batchId =\n  firstDefined(\n    first.batchId,\n    packageInput.batchId\n  ) ||\n  `daily-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;\n\nconst batchDate =\n  firstDefined(\n    first.batchDate,\n    packageInput.batchDate\n  ) ||\n  new Intl.DateTimeFormat('en-CA', {\n    timeZone: 'Europe/Moscow',\n    year: 'numeric',\n    month: '2-digit',\n    day: '2-digit'\n  }).format(new Date());\n\nconst sourceFiles =\n  Array.isArray(packageInput.files)\n    ? packageInput.files\n    : [];\n\nconst jobs = rows.map((row, index) => {\n  const reportId =\n    Number(row.reportId) || null;\n\n  const seldonId =\n    firstDefined(\n      row.seldonId,\n      row.ID,\n      row.SeldonID\n    );\n\n  const etpId =\n    seldonId\n      ? null\n      : firstDefined(\n          row.etpId,\n          row['№ извещения']\n        );\n\n  const rowNumber =\n    Number(row.rowNumber) ||\n    index + 1;\n\n  const recordKey = String(\n    firstDefined(\n      row.batchResultKey,\n      row.batchCacheKey,\n      reportId && seldonId\n        ? `daily:${batchId}:${reportId}:${seldonId}`\n        : reportId && etpId\n          ? `daily:${batchId}:${reportId}:etp:${etpId}`\n          : `daily:${batchId}:invalid:${rowNumber}`\n    )\n  );\n\n  const inputValid =\n    row.inputValid === true;\n\n  const inputError =\n    String(row.inputError || '').trim();\n\n  const payload = {\n    ...row,\n\n    batchId,\n    batchDate,\n    rowNumber,\n\n    jobRecordKey:\n      recordKey,\n\n    asyncDispatch:\n      true,\n\n    batchMode:\n      true,\n\n    batchCacheKey:\n      recordKey,\n\n    batchResultKey:\n      recordKey\n  };\n\n  return {\n    record_key:\n      recordKey,\n\n    report_id:\n      reportId,\n\n    report_name:\n      reportName(reportId),\n\n    seldon_id:\n      seldonId === null\n        ? null\n        : String(seldonId),\n\n    etp_id:\n      etpId === null\n        ? null\n        : String(etpId),\n\n    row_number:\n      rowNumber,\n\n    input_valid:\n      inputValid,\n\n    input_error:\n      inputError,\n\n    payload,\n\n    report_fields:\n      row.reportFields &&\n      typeof row.reportFields === 'object' &&\n      !Array.isArray(row.reportFields)\n        ? row.reportFields\n        : {}\n  };\n});\n\nconst validCount =\n  jobs.filter(job => job.input_valid).length;\n\nconst invalidCount =\n  jobs.length - validCount;\n\nreturn [\n  {\n    json: {\n      batchId,\n      batchDate,\n\n      expectedCount:\n        jobs.length,\n\n      validCount,\n      invalidCount,\n\n      sourceFiles,\n      jobs,\n\n      createdAt:\n        new Date().toISOString()\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1392,
+        1696
+      ],
+      "id": "71ef4408-d6b2-4c9d-83b4-1cdf455bd083",
+      "name": "Собрать batch и задания",
+      "notesInFlow": true,
+      "notes": "Сворачивает все строки в один batch и готовит массив jobs. Каждый тендер получает уникальный jobRecordKey. На этом этапе тяжёлая обработка ещё не запускается."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH batch_upsert AS (\n  INSERT INTO tender_autofill_batches (\n    batch_id,\n    batch_date,\n    expected_count,\n    valid_count,\n    invalid_count,\n    completed_count,\n    failed_count,\n    dispatched_count,\n    status,\n    source_files,\n    created_at,\n    dispatched_at,\n    finished_at,\n    updated_at\n  )\n  VALUES (\n    $1,\n    $2::date,\n    $3::integer,\n    $4::integer,\n    $5::integer,\n    0,\n    $5::integer,\n    0,\n    'processing',\n    $6::jsonb,\n    NOW(),\n    NULL,\n    NULL,\n    NOW()\n  )\n  ON CONFLICT (batch_id)\n  DO UPDATE SET\n    batch_date = EXCLUDED.batch_date,\n    expected_count = EXCLUDED.expected_count,\n    valid_count = EXCLUDED.valid_count,\n    invalid_count = EXCLUDED.invalid_count,\n    completed_count = 0,\n    failed_count = EXCLUDED.failed_count,\n    dispatched_count = 0,\n    status = 'processing',\n    source_files = EXCLUDED.source_files,\n    dispatched_at = NULL,\n    finished_at = NULL,\n    updated_at = NOW()\n  RETURNING batch_id\n),\nincoming_jobs AS (\n  SELECT *\n  FROM jsonb_to_recordset($7::jsonb) AS job (\n    record_key TEXT,\n    report_id INTEGER,\n    report_name TEXT,\n    seldon_id TEXT,\n    etp_id TEXT,\n    row_number INTEGER,\n    input_valid BOOLEAN,\n    input_error TEXT,\n    payload JSONB,\n    report_fields JSONB\n  )\n),\njobs_upsert AS (\n  INSERT INTO tender_autofill_jobs (\n    record_key,\n    batch_id,\n    report_id,\n    report_name,\n    seldon_id,\n    etp_id,\n    row_number,\n    status,\n    attempt,\n    input_valid,\n    input_json,\n    report_fields,\n    result_json,\n    error_message,\n    worker_execution_id,\n    created_at,\n    started_at,\n    finished_at,\n    updated_at\n  )\n  SELECT\n    job.record_key,\n    $1,\n    job.report_id,\n    job.report_name,\n    job.seldon_id,\n    job.etp_id,\n    job.row_number,\n    CASE\n      WHEN job.input_valid THEN 'queued'\n      ELSE 'failed'\n    END,\n    0,\n    job.input_valid,\n    job.payload,\n    job.report_fields,\n    NULL,\n    CASE\n      WHEN job.input_valid THEN ''\n      ELSE COALESCE(\n        job.input_error,\n        'Некорректная входная строка'\n      )\n    END,\n    NULL,\n    NOW(),\n    NULL,\n    CASE\n      WHEN job.input_valid THEN NULL\n      ELSE NOW()\n    END,\n    NOW()\n  FROM incoming_jobs AS job\n  ON CONFLICT (record_key)\n  DO UPDATE SET\n    report_id = EXCLUDED.report_id,\n    report_name = EXCLUDED.report_name,\n    seldon_id = EXCLUDED.seldon_id,\n    etp_id = EXCLUDED.etp_id,\n    row_number = EXCLUDED.row_number,\n    status = EXCLUDED.status,\n    attempt = 0,\n    input_valid = EXCLUDED.input_valid,\n    input_json = EXCLUDED.input_json,\n    report_fields = EXCLUDED.report_fields,\n    result_json = NULL,\n    error_message = EXCLUDED.error_message,\n    worker_execution_id = NULL,\n    started_at = NULL,\n    finished_at = EXCLUDED.finished_at,\n    updated_at = NOW()\n  RETURNING record_key\n)\nSELECT\n  $1::text AS \"batchId\",\n  $2::date::text AS \"batchDate\",\n  $3::integer AS \"expectedCount\",\n  $4::integer AS \"validCount\",\n  $5::integer AS \"invalidCount\",\n  COUNT(*)::integer AS \"storedJobCount\"\nFROM jobs_upsert;",
+        "options": {
+          "queryReplacement": "={{ [$json.batchId, $json.batchDate, $json.expectedCount, $json.validCount, $json.invalidCount, JSON.stringify($json.sourceFiles || []), JSON.stringify($json.jobs || [])] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1648,
+        1696
+      ],
+      "id": "17c597b4-a394-45c9-be1b-c7f2b7998253",
+      "name": "Postgres — создать batch и jobs",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Создаёт один логический batch и все jobs. Валидные jobs остаются status=queued. Dispatcher не создаёт Tender Worker executions."
+    },
+    {
+      "parameters": {
+        "jsCode": "const stored = $input.first().json || {};\n\nconst expectedCount =\n  Number(stored.expectedCount || 0);\n\nconst queuedCount =\n  Number(stored.validCount || 0);\n\nconst invalidCount =\n  Number(stored.invalidCount || 0);\n\nreturn [\n  {\n    json: {\n      status:\n        'queued',\n\n      batchId:\n        stored.batchId || null,\n\n      batchDate:\n        stored.batchDate || null,\n\n      expectedCount,\n      queuedCount,\n      invalidCount,\n\n      storedJobCount:\n        Number(stored.storedJobCount || 0),\n\n      maxTenderActive:\n        5,\n\n      message:\n        'Batch сохранён в PostgreSQL. ' +\n        'Tender Worker здесь не запускаются.',\n\n      nextStep:\n        'Controller/Finalizer будет запускать не более 10 ' +\n        'Tender Worker одновременно.'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        1840
+      ],
+      "id": "9b72dbd3-d16b-447b-980e-db895c4f4b32",
+      "name": "Ответ диспетчера",
+      "notesInFlow": true,
+      "notes": "Подтверждает только сохранение jobs. Статус queued не означает, что Tender Worker уже запущен."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Ручной запуск — создать таблицы": {
+      "main": [
+        [
+          {
+            "node": "Postgres — создать таблицы",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Прочитать CSV из формы и собрать пакет",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Прочитать CSV из формы и собрать пакет": {
+      "main": [
+        [
+          {
+            "node": "Развернуть и нормализовать JSON-пакет",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Seldon Workflow": {
+      "main": [
+        [
+          {
+            "node": "Развернуть и нормализовать JSON-пакет",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Развернуть и нормализовать JSON-пакет": {
+      "main": [
+        [
+          {
+            "node": "Собрать batch и задания",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Собрать batch и задания": {
+      "main": [
+        [
+          {
+            "node": "Postgres — создать batch и jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres — создать batch и jobs": {
+      "main": [
+        [
+          {
+            "node": "Ответ диспетчера",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "93bd5b52-4c01-4fa2-8078-539897de5c47",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "1af159141d995153015a34099dbbec8b3b0f9b0c2c0d3b0e0b2ceec2d7800f6a"
+  },
+  "nodeGroups": [],
+  "id": "eJRxGBvnQEzdbGXB",
+  "tags": []
+}

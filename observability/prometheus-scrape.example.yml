@@ -1,0 +1,13 @@
+# Add this job to the existing Prometheus configuration on your server.
+# Use tender-api:8000 when Prometheus shares a Docker network with this project,
+# otherwise use the server DNS/IP and the published TENDER_API_PORT.
+scrape_configs:
+  - job_name: tender-autofill-python
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - tender-api:8000
+        labels:
+          environment: production

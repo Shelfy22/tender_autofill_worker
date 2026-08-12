@@ -1,0 +1,129 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "${DS_POSTGRES}"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 0},
+      "id": 6,
+      "options": {"cellHeight": "sm", "showHeader": true, "sortBy": [{"desc": true, "displayName": "started_at"}]},
+      "targets": [{
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT started_at, record_key, batch_id, attempt, status, current_stage, duration_seconds, peak_memory_rss_mb, llm_requests, qdrant_queries, error_type, error_message, run_id FROM tender_autofill_job_runs WHERE $__timeFilter(started_at) ORDER BY started_at DESC LIMIT 200",
+        "refId": "A"
+      }],
+      "title": "Recent executions",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "${DS_POSTGRES}"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 7},
+      "id": 1,
+      "options": {"cellHeight": "sm", "showHeader": true},
+      "targets": [{
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT run_id, record_key, batch_id, seldon_id, attempt, worker_name, status, current_stage, started_at, heartbeat_at, finished_at, duration_seconds, peak_memory_rss_mb, error_type, error_message FROM tender_autofill_job_runs WHERE run_id = ${run_id:sqlstring}",
+        "refId": "A"
+      }],
+      "title": "Execution",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "${DS_POSTGRES}"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 13},
+      "id": 2,
+      "options": {"cellHeight": "sm", "showHeader": true},
+      "targets": [{
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT llm_requests, llm_successes, llm_failures, llm_prompt_tokens, llm_completion_tokens, llm_total_tokens, llm_fallbacks, embedding_queries, embedding_http_requests, qdrant_queries, qdrant_http_requests, qdrant_results, documents_requested, documents_parsed, download_bytes, warnings_count FROM tender_autofill_job_runs WHERE run_id = ${run_id:sqlstring}",
+        "refId": "A"
+      }],
+      "title": "Counters",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "${DS_POSTGRES}"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 14, "w": 24, "x": 0, "y": 19},
+      "id": 3,
+      "options": {"cellHeight": "sm", "showHeader": true, "sortBy": [{"desc": false, "displayName": "event_time"}]},
+      "targets": [{
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT event_time, event_type, stage, status, service, operation, model, primary_model, duration_seconds, memory_rss_mb, http_status, prompt_tokens, completion_tokens, result_count, byte_count, error_type, error_message, details FROM tender_autofill_job_events WHERE run_id = ${run_id:sqlstring} ORDER BY event_time, event_id",
+        "refId": "A"
+      }],
+      "title": "Timeline",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "${DS_POSTGRES}"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 33},
+      "id": 4,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": false}, "orientation": "horizontal", "showValue": "always", "stacking": "none", "xTickLabelRotation": 0, "xTickLabelSpacing": 0},
+      "targets": [{
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT stage AS metric, duration_seconds AS value FROM tender_autofill_job_events WHERE run_id = ${run_id:sqlstring} AND event_type = 'stage' AND status IN ('completed','failed') ORDER BY event_id",
+        "refId": "A"
+      }],
+      "title": "Длительность стадий",
+      "type": "barchart"
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "${DS_POSTGRES}"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 33},
+      "id": 5,
+      "options": {"cellHeight": "sm", "showHeader": true},
+      "targets": [{
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT event_time, operation, status, primary_model, model AS actual_model, duration_seconds, prompt_tokens, completion_tokens, total_tokens, provider_request_id, error_message FROM tender_autofill_job_events WHERE run_id = ${run_id:sqlstring} AND service = 'llm' ORDER BY event_id",
+        "refId": "A"
+      }],
+      "title": "LLM calls",
+      "type": "table"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["tender-autofill", "python", "execution"],
+  "templating": {
+    "list": [
+      {
+        "current": {}, "hide": 0, "includeAll": false, "label": "PostgreSQL", "multi": false,
+        "name": "DS_POSTGRES", "options": [], "query": "grafana-postgresql-datasource", "refresh": 1,
+        "regex": "", "skipUrlSync": false, "type": "datasource"
+      },
+      {
+        "current": {}, "datasource": {"type": "grafana-postgresql-datasource", "uid": "${DS_POSTGRES}"},
+        "definition": "SELECT record_key FROM tender_autofill_job_runs GROUP BY record_key ORDER BY MAX(started_at) DESC LIMIT 1000",
+        "hide": 0, "includeAll": false, "label": "Tender recordKey", "multi": false, "name": "record_key",
+        "options": [], "query": "SELECT record_key FROM tender_autofill_job_runs GROUP BY record_key ORDER BY MAX(started_at) DESC LIMIT 1000",
+        "refresh": 1, "regex": "", "skipUrlSync": false, "sort": 0, "type": "query"
+      },
+      {
+        "current": {}, "datasource": {"type": "grafana-postgresql-datasource", "uid": "${DS_POSTGRES}"},
+        "definition": "SELECT run_id FROM tender_autofill_job_runs WHERE record_key = ${record_key:sqlstring} ORDER BY attempt DESC, started_at DESC",
+        "hide": 0, "includeAll": false, "label": "Attempt / run ID", "multi": false, "name": "run_id",
+        "options": [], "query": "SELECT run_id FROM tender_autofill_job_runs WHERE record_key = ${record_key:sqlstring} ORDER BY attempt DESC, started_at DESC",
+        "refresh": 2, "regex": "", "skipUrlSync": false, "sort": 0, "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-7d", "to": "now"},
+  "timezone": "browser",
+  "title": "Tender Autofill Python — Execution",
+  "uid": "tender-autofill-python-execution",
+  "version": 1
+}

@@ -1,0 +1,938 @@
+{
+  "name": "Daily Tender Controller + Finalizer",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tender_autofill_jobs\n\nSET\n\n    status = 'queued',\n\n    worker_execution_id = NULL,\n\n    started_at = NULL,\n\n    finished_at = NULL,\n\n    result_json = NULL,\n\n    error_message = 'Повторный запуск после ошибки Worker',\n\n    updated_at = NOW()\n\nWHERE\n\n    batch_id = 'form-2026-08-04-20260804122132'\n\n    AND status = 'processing'\n\nRETURNING\n\n    record_key,\n\n    seldon_id,\n\n    status,\n\n    attempt;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2256,
+        2144
+      ],
+      "id": "810babcc-a27f-483a-8b1f-26eb2e164a9e",
+      "name": "Postgres — закрыть зависшие jobs1",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -624,
+        1632
+      ],
+      "id": "4a7cd1f5-1e96-465e-82e1-124de177d380",
+      "name": "When chat message received",
+      "webhookId": "368f123a-4499-44c6-b2f2-48ed281b21fd"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH deleted_jobs AS (\n    DELETE FROM tender_autofill_jobs\n    WHERE batch_id = 'form-2026-08-04-20260804050907'\n    RETURNING record_key\n),\ndeleted_batch AS (\n    DELETE FROM tender_autofill_batches\n    WHERE batch_id = 'form-2026-08-04-20260804050907'\n    RETURNING batch_id\n)\nSELECT\n    (\n        SELECT COUNT(*)\n        FROM deleted_jobs\n    ) AS \"deletedJobs\",\n\n    (\n        SELECT COUNT(*)\n        FROM deleted_batch\n    ) AS \"deletedBatches\";\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1952,
+        2128
+      ],
+      "id": "64ede479-7765-453e-9e55-2b10ef402dba",
+      "name": "Postgres — закрыть зависшие jobs2",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. Queued jobs по времени не закрываются: при большой ежедневной пачке они могут законно ожидать несколько часов."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n\n    batch_id,\n\n    status,\n\n    expected_count,\n\n    created_at,\n\n    updated_at\n\nFROM tender_autofill_batches\n\nORDER BY created_at DESC\n\nLIMIT 10;\n\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1408,
+        2512
+      ],
+      "id": "0d0983b7-4627-4a8c-8ad5-b4702ed2641a",
+      "name": "просмотр созданых батчей",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. Queued jobs по времени не закрываются: при большой ежедневной пачке они могут законно ожидать несколько часов."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n\n    status,\n\n    COUNT(*) AS count\n\nFROM tender_autofill_jobs\n\nWHERE batch_id = 'form-2026-08-07-20260807073256'\n\nGROUP BY status\n\nORDER BY status;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -544,
+        1136
+      ],
+      "id": "b6966153-ae73-43d6-98f7-7735e1599568",
+      "name": "проверка сколько записей",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. Queued jobs по времени не закрываются: при большой ежедневной пачке они могут законно ожидать несколько часов."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*)\nFROM tender_autofill_jobs\n\nWHERE batch_id = 'form-2026-08-07-20260807073256';",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -672,
+        2576
+      ],
+      "id": "8cefdc71-092a-4f67-a7ce-e830e416022f",
+      "name": "проверка сколько записей2",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. Queued jobs по времени не закрываются: при большой ежедневной пачке они могут законно ожидать несколько часов."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n\n    record_key,\n\n    seldon_id,\n\n    status,\n\n    worker_execution_id,\n\n    started_at,\n\n    updated_at,\n\n    NOW() - updated_at AS inactive_for,\n\n    attempt\n\nFROM tender_autofill_jobs\n\nWHERE status IN ('dispatching', 'processing')\n\nORDER BY updated_at ASC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1744,
+        2752
+      ],
+      "id": "de3d16fb-ae06-46a7-ac1f-f315af380906",
+      "name": "Postgres — закрыть зависшие jobs",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. Queued jobs по времени не закрываются: при большой ежедневной пачке они могут законно ожидать несколько часов."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tender_autofill_jobs\n\nSET\n\n    status = 'queued',\n\n    worker_execution_id = NULL,\n\n    started_at = NULL,\n\n    finished_at = NULL,\n\n    result_json = NULL,\n\n    error_message = 'Повторный запуск после исправления Worker',\n\n    updated_at = NOW()\n\nWHERE status IN ('dispatching', 'processing')\n\n  AND updated_at < NOW() - INTERVAL '1 minutes'\n\nRETURNING\n\n    record_key,\n\n    seldon_id,\n\n    status,\n\n    attempt;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1376,
+        2816
+      ],
+      "id": "a572e44f-ce66-4ace-989f-2a9ce5e742fd",
+      "name": "вернуть зависшие записи в очередь",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. Queued jobs по времени не закрываются: при большой ежедневной пачке они могут законно ожидать несколько часов."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tender_autofill_jobs\n\nSET\n\n    status = 'queued',\n\n    worker_execution_id = NULL,\n\n    started_at = NULL,\n\n    finished_at = NULL,\n\n    result_json = NULL,\n\n    error_message = 'Повторный запуск после завершения Worker с ошибкой',\n\n    updated_at = NOW()\n\nWHERE worker_execution_id = '130791'\n\n  AND status = 'processing';",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1728,
+        2528
+      ],
+      "id": "3937c8f5-22a7-48a7-ba7b-753352404141",
+      "name": "повторный заупск зависшего тендерв",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. Queued jobs по времени не закрываются: при большой ежедневной пачке они могут законно ожидать несколько часов."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n\n    record_key,\n\n    batch_id,\n\n    seldon_id,\n\n    status,\n\n    attempt,\n\n    worker_execution_id,\n\n    error_message\n\nFROM tender_autofill_jobs\n\nWHERE status = 'failed'\n\nORDER BY updated_at DESC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2544,
+        2048
+      ],
+      "id": "b448af3c-aa5e-4215-abd1-f3238d0c216f",
+      "name": "failed тендеры",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tender_autofill_jobs\n\nSET\n\n    status = 'queued',\n\n    worker_execution_id = NULL,\n\n    started_at = NULL,\n\n    finished_at = NULL,\n\n    result_json = NULL,\n\n    error_message = 'Ручной повторный запуск после failed',\n\n    updated_at = NOW()\n\nWHERE\n\n    record_key = 'daily:form-2026-08-05-20260805071832:1:22812391'\n\n    AND status = 'failed'\n\nRETURNING\n\n    record_key,\n\n    batch_id,\n\n    seldon_id,\n\n    status,\n\n    attempt;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2736,
+        2160
+      ],
+      "id": "4a926a3d-c797-4da7-b46c-6d4f2b113140",
+      "name": "failed тендеры рестарт",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Controller + Finalizer\n\nОдин scheduled workflow выполняет две независимые ветки:\n\n**Controller:** держит максимум 10 активных Tender Worker.\n\n**Finalizer:** когда `completed + failed = expected`, формирует CSV и завершает batch.\n\nВажно:\n- выберите одинаковый PostgreSQL credential во всех Postgres-нодах;\n- в Execute Sub-workflow выберите импортированный controlled Worker;\n- SMTP-нода по-прежнему отключена до настройки;\n- один job = один Tender Worker execution.",
+        "height": 380,
+        "width": 670
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -48,
+        864
+      ],
+      "id": "a64aa7ed-08b2-43bd-965b-a1ffac53f7ed",
+      "name": "Инструкция — async finalizer"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -384,
+        1504
+      ],
+      "id": "07c77104-4e32-489b-b1f7-42dd9d397dc3",
+      "name": "Проверять готовые batch каждую минуту",
+      "disabled": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -384,
+        1696
+      ],
+      "id": "528692d9-0eeb-41d4-b9e6-101a0ee1f679",
+      "name": "Ручная проверка готовых batch"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH stale_dispatching AS (\n  UPDATE tender_autofill_jobs\n  SET\n    status = 'queued',\n    worker_execution_id = NULL,\n    started_at = NULL,\n    finished_at = NULL,\n    result_json = NULL,\n    error_message =\n      'Автоматический возврат в очередь: dispatching старше 30 минут.',\n    updated_at = NOW()\n  WHERE\n    status = 'dispatching'\n    AND updated_at < NOW() - INTERVAL '10 minutes'\n  RETURNING\n    batch_id,\n    record_key,\n    seldon_id\n),\nstale_processing AS (\n  UPDATE tender_autofill_jobs\n  SET\n    status = 'queued',\n    worker_execution_id = NULL,\n    started_at = NULL,\n    finished_at = NULL,\n    result_json = NULL,\n    error_message = CONCAT(\n      'Автоматический возврат в очередь: processing старше 30 минут. ',\n      'Предыдущий executionId=',\n      COALESCE(worker_execution_id, 'unknown')\n    ),\n    updated_at = NOW()\n  WHERE\n    status = 'processing'\n    AND started_at IS NOT NULL\n    AND started_at < NOW() - INTERVAL '30 minutes'\n  RETURNING\n    batch_id,\n    record_key,\n    seldon_id\n),\nreset_finalizing AS (\n  UPDATE tender_autofill_batches\n  SET\n    status = 'processing',\n    finished_at = NULL,\n    updated_at = NOW()\n  WHERE\n    status = 'finalizing'\n    AND updated_at < NOW() - INTERVAL '30 minutes'\n  RETURNING batch_id\n)\nSELECT\n  (SELECT COUNT(*) FROM stale_dispatching)::integer\n    AS \"staleDispatchingRequeued\",\n  (SELECT COUNT(*) FROM stale_processing)::integer\n    AS \"staleProcessingRequeued\",\n  (SELECT COUNT(*) FROM reset_finalizing)::integer\n    AS \"staleFinalizersReset\";",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -96,
+        1584
+      ],
+      "id": "07cd9656-7f0d-429b-8f90-036d4d593a33",
+      "name": "Postgres — вернуть processing старше 30 минут",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. После этой ноды отдельная ветка автоматически повторяет завершившиеся failed jobs."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH counts AS (\n  SELECT\n    batch_id,\n    COUNT(*)::integer AS total_count,\n\n    COUNT(*) FILTER (\n      WHERE status = 'completed'\n    )::integer AS completed_count,\n\n    COUNT(*) FILTER (\n      WHERE status = 'failed'\n    )::integer AS failed_count,\n\n    COUNT(*) FILTER (\n      WHERE status IN ('completed', 'failed')\n    )::integer AS terminal_count,\n\n    COUNT(*) FILTER (\n      WHERE\n        status = 'failed'\n        AND input_valid = TRUE\n        AND attempt < $1::integer\n    )::integer AS retryable_failed_count\n\n  FROM tender_autofill_jobs\n  GROUP BY batch_id\n),\ncandidate AS (\n  SELECT b.batch_id\n  FROM tender_autofill_batches AS b\n  JOIN counts\n    ON counts.batch_id = b.batch_id\n  WHERE\n    b.status = 'processing'\n    AND counts.terminal_count >= b.expected_count\n    AND counts.retryable_failed_count = 0\n  ORDER BY b.created_at\n  FOR UPDATE OF b SKIP LOCKED\n  LIMIT 1\n),\nclaimed AS (\n  UPDATE tender_autofill_batches AS b\n  SET\n    status = 'finalizing',\n    completed_count = counts.completed_count,\n    failed_count = counts.failed_count,\n    updated_at = NOW()\n  FROM candidate\n  JOIN counts\n    ON counts.batch_id = candidate.batch_id\n  WHERE b.batch_id = candidate.batch_id\n  RETURNING\n    b.batch_id,\n    b.batch_date,\n    b.expected_count,\n    b.valid_count,\n    b.invalid_count,\n    b.completed_count,\n    b.failed_count,\n    b.source_files,\n    b.created_at\n)\nSELECT\n  batch_id AS \"batchId\",\n  batch_date::text AS \"batchDate\",\n  expected_count AS \"expectedCount\",\n  valid_count AS \"validCount\",\n  invalid_count AS \"invalidCount\",\n  completed_count AS \"completedCount\",\n  failed_count AS \"failedCount\",\n  source_files AS \"sourceFiles\",\n  created_at AS \"createdAt\"\nFROM claimed;",
+        "options": {
+          "queryReplacement": "={{ [3] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        416,
+        1584
+      ],
+      "id": "d4aa10de-023a-426e-8a21-30ff5813b390",
+      "name": "Postgres — захватить готовый batch",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Захватывает batch только после завершения всех jobs и только когда не осталось failed jobs, доступных для автоматического повтора (attempt < 3). После исчерпания трёх запусков постоянные ошибки допускаются в итоговый CSV."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  record_key AS \"recordKey\",\n  record_key AS \"cacheKey\",\n  batch_id AS \"batchId\",\n  report_id AS \"reportId\",\n  report_name AS \"reportName\",\n  seldon_id AS \"seldonId\",\n  etp_id AS \"etpId\",\n  row_number AS \"rowNumber\",\n  CASE\n    WHEN status = 'completed' THEN 'completed'\n    ELSE 'error'\n  END AS \"processingStatus\",\n  result_json AS \"resultJson\",\n  input_json AS \"inputJson\",\n  report_fields AS \"reportFields\",\n  error_message AS \"errorMessage\",\n  attempt AS \"attempt\",\n  created_at AS \"createdAt\",\n  started_at AS \"startedAt\",\n  finished_at AS \"finishedAt\"\nFROM tender_autofill_jobs\nWHERE batch_id = $1\nORDER BY\n  report_id NULLS LAST,\n  row_number NULLS LAST,\n  record_key;",
+        "options": {
+          "queryReplacement": "={{ [String($json.batchId)] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        688,
+        1584
+      ],
+      "id": "4cf7f513-11a3-47f8-af49-996440ca677a",
+      "name": "Postgres — получить jobs batch",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input\n  .all()\n  .map(item => item.json || {});\n\nlet batch = {};\n\ntry {\n  batch =\n    $('Postgres — захватить готовый batch').first().json || {};\n} catch {}\n\nfunction objectValue(value, fallback) {\n  if (\n    value &&\n    typeof value === 'object' &&\n    !Array.isArray(value)\n  ) {\n    return value;\n  }\n\n  if (typeof value === 'string' && value.trim()) {\n    try {\n      const parsed = JSON.parse(value);\n\n      if (\n        parsed &&\n        typeof parsed === 'object' &&\n        !Array.isArray(parsed)\n      ) {\n        return parsed;\n      }\n    } catch {}\n  }\n\n  return fallback;\n}\n\nconst records = rows.map(row => {\n  const reportFields =\n    objectValue(row.reportFields, {});\n\n  let resultJson =\n    objectValue(row.resultJson, null);\n\n  if (\n    String(row.processingStatus || '').toLowerCase() !== 'completed'\n  ) {\n    resultJson = {\n      reportId:\n        Number(row.reportId) || null,\n\n      seldonId:\n        row.seldonId || null,\n\n      reportFields,\n\n      fields: {\n        tenderStatus:\n          'Ошибка обработки',\n\n        tenderStatusReason:\n          'Ошибка workflow',\n\n        tenderStatusNote:\n          String(\n            row.errorMessage ||\n            'Tender worker завершился с ошибкой.'\n          )\n      },\n\n      warnings: [\n        String(\n          row.errorMessage ||\n          'Tender worker завершился с ошибкой.'\n        )\n      ]\n    };\n  }\n\n  return {\n    ...row,\n\n    reportFields,\n\n    resultJson,\n\n    recordKey:\n      row.recordKey ||\n      row.cacheKey\n  };\n});\n\nlet sourceFiles =\n  batch.sourceFiles;\n\nif (typeof sourceFiles === 'string') {\n  try {\n    sourceFiles = JSON.parse(sourceFiles);\n  } catch {\n    sourceFiles = [];\n  }\n}\n\nif (!Array.isArray(sourceFiles)) {\n  sourceFiles = [];\n}\n\nreturn [\n  {\n    json: {\n      status:\n        'ready_for_csv',\n\n      batchId:\n        batch.batchId || null,\n\n      batchDate:\n        batch.batchDate || null,\n\n      createdAt:\n        batch.createdAt || null,\n\n      finalizedAt:\n        new Date().toISOString(),\n\n      expectedCount:\n        Number(batch.expectedCount || records.length),\n\n      completedCount:\n        Number(batch.completedCount || 0),\n\n      failedCount:\n        Number(batch.failedCount || 0),\n\n      sourceFiles,\n      records\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        1584
+      ],
+      "id": "6584de8e-c15b-43e2-83fa-cd02aeca1e6d",
+      "name": "Собрать Daily Batch Summary из PostgreSQL",
+      "notesInFlow": true,
+      "notes": "Преобразует строки jobs в формат старого Daily Batch Summary. Failed jobs также попадают в CSV с пометкой «Ошибка обработки»."
+    },
+    {
+      "parameters": {
+        "jsCode": "const summary = $input.first().json || {};\nconst records = Array.isArray(summary.records) ? summary.records : [];\n\nfunction parseJson(value) {\n  if (!value) return {};\n  if (typeof value === 'object') return value;\n\n  try {\n    return JSON.parse(String(value));\n  } catch {\n    return {};\n  }\n}\n\nfunction unwrap(value) {\n  if (\n    value &&\n    typeof value === 'object' &&\n    !Array.isArray(value) &&\n    Object.prototype.hasOwnProperty.call(value, 'value')\n  ) {\n    return value.value;\n  }\n\n  return value;\n}\n\nfunction field(result, name) {\n  return unwrap(result?.fields?.[name]);\n}\n\nfunction firstDefined(...values) {\n  for (const value of values) {\n    const unwrapped = unwrap(value);\n\n    if (\n      unwrapped !== undefined &&\n      unwrapped !== null &&\n      String(unwrapped).trim() !== ''\n    ) {\n      return unwrapped;\n    }\n  }\n\n  return '';\n}\n\nfunction cell(value) {\n  const unwrapped = unwrap(value);\n\n  if (unwrapped === undefined || unwrapped === null) return '';\n\n  if (Array.isArray(unwrapped)) {\n    return unwrapped\n      .map((item) =>\n        typeof item === 'object' ? JSON.stringify(item) : String(item)\n      )\n      .join(', ');\n  }\n\n  if (typeof unwrapped === 'object') {\n    return JSON.stringify(unwrapped);\n  }\n\n  return String(unwrapped);\n}\n\nfunction escapeCsv(value) {\n  const text = cell(value);\n\n  if (/[;\"\\r\\n]/.test(text)) {\n    return `\"${text.replace(/\"/g, '\"\"')}\"`;\n  }\n\n  return text;\n}\n\nfunction decision(result) {\n  const value =\n    result?.decision ||\n    result?.decisionResult ||\n    result?.debug?.tenderDecision ||\n    {};\n\n  return value && typeof value === 'object' ? value : {};\n}\n\nconst REPORTS = {\n  1: {\n    slug: '223',\n    title: '223-ФЗ',\n    columns: [\n      { header: 'ID', key: 'ID' },\n      { header: '', key: '0' },\n      { header: 'Осталось дней', key: 'Осталось дней' },\n      { header: 'Статус закупки', key: 'Статус закупки' },\n      { header: 'Электронная площадка', key: 'Электронная площадка' },\n      { header: 'Способ закупки', key: 'Способ закупки' },\n      { header: 'Наименование', key: 'Наименование' },\n      { header: 'Организатор', key: 'Организатор' },\n      { header: 'Начальная цена', key: 'Начальная цена' },\n      { header: 'Конечная цена', key: 'Конечная цена' },\n      { header: 'Валюта', key: 'Валюта' },\n      { header: 'Дата начала приёма заявок', key: 'Дата начала приёма заявок' },\n      { header: 'Дата окончания приёма заявок', key: 'Дата окончания приёма заявок' },\n      { header: 'Дата изменения', key: 'Дата изменения' },\n      { header: '№ извещения', key: '№ извещения' },\n      { header: 'Ссылка на тендер', key: 'Ссылка на тендер' },\n      { header: 'Регион заказчика/организатора', key: 'Регион заказчика/организатора' },\n      { header: 'ИНН заказчика/организатора', key: 'ИНН заказчика/организатора' },\n      { header: 'Дата проведения аукциона', key: 'Дата проведения аукциона' },\n      { header: 'Размер обеспечения заявки', key: 'Размер обеспечения заявки' },\n      { header: 'Код ТО', key: 'Код ТО' },\n      { header: 'Код ФЗ', key: 'Код ФЗ' },\n    ],\n  },\n  2: {\n    slug: 'gos',\n    title: 'Гос',\n    columns: [\n      { header: 'ID', key: 'ID' },\n      { header: 'Степень завершения', key: 'Степень завершения' },\n      { header: 'Осталось дней', key: 'Осталось дней' },\n      { header: 'Статус закупки', key: 'Статус закупки' },\n      { header: '№ извещения', key: '№ извещения' },\n      { header: 'Способ закупки', key: 'Способ закупки' },\n      { header: 'Наименование', key: 'Наименование' },\n      { header: 'Название заказчика', key: 'Название заказчика' },\n      { header: 'Начальная цена', key: 'Начальная цена' },\n      { header: 'Конечная цена', key: 'Конечная цена' },\n      { header: 'Валюта', key: 'Валюта' },\n      { header: 'Дата начала приёма заявок', key: 'Дата начала приёма заявок' },\n      { header: 'Дата окончания приёма заявок', key: 'Дата окончания приёма заявок' },\n      { header: 'Дата изменения', key: 'Дата изменения' },\n      { header: 'Ссылка на тендер', key: 'Ссылка на тендер' },\n      { header: 'Регион заказчика/организатора', key: 'Регион заказчика/организатора' },\n      { header: 'ИНН заказчика', key: 'ИНН заказчика' },\n      { header: 'Размер обеспечения заявки', key: 'Размер обеспечения заявки' },\n      { header: 'Дата проведения аукциона', key: 'Дата проведения аукциона' },\n      { header: 'Размер обеспечения контракта', key: 'Размер обеспечения контракта' },\n      { header: 'Торговая площадка', key: 'Торговая площадка' },\n      { header: 'Код ТО', key: 'Код ТО' },\n      { header: 'Код ФЗ', key: 'Код ФЗ' },\n    ],\n  },\n  3: {\n    slug: 'kom',\n    title: 'Ком',\n    columns: [\n      { header: 'ID', key: 'ID' },\n      { header: '', key: '0' },\n      { header: 'Степень завершения', key: 'Степень завершения' },\n      { header: 'Осталось дней', key: 'Осталось дней' },\n      { header: 'Статус закупки', key: 'Статус закупки' },\n      { header: 'Способ закупки', key: 'Способ закупки' },\n      { header: 'Источник', key: 'Источник' },\n      { header: 'Наименование', key: 'Наименование' },\n      { header: 'Название заказчика', key: 'Название заказчика' },\n      { header: 'Начальная цена', key: 'Начальная цена' },\n      { header: 'Валюта', key: 'Валюта' },\n      { header: 'Дата начала приёма заявок', key: 'Дата начала приёма заявок' },\n      { header: 'Дата окончания приёма заявок', key: 'Дата окончания приёма заявок' },\n      { header: 'Дата изменения', key: 'Дата изменения' },\n      { header: 'Ссылка на тендер', key: 'Ссылка на тендер' },\n      { header: 'Регион заказчика/организатора', key: 'Регион заказчика/организатора' },\n      { header: 'ИНН заказчика', key: 'ИНН заказчика' },\n      { header: 'Код ТО', key: 'Код ТО' },\n      { header: 'Код ФЗ', key: 'Код ФЗ' },\n    ],\n  },\n};\n\nconst AUTOFILL_COLUMNS = [\n  ['Дата заведения', ({ result }) => field(result, 'dateCreated')],\n  ['Окончание подачи дата', ({ result }) => field(result, 'submissionDeadlineDate')],\n  ['Окончание подачи время', ({ result }) => field(result, 'submissionDeadlineTime')],\n  ['Ссылка на тендер (автозаполнение)', ({ record, result }) => firstDefined(\n    field(result, 'tenderUrlSource'),\n    result.tenderUrl,\n    result.sourceTender?.tenderLink,\n    record.tenderUrl\n  )],\n  ['Федеральный закон', ({ result }) => field(result, 'federalLaw')],\n  ['ГосОборонЗаказ', ({ result }) => field(result, 'stateDefenseOrder')],\n  ['Статус тендера', ({ result }) => firstDefined(\n    field(result, 'tenderStatus'),\n    decision(result).status,\n    decision(result).decision\n  )],\n  ['Причина статуса', ({ result }) => firstDefined(\n    field(result, 'tenderStatusReason'),\n    decision(result).reason,\n    decision(result).primaryReason\n  )],\n  ['Примечание к статусу', ({ result }) => firstDefined(\n    field(result, 'tenderStatusNote'),\n    decision(result).note\n  )],\n  ['Тендерная группа', ({ result }) => field(result, 'tenderGroup')],\n  ['Дата подведения итогов', ({ result }) => field(result, 'resultDate')],\n  ['Начальная цена (автозаполнение)', ({ result }) => field(result, 'initialPrice')],\n  ['Конечная цена (автозаполнение)', ({ result }) => field(result, 'finalPrice')],\n  ['Дата заключения договора', ({ result }) => field(result, 'contractDate')],\n  ['Условия отгрузки', ({ result }) => field(result, 'deliveryType')],\n  ['Срок поставки партии дней', ({ result }) => field(result, 'deliveryBatchDays')],\n  ['Срок поставки', ({ result }) => field(result, 'deliveryDays')],\n  ['Срок поставки время', ({ result }) => firstDefined(\n    field(result, 'deliveryTime'),\n    field(result, 'deliveryDate')\n  )],\n  ['Отсрочка оплаты дней', ({ result }) => field(result, 'paymentDelayDays')],\n  ['Лот делимый', ({ result }) => field(result, 'lotDivisible')],\n  ['Примечание к постановке', ({ result }) => field(result, 'deliveryNote')],\n  ['Код контрагента', ({ result }) => field(result, 'counterpartyCode')],\n  ['название контрагента', ({ result }) => field(result, 'counterpartyName')],\n  ['ИНН контрагента', ({ result }) => field(result, 'counterpartyInn')],\n  ['КПП контрагента', ({ result }) => field(result, 'counterpartyKpp')],\n  ['ЦКГ', ({ result }) => field(result, 'counterpartyCkg')],\n  ['Потенциал', ({ result }) => field(result, 'counterpartyPotential')],\n  ['Сделка', ({ result }) => field(result, 'deal')],\n  ['Договор', ({ result }) => field(result, 'contract')],\n  ['Примечание к контрагенту', ({ result }) => field(result, 'counterpartyNote')],\n  ['ОП', ({ result }) => field(result, 'op')],\n  ['Юридическое лицо ЭТМ', () => ''],\n  ['Тендер подан', ({ result }) => field(result, 'tenderSubmittedDate')],\n  ['Тендер выигран', ({ result }) => field(result, 'tenderWonDate')],\n  ['Обеспечение заявки', ({ result }) => field(result, 'applicationSecurity')],\n  ['Обеспечение контракта', ({ result }) => field(result, 'contractSecurity')],\n  ['Обеспечение гарантийных обязательств', ({ result }) => field(result, 'warrantySecurity')],\n  ['Гарантийный срок мес', ({ result }) => field(result, 'warrantyMonths')],\n  ['Национальный режим', ({ result }) => field(result, 'nationalRegime')],\n  ['Спецсчёт', ({ result }) => field(result, 'specialAccount')],\n  ['Статус обработки Worker', ({ record }) => firstDefined(\n    record.processingStatus,\n    record.status\n  )],\n  ['Количество попыток Worker', ({ record }) => firstDefined(\n    record.attempt,\n    0\n  )],\n  ['Ошибка Worker', ({ record }) => firstDefined(\n    record.errorMessage\n  )],\n];\n\nconst prepared = records.map((record) => ({\n  record,\n  result: parseJson(record.resultJson),\n}));\n\nconst batchDate =\n  summary.batchDate ||\n  new Intl.DateTimeFormat('en-CA', {\n    timeZone: 'Europe/Moscow',\n    year: 'numeric',\n    month: '2-digit',\n    day: '2-digit',\n  }).format(new Date());\n\nfunction reportFields(entry) {\n  // Главный резервный источник — input_json задания.\n  // Dispatcher сохраняет туда исходную строку CSV целиком.\n  const inputJson = parseJson(entry.record?.inputJson);\n\n  const candidates = [\n    inputJson?.reportFields,\n    inputJson,\n    entry.record?.reportFields,\n    entry.result?.sourceTender?.reportFields,\n    entry.result?.sourceReportFields,\n    entry.result?.reportFields,\n  ];\n\n  const merged = {};\n\n  for (const candidate of candidates) {\n    if (\n      candidate &&\n      typeof candidate === 'object' &&\n      !Array.isArray(candidate)\n    ) {\n      Object.assign(merged, candidate);\n    }\n  }\n\n  return merged;\n}\n\nfunction sourceValue(entry, column) {\n  const source = reportFields(entry);\n  const key = column.key;\n\n  if (key === 'ID') {\n    return firstDefined(\n      source.ID,\n      source.SeldonID,\n      entry.result?.seldonId,\n      entry.record?.seldonId\n    );\n  }\n\n  if (key === 'Код ТО') {\n    return firstDefined(\n      source[key],\n      entry.result?.toCode,\n      field(entry.result, 'toCode'),\n      entry.record?.toCode\n    );\n  }\n\n  if (key === 'Код ФЗ') {\n    return firstDefined(\n      source[key],\n      entry.result?.lawCode,\n      entry.record?.lawCode\n    );\n  }\n\n  return firstDefined(source[key]);\n}\n\nconst availableReportIds = [...new Set(\n  prepared\n    .map((entry) => Number(\n      entry.result?.reportId ??\n      entry.record?.reportId\n    ))\n    .filter((reportId) => [1, 2, 3].includes(reportId))\n)].sort((a, b) => a - b);\n\nif (!availableReportIds.length) {\n  throw new Error('Не найдено результатов для формирования CSV 223, gos или kom.');\n}\n\nreturn availableReportIds.map((reportId) => {\n  const config = REPORTS[reportId];\n\n  const reportRecords = prepared.filter((entry) =>\n    Number(\n      entry.result?.reportId ??\n      entry.record?.reportId\n    ) === reportId\n  );\n\n  const headers = [\n    ...config.columns.map((column) => column.header),\n    ...AUTOFILL_COLUMNS.map(([title]) => title),\n  ];\n\n  const lines = [\n    headers.map(escapeCsv).join(';'),\n    ...reportRecords.map((entry) => {\n      const sourceCells = config.columns.map((column) =>\n        escapeCsv(sourceValue(entry, column))\n      );\n\n      const autofillCells = AUTOFILL_COLUMNS.map(([, resolver]) =>\n        escapeCsv(resolver(entry))\n      );\n\n      return [...sourceCells, ...autofillCells].join(';');\n    }),\n  ];\n\n  return {\n    json: {\n      status: summary.status,\n      batchId: summary.batchId,\n      batchDate,\n      finishedAt: summary.finishedAt,\n      reportId,\n      reportName: config.title,\n      processedCount: summary.processedCount,\n      invalidCount: summary.invalidCount,\n      totalHandled: summary.totalHandled,\n      csvRowCount: reportRecords.length,\n      csvColumnCount: headers.length,\n      csvText: '\\uFEFF' + lines.join('\\r\\n'),\n      fileName: `daily_autofill_${config.slug}_${batchDate}.csv`,\n    },\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        1584
+      ],
+      "id": "2c688aa6-f1f6-494e-8028-6486ac7aad35",
+      "name": "Сформировать CSV по типам тендеров",
+      "notesInFlow": true,
+      "notes": "Использует проверенную схему колонок из Daily Tender Preprocessor. Исходные reportFields объединяются с result_json worker."
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "csvText",
+        "options": {
+          "encoding": "utf8",
+          "fileName": "={{ $json.fileName }}"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        1456,
+        1584
+      ],
+      "id": "0f588cf0-9e64-4077-a10b-8fb3e0a82d14",
+      "name": "Создать CSV binary"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nlet batch = {};\n\ntry {\n  batch =\n    $('Собрать Daily Batch Summary из PostgreSQL').first().json || {};\n} catch {}\n\nconst binary = {};\nconst files = [];\n\nfor (const item of items) {\n  const slug =\n    String(\n      item.json?.reportName ||\n      item.json?.reportSlug ||\n      item.json?.slug ||\n      'report'\n    )\n      .toLowerCase()\n      .replace(/[^a-z0-9а-я_-]+/gi, '_');\n\n  const sourceBinary =\n    item.binary?.data;\n\n  if (!sourceBinary) {\n    continue;\n  }\n\n  const binaryKey =\n    `file_${slug}`;\n\n  binary[binaryKey] =\n    sourceBinary;\n\n  files.push({\n    binaryKey,\n    fileName:\n      sourceBinary.fileName ||\n      item.json?.fileName ||\n      `${slug}.csv`\n  });\n}\n\nif (!files.length) {\n  throw new Error(\n    'Finalizer не сформировал ни одного CSV-файла.'\n  );\n}\n\nreturn [\n  {\n    json: {\n      batchId:\n        batch.batchId || null,\n\n      batchDate:\n        batch.batchDate || null,\n\n      expectedCount:\n        Number(batch.expectedCount || 0),\n\n      completedCount:\n        Number(batch.completedCount || 0),\n\n      failedCount:\n        Number(batch.failedCount || 0),\n\n      files,\n\n      attachmentFields:\n        files\n          .map(file => file.binaryKey)\n          .join(','),\n\n      emailSubject:\n        `Daily autofill ${batch.batchDate || ''} — batch ${batch.batchId || ''}`,\n\n      emailText:\n        [\n          `Обработка batch ${batch.batchId || ''} завершена.`,\n          `Всего заданий: ${Number(batch.expectedCount || 0)}.`,\n          `Успешно: ${Number(batch.completedCount || 0)}.`,\n          `С ошибкой: ${Number(batch.failedCount || 0)}.`,\n          `Файлов: ${files.length}.`\n        ].join('\\n')\n    },\n\n    binary\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1728,
+        1584
+      ],
+      "id": "92ed5af1-8799-4864-baa4-d859a3e3a36b",
+      "name": "Собрать вложения",
+      "notesInFlow": true,
+      "notes": "Объединяет 1–3 созданных CSV в один item. Список binary-полей для SMTP формируется автоматически."
+    },
+    {
+      "parameters": {
+        "fromEmail": "a1@etm.spb.ru",
+        "toEmail": "erofeev_dk@etm.ru",
+        "subject": "={{ $json.emailSubject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.emailText }}",
+        "options": {
+          "attachments": "={{ $json.attachmentFields }}"
+        }
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1984,
+        1584
+      ],
+      "id": "68f6992a-7315-49af-ba60-d9040f713f0f",
+      "name": "Отправить итоговые CSV — настройте SMTP",
+      "notesInFlow": true,
+      "webhookId": "3aa587a7-abea-4a15-b0c0-890b537e05b0",
+      "credentials": {
+        "smtp": {
+          "id": "MpXuYJHmVbi5UsWx",
+          "name": "a1@etm.spb.ru"
+        }
+      },
+      "notes": "Нода намеренно отключена. Укажите from/to, выберите SMTP credential и включите её. attachments получает автоматически: file_223,file_gos,file_kom или только реально сформированные файлы."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tender_autofill_batches\nSET\n  status = 'finished',\n  finished_at = NOW(),\n  updated_at = NOW()\nWHERE batch_id = $1\nRETURNING\n  batch_id AS \"batchId\",\n  batch_date::text AS \"batchDate\",\n  expected_count AS \"expectedCount\",\n  completed_count AS \"completedCount\",\n  failed_count AS \"failedCount\",\n  status,\n  finished_at AS \"finishedAt\";",
+        "options": {
+          "queryReplacement": "={{ [String($('Собрать вложения').first().json.batchId)] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2240,
+        1584
+      ],
+      "id": "c33b08f7-ce1b-469d-8708-05778a941739",
+      "name": "Postgres — batch finished",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const finished =\n  $input.first().json || {};\n\nlet filesItem = {\n  json: {},\n  binary: {}\n};\n\ntry {\n  filesItem =\n    $('Собрать вложения').first() || filesItem;\n} catch {}\n\nreturn [\n  {\n    json: {\n      ...(filesItem.json || {}),\n      ...finished,\n      status:\n        'finished'\n    },\n\n    binary:\n      filesItem.binary || {}\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2496,
+        1584
+      ],
+      "id": "ad085279-2b97-4a46-a828-6b3601c92b14",
+      "name": "Готовый batch и файлы",
+      "notesInFlow": true,
+      "notes": "Финальный execution output содержит status batch и все сформированные CSV binary."
+    },
+    {
+      "parameters": {
+        "content": "## Контроллер нагрузки: максимум 10\n\nКаждые 60 секунд выполняется скользящее окно:\n\n1. Считаются jobs `dispatching + processing`.\n2. Свободные слоты = `10 − active`.\n3. Из PostgreSQL забирается только столько `queued` jobs, сколько есть свободных слотов.\n4. Они становятся `dispatching` и запускаются через Execute Sub-workflow.\n5. После `completed/failed` слот освобождается.\n\nПример: активно 7 → запустить ещё 3.\n\nЭто ограничивает только Tender Autofill и не меняет общую concurrency остальных workflow n8n.",
+        "height": 410,
+        "width": 690
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        656,
+        848
+      ],
+      "id": "310a62b4-1c4f-40aa-a91a-8615a812598b",
+      "name": "Инструкция — окно максимум 10"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH controller_lock AS (\n  SELECT pg_advisory_xact_lock(\n    hashtext('tender_autofill_controller_window_10')::bigint\n  )\n),\nactive_jobs AS (\n  SELECT\n    COUNT(*)::integer AS active_count\n  FROM tender_autofill_jobs AS j\n  JOIN tender_autofill_batches AS b\n    ON b.batch_id = j.batch_id\n  CROSS JOIN controller_lock\n  WHERE\n    j.status IN ('dispatching', 'processing')\n    AND b.status = 'processing'\n),\navailable_slots AS (\n  SELECT\n    GREATEST(\n      0,\n      $1::integer - active_count\n    )::integer AS free_slots\n  FROM active_jobs\n),\npicked_jobs AS (\n  SELECT\n    j.record_key\n  FROM tender_autofill_jobs AS j\n  JOIN tender_autofill_batches AS b\n    ON b.batch_id = j.batch_id\n  CROSS JOIN available_slots AS slots\n  WHERE\n    j.status = 'queued'\n    AND j.input_valid = TRUE\n    AND b.status = 'processing'\n    AND slots.free_slots > 0\n  ORDER BY\n    b.created_at,\n    j.report_id NULLS LAST,\n    j.row_number NULLS LAST,\n    j.record_key\n  FOR UPDATE OF j SKIP LOCKED\n  LIMIT (\n    SELECT free_slots\n    FROM available_slots\n  )\n),\nclaimed_jobs AS (\n  UPDATE tender_autofill_jobs AS j\n  SET\n    status = 'dispatching',\n    error_message = '',\n    worker_execution_id = NULL,\n    started_at = NULL,\n    finished_at = NULL,\n    updated_at = NOW()\n  FROM picked_jobs AS picked\n  WHERE j.record_key = picked.record_key\n  RETURNING\n    j.record_key,\n    j.batch_id,\n    j.input_json\n),\ndispatch_counts AS (\n  SELECT\n    batch_id,\n    COUNT(*)::integer AS dispatched_now\n  FROM claimed_jobs\n  GROUP BY batch_id\n),\nbatch_update AS (\n  UPDATE tender_autofill_batches AS b\n  SET\n    dispatched_count =\n      b.dispatched_count + dispatch_counts.dispatched_now,\n    dispatched_at =\n      COALESCE(b.dispatched_at, NOW()),\n    updated_at = NOW()\n  FROM dispatch_counts\n  WHERE b.batch_id = dispatch_counts.batch_id\n  RETURNING b.batch_id\n)\nSELECT\n  claimed.record_key AS \"jobRecordKey\",\n  claimed.batch_id AS \"batchId\",\n  claimed.input_json AS payload,\n  $1::integer AS \"maxTenderActive\"\nFROM claimed_jobs AS claimed\nLEFT JOIN batch_update AS updated_batch\n  ON updated_batch.batch_id = claimed.batch_id;",
+        "options": {
+          "queryReplacement": "={{ [5] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        448,
+        1328
+      ],
+      "id": "de2f2eaf-8a99-492a-9aae-3d9f78805eec",
+      "name": "Postgres — занять свободные слоты до 10",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Исправленный полный SQL. Не вставляйте сюда диагностические SELECT-запросы. Нода считает только активные jobs из batch со status=processing и занимает свободные слоты до общего лимита 10."
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(item => {\n  const row = item.json || {};\n\n  let payload = row.payload;\n\n  if (typeof payload === 'string') {\n    try {\n      payload = JSON.parse(payload);\n    } catch {\n      payload = {};\n    }\n  }\n\n  if (\n    !payload ||\n    typeof payload !== 'object' ||\n    Array.isArray(payload)\n  ) {\n    payload = {};\n  }\n\n  return {\n    json: {\n      ...payload,\n\n      jobRecordKey:\n        row.jobRecordKey,\n\n      batchId:\n        row.batchId ||\n        payload.batchId ||\n        null,\n\n      asyncDispatch:\n        true,\n\n      maxTenderActive:\n        Number(row.maxTenderActive || 5),\n\n      controllerDispatchAt:\n        new Date().toISOString()\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        1328
+      ],
+      "id": "1a7ac093-9ae8-4983-bbab-65889757eb22",
+      "name": "Подготовить jobs для Tender Worker",
+      "notesInFlow": true,
+      "notes": "Разворачивает input_json захваченных jobs. На выходе будет от 0 до 10 items."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "IC4tNX9mOhTsAYnG",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/IC4tNX9mOhTsAYnG",
+          "cachedResultName": "ETM-prod — Tender Autofill Worker"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "806bfc0e-5471-4779-bccd-23e50dfc6e9a",
+      "name": "Запустить свободные Tender Worker",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        976,
+        1328
+      ],
+      "notesInFlow": true,
+      "notes": "Запускает только jobs, которые атомарно переведены в dispatching. Нода не ждёт результата. После импорта обязательно выберите новый workflow «Tender Autofill Worker — controlled window 10»."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH retry_lock AS (\n  SELECT pg_advisory_xact_lock(\n    hashtext('tender_autofill_failed_retry_max3')::bigint\n  )\n),\nrequeued AS (\n  UPDATE tender_autofill_jobs AS j\n  SET\n    status = 'queued',\n    worker_execution_id = NULL,\n    started_at = NULL,\n    finished_at = NULL,\n    result_json = NULL,\n    error_message = CONCAT(\n      'Автоматический повтор после failed. ',\n      'Завершена попытка ',\n      j.attempt,\n      ' из 3. Предыдущая ошибка: ',\n      COALESCE(NULLIF(j.error_message, ''), 'не указана')\n    ),\n    updated_at = NOW()\n  FROM tender_autofill_batches AS b\n  CROSS JOIN retry_lock\n  WHERE\n    j.batch_id = b.batch_id\n    AND j.status = 'failed'\n    AND j.input_valid = TRUE\n    AND COALESCE(j.attempt, 0) < 3\n    AND b.status IN ('processing', 'finalizing')\n  RETURNING\n    j.batch_id,\n    j.record_key,\n    j.seldon_id,\n    j.attempt\n),\nbatch_update AS (\n  UPDATE tender_autofill_batches AS b\n  SET\n    status = 'processing',\n    failed_count = GREATEST(\n      0,\n      COALESCE(b.failed_count, 0) - counts.requeued_count\n    ),\n    finished_at = NULL,\n    updated_at = NOW()\n  FROM (\n    SELECT\n      batch_id,\n      COUNT(*)::integer AS requeued_count\n    FROM requeued\n    GROUP BY batch_id\n  ) AS counts\n  WHERE b.batch_id = counts.batch_id\n  RETURNING b.batch_id\n)\nSELECT\n  COUNT(*)::integer AS \"requeuedFailedJobs\",\n  COALESCE(\n    jsonb_agg(\n      jsonb_build_object(\n        'batchId', batch_id,\n        'recordKey', record_key,\n        'seldonId', seldon_id,\n        'previousAttempt', attempt\n      )\n      ORDER BY batch_id, record_key\n    ) FILTER (WHERE record_key IS NOT NULL),\n    '[]'::jsonb\n  ) AS \"requeuedItems\"\nFROM requeued;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        160,
+        1584
+      ],
+      "id": "0c1f51cf-88cb-4b12-93ef-2213d47cbeee",
+      "name": "Postgres — повторить failed до 3 попыток",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Запускается только когда весь batch дошёл до terminal-состояния. Валидные jobs со status=failed возвращаются в queued, пока attempt < 3. Это максимум 3 полных запуска: первоначальный + 2 автоматических повтора. Некорректные входные строки (input_valid=false) не повторяются."
+    },
+    {
+      "parameters": {
+        "content": "## Автоповтор failed с пределом\n\nПри каждом запуске Controller:\n\n1. `failed` с `attempt < 3` возвращаются в `queued`.\n2. После третьей неудачной попытки job остаётся в `failed`.\n3. Такой `failed` считается терминальным и не блокирует Finalizer.\n4. В итоговый CSV добавляются:\n   - `Статус обработки Worker`\n   - `Количество попыток Worker`\n   - `Ошибка Worker`\n\nЭто позволяет сформировать все 3 итоговых файла и одновременно видеть проблемные тендеры.",
+        "height": 360,
+        "width": 620
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1840
+      ],
+      "id": "c22fb4cf-31df-45e8-8a58-7d4be0d6dd61",
+      "name": "Инструкция — auto retry failed"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n\n  batch_id,\n\n  status,\n\n  COUNT(*) AS jobs_count,\n\n  MIN(created_at) AS first_created,\n\n  MAX(updated_at) AS last_updated\n\nFROM tender_autofill_jobs\n\nWHERE created_at::date = CURRENT_DATE\n\n   OR updated_at::date = CURRENT_DATE\n\nGROUP BY batch_id, status\n\nORDER BY first_created, batch_id, status;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -256,
+        2624
+      ],
+      "id": "a011ce15-6307-4d1a-be63-eae7b565caad",
+      "name": "проверка сколько записей3",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. Queued jobs по времени не закрываются: при большой ежедневной пачке они могут законно ожидать несколько часов."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE tender_autofill_batches\nSET\n  status = 'processing',\n  finished_at = NULL,\n  updated_at = NOW()\nWHERE batch_id = 'form-2026-08-07-20260807073256';",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -880,
+        1120
+      ],
+      "id": "216b5ced-c2b7-4541-b715-c3548113af26",
+      "name": "повторно сформировать фалй",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. Queued jobs по времени не закрываются: при большой ежедневной пачке они могут законно ожидать несколько часов."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "BEGIN;\n\n\nDELETE FROM tender_autofill_jobs\n\nWHERE batch_id = 'form-2026-08-07-20260807073256';\n\n\nDELETE FROM tender_autofill_batches\n\nWHERE batch_id = 'form-2026-08-07-20260807073256';\n\n\nCOMMIT;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -976,
+        2496
+      ],
+      "id": "e3d7e507-9b5e-49fa-b92a-6e12669cc4b7",
+      "name": "удаление батча",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notesInFlow": true,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "dispatching > 30 минут возвращается в queued; processing > 60 минут становится failed. Queued jobs по времени не закрываются: при большой ежедневной пачке они могут законно ожидать несколько часов."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When chat message received": {
+      "main": [
+        []
+      ]
+    },
+    "Проверять готовые batch каждую минуту": {
+      "main": [
+        [
+          {
+            "node": "Postgres — вернуть processing старше 30 минут",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ручная проверка готовых batch": {
+      "main": [
+        [
+          {
+            "node": "Postgres — вернуть processing старше 30 минут",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres — захватить готовый batch": {
+      "main": [
+        [
+          {
+            "node": "Postgres — получить jobs batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres — получить jobs batch": {
+      "main": [
+        [
+          {
+            "node": "Собрать Daily Batch Summary из PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Собрать Daily Batch Summary из PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "Сформировать CSV по типам тендеров",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Сформировать CSV по типам тендеров": {
+      "main": [
+        [
+          {
+            "node": "Создать CSV binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Создать CSV binary": {
+      "main": [
+        [
+          {
+            "node": "Собрать вложения",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Собрать вложения": {
+      "main": [
+        [
+          {
+            "node": "Отправить итоговые CSV — настройте SMTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Отправить итоговые CSV — настройте SMTP": {
+      "main": [
+        [
+          {
+            "node": "Postgres — batch finished",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres — batch finished": {
+      "main": [
+        [
+          {
+            "node": "Готовый batch и файлы",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres — занять свободные слоты до 10": {
+      "main": [
+        [
+          {
+            "node": "Подготовить jobs для Tender Worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Подготовить jobs для Tender Worker": {
+      "main": [
+        [
+          {
+            "node": "Запустить свободные Tender Worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres — вернуть processing старше 30 минут": {
+      "main": [
+        [
+          {
+            "node": "Postgres — повторить failed до 3 попыток",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres — повторить failed до 3 попыток": {
+      "main": [
+        [
+          {
+            "node": "Postgres — занять свободные слоты до 10",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Postgres — захватить готовый batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "повторный заупск зависшего тендерв": {
+      "main": [
+        [
+          {
+            "node": "проверка сколько записей",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "20a2a3a3-e478-47e7-a444-45bb22a5befb",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "1af159141d995153015a34099dbbec8b3b0f9b0c2c0d3b0e0b2ceec2d7800f6a"
+  },
+  "nodeGroups": [],
+  "id": "UmImz2abceMGqkK0",
+  "tags": []
+}
