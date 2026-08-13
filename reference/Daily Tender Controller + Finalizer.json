@@ -1,5 +1,5 @@
 {
-  "name": "Daily Tender Controller + Finalizer",
+  "name": "Daily Tender Controller + Finalizer — Python HTTP TEST 1",
   "nodes": [
     {
       "parameters": {
@@ -534,7 +534,7 @@
     },
     {
       "parameters": {
-        "content": "## Контроллер нагрузки: максимум 10\n\nКаждые 60 секунд выполняется скользящее окно:\n\n1. Считаются jobs `dispatching + processing`.\n2. Свободные слоты = `10 − active`.\n3. Из PostgreSQL забирается только столько `queued` jobs, сколько есть свободных слотов.\n4. Они становятся `dispatching` и запускаются через Execute Sub-workflow.\n5. После `completed/failed` слот освобождается.\n\nПример: активно 7 → запустить ещё 3.\n\nЭто ограничивает только Tender Autofill и не меняет общую concurrency остальных workflow n8n.",
+        "content": "## Python HTTP dispatch — первый тест: максимум 1\n\nКаждые 60 секунд Controller:\n\n1. Считает jobs `dispatching + processing`.\n2. При отсутствии активного job атомарно переводит ровно один `queued` job в `dispatching`.\n3. Собирает один JSON batch и делает `POST http://tender-api:8000/jobs/batch`.\n4. Python API отвечает `202 Accepted`, публикует задачу в отдельный Redis/Celery и не ждёт обработки tender.\n5. Python worker выполняет tender и пишет `completed/failed` и `result_json` в ту же PostgreSQL.\n6. Существующий Finalizer читает результат без изменения формата.\n\nПеред активацией задайте `TENDER_PYTHON_API_KEY` в environment всех n8n main/workers и отключите старую активную версию Controller. После успешного end-to-end теста замените queryReplacement `[1]` на `[5]`.",
         "height": 410,
         "width": 690
       },
@@ -545,14 +545,14 @@
         848
       ],
       "id": "310a62b4-1c4f-40aa-a91a-8615a812598b",
-      "name": "Инструкция — окно максимум 10"
+      "name": "Инструкция — Python HTTP, окно 1"
     },
     {
       "parameters": {
         "operation": "executeQuery",
         "query": "WITH controller_lock AS (\n  SELECT pg_advisory_xact_lock(\n    hashtext('tender_autofill_controller_window_10')::bigint\n  )\n),\nactive_jobs AS (\n  SELECT\n    COUNT(*)::integer AS active_count\n  FROM tender_autofill_jobs AS j\n  JOIN tender_autofill_batches AS b\n    ON b.batch_id = j.batch_id\n  CROSS JOIN controller_lock\n  WHERE\n    j.status IN ('dispatching', 'processing')\n    AND b.status = 'processing'\n),\navailable_slots AS (\n  SELECT\n    GREATEST(\n      0,\n      $1::integer - active_count\n    )::integer AS free_slots\n  FROM active_jobs\n),\npicked_jobs AS (\n  SELECT\n    j.record_key\n  FROM tender_autofill_jobs AS j\n  JOIN tender_autofill_batches AS b\n    ON b.batch_id = j.batch_id\n  CROSS JOIN available_slots AS slots\n  WHERE\n    j.status = 'queued'\n    AND j.input_valid = TRUE\n    AND b.status = 'processing'\n    AND slots.free_slots > 0\n  ORDER BY\n    b.created_at,\n    j.report_id NULLS LAST,\n    j.row_number NULLS LAST,\n    j.record_key\n  FOR UPDATE OF j SKIP LOCKED\n  LIMIT (\n    SELECT free_slots\n    FROM available_slots\n  )\n),\nclaimed_jobs AS (\n  UPDATE tender_autofill_jobs AS j\n  SET\n    status = 'dispatching',\n    error_message = '',\n    worker_execution_id = NULL,\n    started_at = NULL,\n    finished_at = NULL,\n    updated_at = NOW()\n  FROM picked_jobs AS picked\n  WHERE j.record_key = picked.record_key\n  RETURNING\n    j.record_key,\n    j.batch_id,\n    j.input_json\n),\ndispatch_counts AS (\n  SELECT\n    batch_id,\n    COUNT(*)::integer AS dispatched_now\n  FROM claimed_jobs\n  GROUP BY batch_id\n),\nbatch_update AS (\n  UPDATE tender_autofill_batches AS b\n  SET\n    dispatched_count =\n      b.dispatched_count + dispatch_counts.dispatched_now,\n    dispatched_at =\n      COALESCE(b.dispatched_at, NOW()),\n    updated_at = NOW()\n  FROM dispatch_counts\n  WHERE b.batch_id = dispatch_counts.batch_id\n  RETURNING b.batch_id\n)\nSELECT\n  claimed.record_key AS \"jobRecordKey\",\n  claimed.batch_id AS \"batchId\",\n  claimed.input_json AS payload,\n  $1::integer AS \"maxTenderActive\"\nFROM claimed_jobs AS claimed\nLEFT JOIN batch_update AS updated_batch\n  ON updated_batch.batch_id = claimed.batch_id;",
         "options": {
-          "queryReplacement": "={{ [5] }}"
+          "queryReplacement": "={{ [1] }}"
         }
       },
       "type": "n8n-nodes-base.postgres",
@@ -562,7 +562,7 @@
         1328
       ],
       "id": "de2f2eaf-8a99-492a-9aae-3d9f78805eec",
-      "name": "Postgres — занять свободные слоты до 10",
+      "name": "Postgres — занять 1 слот (первый тест)",
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 2000,
@@ -573,11 +573,11 @@
           "name": "Postgres account"
         }
       },
-      "notes": "Исправленный полный SQL. Не вставляйте сюда диагностические SELECT-запросы. Нода считает только активные jobs из batch со status=processing и занимает свободные слоты до общего лимита 10."
+      "notes": "Первый production test: общий лимит активных tender равен 1. После проверки одного полного result_json замените queryReplacement на ={{ [5] }}; SQL менять не нужно."
     },
     {
       "parameters": {
-        "jsCode": "return $input.all().map(item => {\n  const row = item.json || {};\n\n  let payload = row.payload;\n\n  if (typeof payload === 'string') {\n    try {\n      payload = JSON.parse(payload);\n    } catch {\n      payload = {};\n    }\n  }\n\n  if (\n    !payload ||\n    typeof payload !== 'object' ||\n    Array.isArray(payload)\n  ) {\n    payload = {};\n  }\n\n  return {\n    json: {\n      ...payload,\n\n      jobRecordKey:\n        row.jobRecordKey,\n\n      batchId:\n        row.batchId ||\n        payload.batchId ||\n        null,\n\n      asyncDispatch:\n        true,\n\n      maxTenderActive:\n        Number(row.maxTenderActive || 5),\n\n      controllerDispatchAt:\n        new Date().toISOString()\n    }\n  };\n});"
+        "jsCode": "return $input.all().map(item => {\n  const row = item.json || {};\n\n  let payload = row.payload;\n\n  if (typeof payload === 'string') {\n    try {\n      payload = JSON.parse(payload);\n    } catch {\n      payload = {};\n    }\n  }\n\n  if (\n    !payload ||\n    typeof payload !== 'object' ||\n    Array.isArray(payload)\n  ) {\n    payload = {};\n  }\n\n  return {\n    json: {\n      ...payload,\n\n      jobRecordKey:\n        row.jobRecordKey,\n\n      batchId:\n        row.batchId ||\n        payload.batchId ||\n        null,\n\n      asyncDispatch:\n        true,\n\n      maxTenderActive:\n        Number(row.maxTenderActive || 1),\n\n      controllerDispatchAt:\n        new Date().toISOString()\n    }\n  };\n});"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -588,40 +588,69 @@
       "id": "1a7ac093-9ae8-4983-bbab-65889757eb22",
       "name": "Подготовить jobs для Tender Worker",
       "notesInFlow": true,
-      "notes": "Разворачивает input_json захваченных jobs. На выходе будет от 0 до 10 items."
+      "notes": "Разворачивает input_json атомарно захваченных jobs. В первом тесте на выходе не более одного item."
     },
     {
       "parameters": {
-        "workflowId": {
-          "__rl": true,
-          "value": "IC4tNX9mOhTsAYnG",
-          "mode": "list",
-          "cachedResultUrl": "/workflow/IC4tNX9mOhTsAYnG",
-          "cachedResultName": "ETM-prod — Tender Autofill Worker"
-        },
-        "workflowInputs": {
-          "mappingMode": "defineBelow",
-          "value": {},
-          "matchingColumns": [],
-          "schema": [],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": true
-        },
-        "mode": "each",
-        "options": {
-          "waitForSubWorkflow": false
-        }
+        "jsCode": "const jobs = $input.all().map(item => item.json || {});\n\nif (!jobs.length) {\n  return [];\n}\n\nconst keys = jobs.map(job => String(job.jobRecordKey || '').trim());\nif (keys.some(key => !key)) {\n  throw new Error('Python dispatch: jobRecordKey отсутствует в одном из jobs.');\n}\nif (new Set(keys).size !== keys.length) {\n  throw new Error('Python dispatch: batch содержит повторяющиеся jobRecordKey.');\n}\n\nreturn [{\n  json: {\n    jobs,\n    expectedAccepted: jobs.length,\n    dispatchCreatedAt: new Date().toISOString()\n  }\n}];"
       },
       "id": "806bfc0e-5471-4779-bccd-23e50dfc6e9a",
-      "name": "Запустить свободные Tender Worker",
-      "type": "n8n-nodes-base.executeWorkflow",
-      "typeVersion": 1.2,
+      "name": "Собрать HTTP batch для Python",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         976,
         1328
       ],
       "notesInFlow": true,
-      "notes": "Запускает только jobs, которые атомарно переведены в dispatching. Нода не ждёт результата. После импорта обязательно выберите новый workflow «Tender Autofill Worker — controlled window 10»."
+      "notes": "Собирает захваченные PostgreSQL jobs в один POST body. Binary и result_json через HTTP не передаются."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://tender-api:8000/jobs/batch",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.TENDER_PYTHON_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ jobs: $json.jobs }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "c8d02d42-5d98-4e12-a255-d060fdba1c78",
+      "name": "HTTP — dispatch Tender jobs в Python",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1232,
+        1328
+      ],
+      "notesInFlow": true,
+      "notes": "Быстрый асинхронный POST. API должен вернуть HTTP 202. Не добавляйте business retry: владельцем retry остаётся Controller/PostgreSQL."
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json?.body ?? $json;\nlet response = raw;\n\nif (typeof response === 'string') {\n  try {\n    response = JSON.parse(response);\n  } catch {\n    throw new Error(`Python API вернул невалидный JSON: ${response.slice(0, 500)}`);\n  }\n}\n\nconst request = $('Собрать HTTP batch для Python').first().json || {};\nconst expected = Number(request.expectedAccepted || request.jobs?.length || 0);\nconst accepted = Number(response?.accepted || 0);\nconst rejected = Number(response?.rejected || 0);\n\nif (response?.status !== 'accepted' || accepted !== expected || rejected !== 0) {\n  throw new Error(\n    'Python API не принял весь batch. ' +\n    `expected=${expected}; accepted=${accepted}; rejected=${rejected}; ` +\n    `status=${response?.status || 'missing'}; ` +\n    `rejectedJobs=${JSON.stringify(response?.rejectedJobs || [])}`\n  );\n}\n\nreturn [{\n  json: {\n    ...response,\n    expectedAccepted: expected,\n    dispatchVerified: true,\n    verifiedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "063888cf-ce63-490a-8a82-9517b61ca868",
+      "name": "Проверить ответ Python API",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1488,
+        1328
+      ],
+      "notesInFlow": true,
+      "notes": "Execution успешен только если Python API принял все отправленные jobs и не вернул rejected items."
     },
     {
       "parameters": {
@@ -860,7 +889,7 @@
         ]
       ]
     },
-    "Postgres — занять свободные слоты до 10": {
+    "Postgres — занять 1 слот (первый тест)": {
       "main": [
         [
           {
@@ -875,7 +904,29 @@
       "main": [
         [
           {
-            "node": "Запустить свободные Tender Worker",
+            "node": "Собрать HTTP batch для Python",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Собрать HTTP batch для Python": {
+      "main": [
+        [
+          {
+            "node": "HTTP — dispatch Tender jobs в Python",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP — dispatch Tender jobs в Python": {
+      "main": [
+        [
+          {
+            "node": "Проверить ответ Python API",
             "type": "main",
             "index": 0
           }
@@ -897,7 +948,7 @@
       "main": [
         [
           {
-            "node": "Postgres — занять свободные слоты до 10",
+            "node": "Postgres — занять 1 слот (первый тест)",
             "type": "main",
             "index": 0
           },
@@ -921,18 +972,16 @@
       ]
     }
   },
-  "active": true,
+  "active": false,
   "settings": {
     "executionOrder": "v1",
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "20a2a3a3-e478-47e7-a444-45bb22a5befb",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "1af159141d995153015a34099dbbec8b3b0f9b0c2c0d3b0e0b2ceec2d7800f6a"
   },
   "nodeGroups": [],
-  "id": "UmImz2abceMGqkK0",
   "tags": []
 }
