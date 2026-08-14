@@ -322,13 +322,13 @@ Finalizer читает следующие ключи особенно явно:
 | 2 | `google/gemini-2.5-pro` |
 | 3 | `openai/gpt-5.5` |
 
-Это не `GPT-5 -> GPT-5-mini -> GPT-4.1`. Кроме того, attempt сейчас не добавляется Controller в payload, поэтому селектор обычно видит 1. В ходе миграции пользователь отдельно подтвердил прямой OpenAI API и mapping `gpt-5 -> gpt-5-mini -> gpt-4.1`; Python получает истинную попытку из PostgreSQL.
+Это не `GPT-5 -> GPT-5-mini -> GPT-4.1`. Кроме того, attempt сейчас не добавляется Controller в payload, поэтому селектор обычно видит 1. Новая реализация должна сделать mapping environment-configurable и получать истинную попытку из PostgreSQL. Менять defaults на три названные пользователем GPT-модели без подтверждения нельзя.
 
 ## 10. Внешние зависимости
 
 - PostgreSQL — batches/jobs и единственный владелец retry.
 - Seldon API — login, `/PurchasesDocuments/Get`; purchase приходит во входе.
-- В исходном JSON: OpenRouter/OpenAI-compatible API. В Python-миграции: прямой OpenAI API для четырёх LLM стадий и OCR PDF.
+- OpenRouter/OpenAI-compatible API — четыре LLM стадии и OCR PDF.
 - IPro ETM — lookup организации по ИНН.
 - Qdrant collection `products`, topK=50.
 - Ollama embeddings model `qwen3-embedder-ft:latest`.
@@ -369,7 +369,7 @@ Finalizer читает следующие ключи особенно явно:
 4. Текущий production entry не скачивает HTML tender page; это делает другая отключённая webhook ветка.
 5. `failed` не устанавливается Worker в export; внешний Error workflow не указан.
 6. Note/тексты говорят максимум 10, активный Controller SQL вызывается с 5. Dispatcher response также противоречив: `maxTenderActive=5`, а `nextStep` говорит 10.
-7. Расхождение исходных OpenRouter models с желаемыми GPT attempts разрешено отдельным решением пользователя: Python использует прямой OpenAI API и модели `gpt-5`, `gpt-5-mini`, `gpt-4.1`.
+7. Имя OCR model и OpenRouter model defaults отличаются от пользовательского описания GPT attempts.
 8. DDL не содержит FK `jobs.batch_id -> batches.batch_id` и CHECK constraints; добавлять их без отдельной миграции нельзя.
 9. Seldon login credentials оказались встроены в JSON HTTP node. Их необходимо отозвать; Python не должен копировать их.
 

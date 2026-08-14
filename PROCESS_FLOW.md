@@ -291,19 +291,31 @@ RAR4/RAR5 определяется по расширению или magic bytes 
 
 Ограничение `data_only=true`: если автор XLSX никогда не пересчитывал формулы и не сохранил cached result, openpyxl увидит пустое значение такой формулы. Для старых XLS преобразование LibreOffice обычно пересчитывает workbook. Если production-файлы XLSX регулярно содержат несохранённые формулы, можно отдельно включить их предварительный прогон через LibreOffice.
 
-## 10. Прямой OpenAI API и модели по попыткам
+## 10. Модели OpenRouter и fallback
 
-Все LLM-запросы отправляются в `https://api.openai.com/v1`. Номер попытки job задаёт единственную модель запроса:
+Номер попытки job по-прежнему задаёт primary model:
 
 ```text
-attempt 1 -> gpt-5
-attempt 2 -> gpt-5-mini
-attempt 3 -> gpt-4.1
+attempt 1 -> LLM_MODEL_ATTEMPT_1
+attempt 2 -> LLM_MODEL_ATTEMPT_2
+attempt 3 -> LLM_MODEL_ATTEMPT_3
 ```
 
-Внутри Python-клиента нет второй retry/fallback-системы. Повторной попыткой и увеличением PostgreSQL `attempt` управляет существующий n8n Controller. Поэтому один неуспешный OpenAI-запрос завершает текущую попытку job, после чего Controller применяет уже существующие правила retry.
+При `LLM_ENABLE_MODEL_FALLBACK=true` каждый структурированный AI-запрос дополнительно отправляет OpenRouter ordered model fallback. Порядок ротируется вместе с attempt:
 
-Структурированные запросы используют OpenAI Chat Completions и JSON mode. Для GPT-5 передаётся `max_completion_tokens` без `temperature`; для GPT-4.1 сохраняется `temperature=0`. OCR fallback для PDF использует нативный OpenAI Responses API с `input_file`; OpenRouter `file-parser` и `mistral-ocr` больше не используются. Фактически использованные модели по-прежнему сохраняются в `debug.aiModelsUsed`, а выбранная модель попытки — в `debug.aiModelChain`.
+```text
+attempt 1: model 1 -> model 2 -> model 3
+attempt 2: model 2 -> model 3 -> model 1
+attempt 3: model 3 -> model 1 -> model 2
+```
+
+OpenRouter сам переключает модель при model/provider rate limit, downtime и других routing errors. Это происходит внутри одного API-запроса и не увеличивает PostgreSQL `attempt`. Фактически использованные модели сохраняются в `debug.aiModelsUsed`, полный порядок — в `debug.aiModelChain`.
+
+`LLM_FALLBACK_MODELS` позволяет задать отдельный comma-separated порядок. При `LLM_ENABLE_MODEL_FALLBACK=false` используется только primary model попытки.
+
+OCR настраивается отдельно: fallback применяется только к моделям из `OCR_FALLBACK_MODELS`, потому что они должны поддерживать PDF/file input. Общие текстовые модели автоматически в OCR-цепочку не добавляются.
+
+Если исчерпаны общие деньги/credits API key и OpenRouter отвечает 402, смена модели не поможет. Если исчерпан лимит конкретной модели/provider и доступна другая модель, fallback должен продолжить запрос.
 
 ## 11. Что где настраивается
 

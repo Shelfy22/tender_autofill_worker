@@ -81,13 +81,7 @@ POSTGRES_DSN=postgresql://tenders:<URL_ENCODED_PASSWORD>@tenders-tender-postgres
 SELDON_USERNAME=...
 SELDON_PASSWORD=...
 
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=<ключ OpenAI Platform, не OpenRouter>
-LLM_MODEL_ATTEMPT_1=gpt-5
-LLM_MODEL_ATTEMPT_2=gpt-5-mini
-LLM_MODEL_ATTEMPT_3=gpt-4.1
-OCR_MODEL=gpt-4.1
-OCR_PDF_DETAIL=high
+LLM_API_KEY=...
 
 CATALOG_MODE=qdrant
 QDRANT_URL=http://qdrant:6333
