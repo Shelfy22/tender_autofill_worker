@@ -2,6 +2,7 @@ from app.models import DecisionReason, LlmDecision, NormalizedJob
 from app.services.decision import (
     ASSORTMENT_REASON,
     PRICE_REASON,
+    REMOTE_TERRITORY_REASON,
     HardReason,
     apply_final_decision,
     build_decision_prompt,
@@ -233,3 +234,41 @@ def test_decision_prompt_requires_full_analysis_after_assortment_rejection() -> 
     assert "обязательно проверь все остальные причины справочника" in prompt
     assert "detectedReasons должен содержать полный список" in prompt
     assert "Не останавливай проверку после анализа товарного ассортимента" in prompt
+
+
+def test_all_remote_territories_trigger_deterministic_rejection() -> None:
+    territory_texts = [
+        "Место поставки: Калининградская область.",
+        "Место поставки: Республика Дагестан.",
+        "Место поставки: Республика Саха (Якутия).",
+    ]
+
+    for text in territory_texts:
+        reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
+        assert REMOTE_TERRITORY_REASON in [item.reason for item in reasons]
+
+
+def test_similar_region_name_does_not_trigger_remote_territory_rule() -> None:
+    reasons, _ = calculate_hard_reasons(
+        job(),
+        {},
+        product_check(),
+        "Место поставки: Сахалинская область.",
+    )
+
+    assert REMOTE_TERRITORY_REASON not in [item.reason for item in reasons]
+
+
+def test_decision_prompt_lists_all_remote_territories() -> None:
+    prompt = build_decision_prompt(
+        fields={},
+        hard_reasons=[],
+        checks={},
+        product_check=product_check(),
+        all_text="Документация тендера",
+        maximum_text_chars=10_000,
+    )
+
+    assert "Калининград/Калининградская область" in prompt
+    assert "Республика Дагестан" in prompt
+    assert "Республика Саха (Якутия)" in prompt
