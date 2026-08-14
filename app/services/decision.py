@@ -283,51 +283,166 @@ def apply_final_decision(
     fields = dict(fields)
     meta = dict(meta)
     counterparty_requires_work = counterparty_lookup.get("status") != "matched"
-    hard = [item for item in hard_reasons if item.reason != INDIVISIBLE_REASON]
+    hard = sorted(
+        (item for item in hard_reasons if item.reason != INDIVISIBLE_REASON),
+        key=lambda item: item.priority,
+    )
+    hard_non_assortment = [item for item in hard if item.reason != ASSORTMENT_REASON]
     coverage = product_check.get("coveragePercent")
 
     # Controlled reasons cannot be reintroduced by the LLM.
     allowed_detected = []
     if llm_decision:
         for item in llm_decision.detectedReasons:
-            if item.reason not in REASONS or item.reason in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON}:
+            if item.reason not in REASONS or item.reason in {
+                DEADLINE_REASON,
+                ASSORTMENT_REASON,
+                INDIVISIBLE_REASON,
+            }:
                 continue
-            if coverage is not None and coverage > 50 and re.search(r"ассортимент|номенклатур", item.evidence, re.I):
+            if (
+                coverage is not None
+                and coverage > 50
+                and re.search(r"ассортимент|номенклатур", item.evidence, re.I)
+            ):
                 continue
             allowed_detected.append(item)
 
-    if counterparty_requires_work:
-        status, reason, confidence = "Проработка контрагента", "Прочее", "medium"
-        note_parts = [
-            counterparty_lookup.get("reason") or "Контрагент не найден в IPro или ИНН/КПП не совпали."
-        ]
-    elif hard:
-        status, reason, confidence = "Отказано КУ ЦП", hard[0].reason, "high"
-        note_parts = [
-            f"Сработал обязательный критерий: {reason}.",
-            " | ".join(f"{item.reason}: {item.evidence}" for item in hard),
-        ]
-    elif llm_decision and llm_decision.decision == "reject":
-        primary = llm_decision.primaryReason
-        if primary in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON} or primary not in REASONS:
-            primary = allowed_detected[0].reason if allowed_detected else None
-        if primary:
-            status, reason, confidence = "Отказано КУ ЦП", primary, llm_decision.confidence
-            note_parts = [llm_decision.note or f"Подтверждён критерий отказа: {primary}."]
-        else:
-            status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
-            note_parts = ["LLM reject содержал только запрещённую/неподтверждённую controlled-причину."]
-    elif llm_decision and llm_decision.decision == "approve":
-        status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
-        note_parts = [llm_decision.note or "Критерии отказа не подтверждены."]
-    else:
-        status, reason, confidence = "Загружен Seldon", "Прочее", "low"
-        note_parts = ["LLM решения по статусу не вернул валидный JSON; обязательные критерии не сработали."]
+    llm_primary = llm_decision.primaryReason if llm_decision else None
+    if llm_primary not in REASONS or llm_primary in {
+        DEADLINE_REASON,
+        ASSORTMENT_REASON,
+        INDIVISIBLE_REASON,
+    }:
+        llm_primary = allowed_detected[0].reason if allowed_detected else None
 
-    summary = str(product_check.get("summary") or "").strip()
+    # primaryReason is kept first, followed by the complete detectedReasons list.
+    # This order matches the n8n final node and matters when assortment is the only
+    # deterministic reason: another confirmed LLM reason becomes the primary one.
+    llm_reason_candidates: list[dict[str, str]] = []
+
+    def add_llm_reason_candidate(reason: str | None, evidence: str, confidence: str) -> None:
+        if (
+            not reason
+            or reason not in REASONS
+            or reason in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON}
+            or any(item["reason"] == reason for item in llm_reason_candidates)
+        ):
+            return
+        llm_reason_candidates.append(
+            {
+                "reason": reason,
+                "evidence": re.sub(r"\s+", " ", evidence or "").strip(),
+                "confidence": confidence if confidence in {"low", "medium", "high"} else "medium",
+                "source": "LLM",
+            }
+        )
+
+    if llm_decision and llm_primary:
+        primary_detected = next(
+            (item for item in allowed_detected if item.reason == llm_primary),
+            None,
+        )
+        add_llm_reason_candidate(
+            llm_primary,
+            primary_detected.evidence if primary_detected else "",
+            primary_detected.confidence if primary_detected else llm_decision.confidence,
+        )
+    for item in allowed_detected:
+        add_llm_reason_candidate(item.reason, item.evidence, item.confidence)
+
+    preferred_llm_alternative = llm_reason_candidates[0] if llm_reason_candidates else None
+    note_parts: list[str] = []
+    summary = re.sub(r"\s+", " ", str(product_check.get("summary") or "")).strip()
     if summary:
         note_parts.append(summary)
-    note = " ".join(part.strip() for part in note_parts if part and part.strip())
+    reason_origin = "none"
+
+    if counterparty_requires_work:
+        status, reason, confidence = "Проработка контрагента", "Прочее", "medium"
+        reason_origin = "counterparty"
+        note_parts.append(
+            counterparty_lookup.get("reason") or "Контрагент не найден в IPro или ИНН/КПП не совпали."
+        )
+    elif hard:
+        status = "Отказано КУ ЦП"
+        if hard_non_assortment:
+            # Existing priority order is preserved among all deterministic reasons
+            # except assortment, which is now only the fallback primary reason.
+            reason, confidence = hard_non_assortment[0].reason, "high"
+            reason_origin = "deterministic"
+        elif preferred_llm_alternative:
+            reason = preferred_llm_alternative["reason"]
+            confidence = preferred_llm_alternative["confidence"]
+            reason_origin = "llm_alternative_over_assortment"
+        else:
+            reason, confidence = hard[0].reason, "high"
+            reason_origin = "deterministic"
+        note_parts.append(f"Основная причина отказа: {reason}.")
+    elif llm_decision and llm_decision.decision == "reject":
+        if llm_primary:
+            status, reason, confidence = "Отказано КУ ЦП", llm_primary, llm_decision.confidence
+            reason_origin = "llm"
+            note_parts.append(llm_decision.note or f"Подтверждён критерий отказа: {llm_primary}.")
+        else:
+            status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
+            note_parts.append(
+                "LLM reject содержал только запрещённую/неподтверждённую controlled-причину."
+            )
+    elif llm_decision and llm_decision.decision == "approve":
+        status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
+        note_parts.append(llm_decision.note or "Критерии отказа не подтверждены.")
+    else:
+        status, reason, confidence = "Загружен Seldon", "Прочее", "low"
+        reason_origin = "fallback"
+        note_parts.append("LLM решения по статусу не вернул валидный JSON; обязательные критерии не сработали.")
+
+    additional_reasons: list[dict[str, str]] = []
+
+    def add_additional_reason(
+        additional_reason: str,
+        evidence: str,
+        source: str,
+        item_confidence: str,
+    ) -> None:
+        if (
+            not additional_reason
+            or additional_reason == reason
+            or any(item["reason"] == additional_reason for item in additional_reasons)
+        ):
+            return
+        additional_reasons.append(
+            {
+                "reason": additional_reason,
+                "evidence": re.sub(r"\s+", " ", evidence or "").strip(),
+                "source": source,
+                "confidence": item_confidence,
+            }
+        )
+
+    if status == "Отказано КУ ЦП":
+        for item in hard:
+            add_additional_reason(item.reason, item.evidence, "Детерминированное правило", "high")
+        for item in llm_reason_candidates:
+            add_additional_reason(
+                item["reason"], item["evidence"], item["source"], item["confidence"]
+            )
+        if additional_reasons:
+            formatted_items = []
+            for item in additional_reasons:
+                formatted = item["reason"]
+                if item["evidence"]:
+                    formatted += f" — {item['evidence']}"
+                formatted_items.append(formatted)
+            formatted_reasons = " | ".join(formatted_items)
+            note_parts.append(f"Дополнительные подтверждённые причины: {formatted_reasons}")
+
+    normalized_note_parts: list[str] = []
+    for part in note_parts:
+        normalized = re.sub(r"\s+", " ", str(part or "")).strip()
+        if normalized and normalized not in normalized_note_parts:
+            normalized_note_parts.append(normalized)
+    note = " ".join(normalized_note_parts)[:4000]
     fields["tenderStatus"] = status
     fields["tenderStatusNote"] = note
     if reason:
@@ -341,9 +456,26 @@ def apply_final_decision(
         "confidence": confidence,
         "evidence": note[:1200],
     }
-    meta["tenderStatusNote"] = {"source": "Ветка согласования тендера", "confidence": confidence, "evidence": note[:1200]}
+    meta["tenderStatusNote"] = {
+        "source": "Ветка согласования тендера",
+        "confidence": confidence,
+        "evidence": note[:1200],
+    }
     if reason:
-        meta["tenderStatusReason"] = dict(meta["tenderStatus"])
+        reason_source = {
+            "counterparty": "Проверка контрагента/МОПП",
+            "deterministic": "Детерминированные правила согласования",
+            "llm_alternative_over_assortment": (
+                "LLM: альтернативная причина при обязательном отказе по ассортименту"
+            ),
+            "llm": "LLM: классификация причины",
+            "fallback": "Ветка согласования тендера",
+        }.get(reason_origin, "Ветка согласования тендера")
+        meta["tenderStatusReason"] = {
+            "source": reason_source,
+            "confidence": confidence,
+            "evidence": note[:1200],
+        }
     else:
         meta.pop("tenderStatusReason", None)
 
@@ -352,8 +484,12 @@ def apply_final_decision(
         "reason": reason,
         "note": note,
         "confidence": confidence,
+        "reasonOrigin": reason_origin,
         "counterpartyRequiresWork": counterparty_requires_work,
         "hardReasons": [item.as_dict() for item in hard],
+        "hardNonAssortmentReasons": [item.as_dict() for item in hard_non_assortment],
+        "llmReasonCandidates": llm_reason_candidates,
+        "additionalReasons": additional_reasons,
         "llmDecision": llm_decision.model_dump() if llm_decision else None,
     }
     return fields, meta, decision
@@ -363,7 +499,11 @@ def build_decision_prompt(
     *, fields: dict[str, Any], hard_reasons: list[HardReason], checks: dict[str, Any],
     product_check: dict[str, Any], all_text: str, maximum_text_chars: int,
 ) -> str:
-    llm_reasons = [reason for reason in REASONS if reason not in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON}]
+    llm_reasons = [
+        reason
+        for reason in REASONS
+        if reason not in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON}
+    ]
     context = {
         "rulesVersion": "2026-06 / пользовательский справочник причин",
         "reasonOptions": REASONS,
@@ -376,8 +516,18 @@ def build_decision_prompt(
 Допустимые причины: {llm_reasons}
 
 Правила:
+- Проверь каждый пункт справочника по тексту документации и извлечённым фактам.
 - Не придумывай основание; каждое основание требует evidence.
-- hardReasons рассчитаны кодом и не могут быть отменены.
+- hardReasons рассчитаны кодом и не могут быть отменены; их можно только дополнить.
+- Наличие hardReasons не означает, что анализ можно закончить. Даже если уже есть обязательный отказ,
+  включая «Непоставляемый ассортимент», обязательно проверь все остальные причины справочника.
+- detectedReasons должен содержать полный список всех подтверждённых недетерминированных причин,
+  а не только основную. Если причин несколько, верни их все с evidence.
+- Если вместе с детерминированным «Непоставляемый ассортимент» найдена другая подтверждённая причина,
+  верни её в detectedReasons и используй как primaryReason среди причин, доступных LLM.
+  Код сам сохранит ассортимент как дополнительную причину.
+- Не останавливай проверку после анализа товарного ассортимента: независимо проверь остальные основания
+  отказа по документации.
 - Нулевая/пустая/null начальная цена не является отказом.
 - Расчётный порог 1 млн применяется только при coverage > 50 и priceEvaluationComplete=true.
 - «Непоставляемый ассортимент» полностью детерминирован; LLM запрещено выбирать эту причину.

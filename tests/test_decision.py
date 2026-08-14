@@ -1,7 +1,10 @@
-from app.models import LlmDecision, NormalizedJob
+from app.models import DecisionReason, LlmDecision, NormalizedJob
 from app.services.decision import (
+    ASSORTMENT_REASON,
     PRICE_REASON,
+    HardReason,
     apply_final_decision,
+    build_decision_prompt,
     calculate_hard_reasons,
 )
 
@@ -125,3 +128,108 @@ def test_llm_approve_without_hard_reasons() -> None:
     )
     assert fields["tenderStatus"] == "Согласовано КУ ЦП"
     assert "tenderStatusReason" not in fields
+
+
+def test_assortment_is_primary_when_it_is_the_only_rejection_reason() -> None:
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(
+            hardReject=True,
+            coveragePercent=33.33,
+            summary="Покрытие ассортимента 33,33% (2 из 6).",
+        ),
+        hard_reasons=[HardReason(ASSORTMENT_REASON, "Покрытие 33,33%", 5)],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(decision="approve"),
+    )
+
+    assert fields["tenderStatusReason"] == ASSORTMENT_REASON
+    assert "Покрытие ассортимента 33,33%" in fields["tenderStatusNote"]
+    assert "Дополнительные подтверждённые причины" not in fields["tenderStatusNote"]
+    assert decision["reasonOrigin"] == "deterministic"
+
+
+def test_non_assortment_hard_reason_has_priority_and_assortment_moves_to_note() -> None:
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(
+            hardReject=True,
+            coveragePercent=33.33,
+            summary="Покрытие ассортимента 33,33% (2 из 6).",
+        ),
+        # Deliberately unsorted: final decision must preserve numeric priorities.
+        hard_reasons=[
+            HardReason("Коммерческие условия. Поставка в удаленные территории", "Якутия", 40),
+            HardReason(ASSORTMENT_REASON, "Покрытие 33,33%", 5),
+            HardReason(PRICE_REASON, "НМЦК: 900 000 руб.", 20),
+        ],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(decision="approve"),
+    )
+
+    assert fields["tenderStatusReason"] == PRICE_REASON
+    assert f"Основная причина отказа: {PRICE_REASON}." in fields["tenderStatusNote"]
+    assert f"{ASSORTMENT_REASON} — Покрытие 33,33%" in fields["tenderStatusNote"]
+    assert "Поставка в удаленные территории — Якутия" in fields["tenderStatusNote"]
+    assert [item["reason"] for item in decision["additionalReasons"]] == [
+        ASSORTMENT_REASON,
+        "Коммерческие условия. Поставка в удаленные территории",
+    ]
+
+
+def test_llm_reason_overrides_only_assortment_and_all_other_reasons_are_noted() -> None:
+    remote_reason = "Коммерческие условия. Поставка в удаленные территории"
+    works_reason = "Номенклатура. Поставка с работами"
+    fields, meta, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(
+            hardReject=True,
+            coveragePercent=33.33,
+            summary="Покрытие ассортимента 33,33% (2 из 6).",
+        ),
+        hard_reasons=[HardReason(ASSORTMENT_REASON, "Покрытие 33,33%", 5)],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=remote_reason,
+            detectedReasons=[
+                DecisionReason(
+                    reason=remote_reason,
+                    evidence="Место поставки: Республика Саха",
+                    confidence="high",
+                ),
+                DecisionReason(
+                    reason=works_reason,
+                    evidence="Монтаж выполняет поставщик",
+                    confidence="medium",
+                ),
+            ],
+            confidence="high",
+        ),
+    )
+
+    assert fields["tenderStatusReason"] == remote_reason
+    assert f"{ASSORTMENT_REASON} — Покрытие 33,33%" in fields["tenderStatusNote"]
+    assert f"{works_reason} — Монтаж выполняет поставщик" in fields["tenderStatusNote"]
+    assert decision["reasonOrigin"] == "llm_alternative_over_assortment"
+    assert meta["tenderStatusReason"]["source"] == (
+        "LLM: альтернативная причина при обязательном отказе по ассортименту"
+    )
+
+
+def test_decision_prompt_requires_full_analysis_after_assortment_rejection() -> None:
+    prompt = build_decision_prompt(
+        fields={},
+        hard_reasons=[HardReason(ASSORTMENT_REASON, "Покрытие 33,33%", 5)],
+        checks={},
+        product_check=product_check(hardReject=True, coveragePercent=33.33),
+        all_text="Документация тендера",
+        maximum_text_chars=10_000,
+    )
+
+    assert "обязательно проверь все остальные причины справочника" in prompt
+    assert "detectedReasons должен содержать полный список" in prompt
+    assert "Не останавливай проверку после анализа товарного ассортимента" in prompt
