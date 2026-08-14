@@ -52,4 +52,9 @@ python -m pytest
 4. Прогнать shadow comparison `result_json` Python vs n8n на наборе реальных tender разных типов.
 5. После parity test заменить Execute Sub-workflow по [N8N_INTEGRATION.md](N8N_INTEGRATION.md).
 
+Цена единицы и сумма товарной строки из документов сохраняются в `productCheck.details`
+только для аудита и сравнения. Они не заменяют выбранную цену Qdrant и не влияют на порог
+1 млн руб.; это явно отмечается полями `priceBasis=qdrant_selected_product` и
+`documentPriceUsedForSupplyValue=false`.
+
 RAR4/RAR5 распаковываются системными `lsar/unar` с проверкой путей и размеров. XLS сначала преобразуется LibreOffice в XLSX; XLSX потоково читается `openpyxl` с сохранением sheet/row/column coordinates. OpenRouter model fallback для каждого AI-вызова управляется `LLM_ENABLE_MODEL_FALLBACK` и `LLM_FALLBACK_MODELS`; подробности — в [PROCESS_FLOW.md](PROCESS_FLOW.md).

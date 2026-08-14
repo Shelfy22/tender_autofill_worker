@@ -73,6 +73,42 @@ class ExtractedFieldsResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+def _parse_money_value(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) if float(value) >= 0 else None
+    text = str(value).replace("\u00a0", " ").strip()
+    text = "".join(char for char in text if char.isdigit() or char in ",.-").rstrip(".,")
+    if not text:
+        return None
+    comma, dot = text.rfind(","), text.rfind(".")
+    if comma >= 0 and dot >= 0:
+        decimal = "," if comma > dot else "."
+        text = text.replace("." if decimal == "," else ",", "").replace(decimal, ".")
+    elif comma >= 0:
+        decimals = len(text) - comma - 1
+        text = text.replace(",", "." if 0 < decimals <= 2 else "")
+    elif dot >= 0 and not (0 < len(text) - dot - 1 <= 2):
+        text = text.replace(".", "")
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return number if number >= 0 else None
+
+
+class DocumentPriceSource(BaseModel):
+    fileName: str = ""
+    sheet: str = ""
+    row: int | None = None
+    unitPriceColumn: str = ""
+    lineTotalColumn: str = ""
+    unitPriceHeader: str = ""
+    lineTotalHeader: str = ""
+    extractionMethod: Literal["excel_deterministic", "llm"] = "llm"
+
+
 class TenderPosition(BaseModel):
     product: str
     productQuery: str | None = None
@@ -84,6 +120,24 @@ class TenderPosition(BaseModel):
     evidence: str = ""
     requirements: str = ""
     source: str = "llm"
+    documentUnitPriceRub: float | None = None
+    documentLineTotalRub: float | None = None
+    documentCurrency: str | None = None
+    documentPriceEvidence: str = ""
+    documentPriceSource: DocumentPriceSource | None = None
+
+    @field_validator("documentUnitPriceRub", "documentLineTotalRub", mode="before")
+    @classmethod
+    def normalize_document_money(cls, value: Any) -> float | None:
+        return _parse_money_value(value)
+
+    @field_validator("documentCurrency", mode="before")
+    @classmethod
+    def normalize_document_currency(cls, value: Any) -> str | None:
+        text = str(value or "").strip().upper()
+        if not text:
+            return None
+        return "RUB" if text in {"RUR", "РУБ", "РУБ.", "₽"} else text
 
 
 class TenderPositionsResponse(BaseModel):
@@ -103,30 +157,77 @@ class ProductMatch(BaseModel):
     correspondence: Literal["Полное соответствие", "Аналог", "Товар не найден"] = Field(
         default="Товар не найден", alias="Соответствие"
     )
+    qdrant_point_id: str | None = Field(default=None, alias="Qdrant point ID")
+    product_id: str | None = Field(default=None, alias="ID товара")
+    price_source_field: str = Field(default="", alias="Поле цены")
+    price_aggregation: str = Field(default="", alias="Метод цены")
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_catalog_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        canonical_price = data.get("Медианная цена")
+        python_price = data.get("median_price")
+        if (canonical_price is None or canonical_price == "") and (
+            python_price is None or python_price == ""
+        ):
+            for key in ("Медианная цена, руб.", "Цена", "medianPrice", "price"):
+                candidate = data.get(key)
+                if candidate is not None and candidate != "":
+                    data["Медианная цена"] = candidate
+                    break
+        if data.get("Валюта") is None or data.get("Валюта") == "":
+            for key in ("currency", "currencyId", "currency_id"):
+                candidate = data.get(key)
+                if candidate is not None and candidate != "":
+                    data["Валюта"] = candidate
+                    break
+        if data.get("Источник цены") is None or data.get("Источник цены") == "":
+            for key in ("priceSource", "price_source"):
+                candidate = data.get(key)
+                if candidate is not None and candidate != "":
+                    data["Источник цены"] = candidate
+                    break
+        return data
 
     @field_validator("median_price", mode="before")
     @classmethod
     def normalize_median_price(cls, value: Any) -> float | None:
-        if value is None or value == "":
+        return _parse_money_value(value)
+
+
+class CatalogSelection(BaseModel):
+    selected_point_id: str | None = Field(default=None, alias="selectedPointId")
+    correspondence: Literal["Полное соответствие", "Аналог", "Товар не найден"] = (
+        "Товар не найден"
+    )
+    rationale: str = ""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_selection_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if "correspondence" not in data and "Соответствие" in data:
+            data["correspondence"] = data["Соответствие"]
+        if "rationale" not in data and "Обоснование" in data:
+            data["rationale"] = data["Обоснование"]
+        return data
+
+    @field_validator("selected_point_id", mode="before")
+    @classmethod
+    def normalize_point_id(cls, value: Any) -> str | None:
+        if value is None:
             return None
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-        text = str(value).replace("\u00a0", " ").strip()
-        text = "".join(char for char in text if char.isdigit() or char in ",.-").rstrip(".,")
-        if not text:
-            return None
-        comma, dot = text.rfind(","), text.rfind(".")
-        if comma >= 0 and dot >= 0:
-            decimal = "," if comma > dot else "."
-            text = text.replace("." if decimal == "," else ",", "").replace(decimal, ".")
-        elif comma >= 0:
-            decimals = len(text) - comma - 1
-            text = text.replace(",", "." if 0 < decimals <= 2 else "")
-        elif dot >= 0 and not (0 < len(text) - dot - 1 <= 2):
-            text = text.replace(".", "")
-        return float(text)
+        text = str(value).strip()
+        return text or None
 
 
 class ProductMatchItem(BaseModel):
@@ -139,6 +240,11 @@ class ProductMatchItem(BaseModel):
     unit: str = ""
     analogsAllowed: bool | None = None
     evidence: str = ""
+    documentUnitPriceRub: float | None = None
+    documentLineTotalRub: float | None = None
+    documentCurrency: str | None = None
+    documentPriceEvidence: str = ""
+    documentPriceSource: DocumentPriceSource | None = None
     match: ProductMatch
 
 

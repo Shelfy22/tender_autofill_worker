@@ -88,7 +88,7 @@ def _csv_text(path: Path, settings: Settings) -> str:
         binary, encoding=encoding, errors="replace", newline=""
     ) as text_stream:
         for number, row in enumerate(csv.reader(text_stream, delimiter=delimiter), start=1):
-            line = _row_line(number, row)
+            line = _worksheet_row_line(number, row)
             remaining = settings.max_text_chars_per_file - total
             if remaining <= 0:
                 break

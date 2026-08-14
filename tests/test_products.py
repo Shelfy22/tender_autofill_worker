@@ -1,4 +1,5 @@
-from app.services.products import extract_deterministic_positions, parse_quantity
+from app.models import DocumentPriceSource, TenderPosition, TenderPositionsResponse
+from app.services.products import extract_deterministic_positions, merge_positions, parse_quantity
 
 
 def test_quantity_parsing() -> None:
@@ -15,3 +16,37 @@ def test_excel_like_position_extraction_preserves_quantity() -> None:
     assert positions[0].product == "Моноблок"
     assert positions[0].quantity == 16
     assert positions[0].unit.lower() == "штука"
+
+
+def test_merge_preserves_deterministic_document_price_on_llm_position() -> None:
+    deterministic = [
+        TenderPosition(
+            product="Кабель",
+            productQuery="Кабель",
+            quantity=5,
+            unit="шт",
+            documentUnitPriceRub=100,
+            documentLineTotalRub=500,
+            documentCurrency="RUB",
+            documentPriceSource=DocumentPriceSource(
+                fileName="spec.xlsx",
+                sheet="Лист1",
+                row=2,
+                unitPriceColumn="E",
+                lineTotalColumn="F",
+                extractionMethod="excel_deterministic",
+            ),
+        )
+    ]
+    llm = TenderPositionsResponse(
+        products=[TenderPosition(product="Кабель", productQuery="Кабель", quantity=5, unit="шт")]
+    )
+
+    merged, warnings = merge_positions(deterministic, llm)
+
+    assert not warnings
+    assert len(merged) == 1
+    assert merged[0].documentUnitPriceRub == 100
+    assert merged[0].documentLineTotalRub == 500
+    assert merged[0].documentPriceSource is not None
+    assert merged[0].documentPriceSource.extractionMethod == "excel_deterministic"

@@ -47,3 +47,46 @@ def test_low_confidence_xlsx_text_is_not_discarded(tmp_path: Path) -> None:
     assert "A: ABC | B: 123" in text
     assert status == "spreadsheet_low_confidence"
     assert warnings
+
+
+def test_xlsx_prices_are_extracted_by_headers_with_source_coordinates(tmp_path: Path) -> None:
+    path = tmp_path / "priced_specification.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Спецификация"
+    sheet.append(
+        [
+            "№ п/п",
+            "Наименование товара",
+            "Ед. изм.",
+            "Количество",
+            "Цена за единицу, руб.",
+            "Стоимость позиции, руб.",
+        ]
+    )
+    sheet.append([1, "Стеллаж Универсал", "шт", 10, "15 707,43", "157 074,30"])
+    workbook.save(path)
+
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        max_text_chars_per_file=10_000,
+    )
+    text, status, warnings = extract_spreadsheet_text(path, "xlsx", settings)
+    positions = extract_deterministic_positions(
+        "--- ДОКУМЕНТ 1 ---\nfileName: priced_specification.xlsx\n" + text
+    )
+
+    assert status == "ok"
+    assert not warnings
+    assert len(positions) == 1
+    position = positions[0]
+    assert position.documentUnitPriceRub == 15_707.43
+    assert position.documentLineTotalRub == 157_074.30
+    assert position.documentCurrency == "RUB"
+    assert position.documentPriceSource is not None
+    assert position.documentPriceSource.fileName == "priced_specification.xlsx"
+    assert position.documentPriceSource.sheet == "Спецификация"
+    assert position.documentPriceSource.row == 2
+    assert position.documentPriceSource.unitPriceColumn == "E"
+    assert position.documentPriceSource.lineTotalColumn == "F"
+    assert position.documentPriceSource.extractionMethod == "excel_deterministic"

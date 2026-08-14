@@ -1,13 +1,35 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from app.config import Settings
-from app.services.catalog import CatalogMatcher
+from app.models import CatalogSelection, TenderPosition
+from app.services.catalog import (
+    CatalogMatcher,
+    hydrate_catalog_selection,
+    normalize_qdrant_candidates,
+)
 
 
 class DummyLlm:
     pass
+
+
+class SelectionLlm:
+    def __init__(self, point_id: str) -> None:
+        self.point_id = point_id
+        self.prompt = ""
+
+    def json_call(self, **values: object) -> CatalogSelection:
+        self.prompt = str(values["prompt"])
+        assert values["schema"] is CatalogSelection
+        return CatalogSelection(
+            selectedPointId=self.point_id,
+            correspondence="Полное соответствие",
+            rationale="Совпадают размеры и количество полок",
+        )
 
 
 class DummyObserver:
@@ -115,3 +137,125 @@ def test_qdrant_observability_separates_logical_query_from_http_requests() -> No
     assert len(http_events) == 2
     assert len(logical_events) == 1
     assert logical_events[0]["status"] == "completed"
+
+
+def qdrant_text_candidate(
+    point_id: int,
+    *,
+    name: str,
+    price: str | None,
+    product_id: str | None = None,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "id": product_id or str(point_id),
+        "name": name,
+        "vendor": "ГТС",
+        "available": "true",
+        "url": f"https://www.etm.ru/cat/nn/{product_id or point_id}",
+        "currencyId": "RUR",
+        "vendorCode": "99-TEST",
+    }
+    if price is not None:
+        metadata["price"] = price
+    return {
+        "type": "text",
+        "text": json.dumps(
+            {
+                "pageContent": name,
+                "metadata": metadata,
+                "id": point_id,
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+
+def test_normalize_qdrant_text_payload_preserves_all_prices_and_ids() -> None:
+    normalized = normalize_qdrant_candidates(
+        [
+            qdrant_text_candidate(476338, name="Стеллаж Универсал 2500", price="15707.43"),
+            qdrant_text_candidate(2193251, name="Стеллаж Профи 2500", price="17191.56"),
+            qdrant_text_candidate(5592435, name="Стеллаж Универсал 2200", price="12265.46"),
+        ]
+    )
+
+    assert [candidate["pointId"] for candidate in normalized] == [
+        "476338",
+        "2193251",
+        "5592435",
+    ]
+    assert [candidate["unitPriceRub"] for candidate in normalized] == [
+        15707.43,
+        17191.56,
+        12265.46,
+    ]
+    assert all(candidate["priceSourceField"] == "payload.metadata.price" for candidate in normalized)
+    assert all(candidate["currency"] == "RUB" for candidate in normalized)
+
+
+def test_selection_uses_only_selected_product_price_not_all_candidate_prices() -> None:
+    normalized = normalize_qdrant_candidates(
+        [
+            qdrant_text_candidate(476338, name="Стеллаж Универсал 2500", price="15707.43"),
+            qdrant_text_candidate(2193251, name="Стеллаж Профи 2500", price="17191.56"),
+            qdrant_text_candidate(5592435, name="Стеллаж Универсал 2200", price="12265.46"),
+        ]
+    )
+    match = hydrate_catalog_selection(
+        CatalogSelection(
+            selectedPointId="2193251",
+            correspondence="Полное соответствие",
+            rationale="Выбран стеллаж требуемой комплектации",
+        ),
+        normalized,
+    )
+
+    assert match.qdrant_point_id == "2193251"
+    assert match.article == "2193251"
+    assert match.median_price == 17191.56
+    assert match.price_source_field == "payload.metadata.price"
+    assert match.price_aggregation == "selected_candidate"
+
+
+def test_duplicate_same_product_prices_use_median_and_missing_selected_price_can_recover() -> None:
+    normalized = normalize_qdrant_candidates(
+        [
+            qdrant_text_candidate(101, name="Один товар", price=None, product_id="ETM-1"),
+            qdrant_text_candidate(102, name="Один товар", price="100", product_id="ETM-1"),
+            qdrant_text_candidate(103, name="Один товар", price="300", product_id="ETM-1"),
+            qdrant_text_candidate(104, name="Другой товар", price="999999", product_id="ETM-2"),
+        ]
+    )
+    match = hydrate_catalog_selection(
+        CatalogSelection(
+            selectedPointId="101",
+            correspondence="Полное соответствие",
+            rationale="Выбран ETM-1",
+        ),
+        normalized,
+    )
+
+    assert match.median_price == 200
+    assert match.price_aggregation == "median_same_product_id"
+    assert "payload.metadata.price" in match.price_source_field
+
+
+def test_catalog_llm_returns_only_point_id_and_python_hydrates_catalog_fields() -> None:
+    llm = SelectionLlm("476338")
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        catalog_mode="qdrant",
+    )
+    matcher = CatalogMatcher(settings, llm)  # type: ignore[arg-type]
+    try:
+        match = matcher._select_with_llm(
+            TenderPosition(product="Стеллаж 2500x1060x600 мм", quantity=2),
+            [qdrant_text_candidate(476338, name="Стеллаж Универсал 2500", price="15707.43")],
+        )
+    finally:
+        matcher.close()
+
+    assert "не по цене" in llm.prompt
+    assert match.name == "Стеллаж Универсал 2500"
+    assert match.link == "https://www.etm.ru/cat/nn/476338"
+    assert match.median_price == 15707.43
