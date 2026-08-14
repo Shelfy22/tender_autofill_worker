@@ -57,4 +57,4 @@ python -m pytest
 1 млн руб.; это явно отмечается полями `priceBasis=qdrant_selected_product` и
 `documentPriceUsedForSupplyValue=false`.
 
-RAR4/RAR5 распаковываются системными `lsar/unar` с проверкой путей и размеров. XLS сначала преобразуется LibreOffice в XLSX; XLSX потоково читается `openpyxl` с сохранением sheet/row/column coordinates. OpenRouter model fallback для каждого AI-вызова управляется `LLM_ENABLE_MODEL_FALLBACK` и `LLM_FALLBACK_MODELS`; подробности — в [PROCESS_FLOW.md](PROCESS_FLOW.md).
+RAR4/RAR5 распаковываются системными `lsar/unar` с проверкой путей и размеров. XLS сначала преобразуется LibreOffice в XLSX; XLSX потоково читается `openpyxl` с сохранением sheet/row/column coordinates. LLM-запросы отправляются напрямую в OpenAI: попытки 1/2/3 используют соответственно `gpt-5`, `gpt-5-mini` и `gpt-4.1`; подробности — в [PROCESS_FLOW.md](PROCESS_FLOW.md).

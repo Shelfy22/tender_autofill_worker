@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+import httpx
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -91,23 +92,79 @@ class LlmClient:
             max_retries=0,
         )
 
-    def _fallback_body(self, models: list[str]) -> dict[str, Any]:
-        if "openrouter.ai" not in self.settings.llm_base_url.lower() or len(models) < 2:
-            return {}
-        return {"models": models[1:]}
-
     def _record_model(self, response: Any, primary: str) -> None:
-        used = str(getattr(response, "model", None) or primary)
+        used = str(self._response_value(response, "model") or primary)
         if used not in self.models_used:
             self.models_used.append(used)
 
     @staticmethod
+    def _response_value(response: Any, key: str) -> Any:
+        if isinstance(response, dict):
+            return response.get(key)
+        return getattr(response, key, None)
+
+    @staticmethod
     def _usage(response: Any) -> tuple[int, int, int]:
-        usage = getattr(response, "usage", None)
-        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
-        completion = int(getattr(usage, "completion_tokens", 0) or 0)
+        usage = LlmClient._response_value(response, "usage") or {}
+        if isinstance(usage, dict):
+            prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+            completion = int(
+                usage.get("completion_tokens") or usage.get("output_tokens") or 0
+            )
+            total = int(usage.get("total_tokens") or prompt + completion)
+            return prompt, completion, total
+        prompt = int(
+            getattr(usage, "prompt_tokens", 0)
+            or getattr(usage, "input_tokens", 0)
+            or 0
+        )
+        completion = int(
+            getattr(usage, "completion_tokens", 0)
+            or getattr(usage, "output_tokens", 0)
+            or 0
+        )
         total = int(getattr(usage, "total_tokens", 0) or prompt + completion)
         return prompt, completion, total
+
+    @staticmethod
+    def _http_status(error: BaseException | None) -> int | None:
+        if error is None:
+            return 200
+        direct = int(getattr(error, "status_code", 0) or 0)
+        if direct:
+            return direct
+        response = getattr(error, "response", None)
+        return int(getattr(response, "status_code", 0) or 0) or None
+
+    @staticmethod
+    def _supports_temperature(model: str) -> bool:
+        return not model.lower().startswith(("gpt-5", "o1", "o3", "o4"))
+
+    def _chat_completion_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_completion_tokens": self.settings.llm_max_output_tokens,
+        }
+        if self._supports_temperature(self.model):
+            kwargs["temperature"] = 0
+        return kwargs
+
+    @staticmethod
+    def _responses_output_text(response: dict[str, Any]) -> str:
+        direct = response.get("output_text")
+        if isinstance(direct, str):
+            return direct
+        texts: list[str] = []
+        for output in response.get("output") or []:
+            if not isinstance(output, dict):
+                continue
+            for content in output.get("content") or []:
+                if not isinstance(content, dict) or content.get("type") != "output_text":
+                    continue
+                text = content.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+        return "\n".join(texts)
 
     def _observe_llm(
         self,
@@ -122,7 +179,7 @@ class LlmClient:
     ) -> None:
         if not self.observer:
             return
-        actual_model = str(getattr(response, "model", None) or primary_model)
+        actual_model = str(self._response_value(response, "model") or primary_model)
         prompt_tokens, completion_tokens, total_tokens = self._usage(response)
         fallback_used = actual_model != primary_model
         counters = {
@@ -141,9 +198,9 @@ class LlmClient:
             operation=operation,
             model=actual_model,
             primary_model=primary_model,
-            provider_request_id=str(getattr(response, "id", "") or "") or None,
+            provider_request_id=str(self._response_value(response, "id") or "") or None,
             http_method="POST",
-            http_status=int(getattr(error, "status_code", 0) or 0) or (200 if error is None else None),
+            http_status=self._http_status(error),
             duration_seconds=round(time.monotonic() - started, 3),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -171,15 +228,12 @@ class LlmClient:
         started = time.monotonic()
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
-                temperature=0,
-                max_tokens=self.settings.llm_max_output_tokens,
+                **self._chat_completion_kwargs(),
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": f"{prompt}\n\nJSON Schema:\n{schema_json}"},
                 ],
-                extra_body=self._fallback_body(self.model_chain),
             )
         except Exception as exc:
             self._observe_llm(
@@ -264,37 +318,48 @@ documentLineTotalRub (сумма/стоимость всей строки), то
     def ocr_pdf(self, path: Path) -> str:
         data = base64.b64encode(path.read_bytes()).decode("ascii")
         ocr_models = self.settings.models_for_ocr()
-        extra_body: dict[str, Any] = {
-            "plugins": [{"id": "file-parser", "pdf": {"engine": self.settings.ocr_pdf_engine}}]
-        }
-        extra_body.update(self._fallback_body(ocr_models))
         started = time.monotonic()
         try:
-            response = self.client.chat.completions.create(
-                model=ocr_models[0],
-                temperature=0,
-                max_tokens=self.settings.llm_max_output_tokens,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Ты OCR-модуль. Верни только распознанный текст документа без markdown.",
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Распознай весь текст PDF, сохраняя таблицы и числа."},
-                            {
-                                "type": "file",
-                                "file": {
+            http_response = httpx.post(
+                f"{self.settings.llm_base_url}/responses",
+                headers={
+                    "Authorization": f"Bearer {self.settings.llm_api_key.get_secret_value()}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": ocr_models[0],
+                    "max_output_tokens": self.settings.llm_max_output_tokens,
+                    "instructions": (
+                        "Ты OCR-модуль. Верни только распознанный текст документа без markdown. "
+                        "Сохраняй таблицы, числа и структуру строк."
+                    ),
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_file",
                                     "filename": path.name,
                                     "file_data": f"data:application/pdf;base64,{data}",
+                                    "detail": self.settings.ocr_pdf_detail,
                                 },
-                            },
-                        ],
-                    },
-                ],
-                extra_body=extra_body,
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        "Распознай весь текст PDF, сохраняя таблицы, цены, "
+                                        "количества и единицы измерения."
+                                    ),
+                                },
+                            ],
+                        },
+                    ],
+                },
+                timeout=self.settings.llm_timeout_seconds,
             )
+            http_response.raise_for_status()
+            response = http_response.json()
+            if not isinstance(response, dict):
+                raise ValueError("OpenAI Responses API returned a non-object response")
         except Exception as exc:
             self._observe_llm(
                 operation="ocr_pdf",
@@ -312,4 +377,4 @@ documentLineTotalRub (сумма/стоимость всей строки), то
             started=started,
             response=response,
         )
-        return response.choices[0].message.content or ""
+        return self._responses_output_text(response)

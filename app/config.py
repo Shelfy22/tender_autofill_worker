@@ -56,19 +56,15 @@ class Settings(BaseSettings):
     seldon_username: str | None = None
     seldon_password: SecretStr | None = None
 
-    llm_base_url: str = "https://openrouter.ai/api/v1"
+    llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: SecretStr | None = None
-    llm_model_attempt_1: str = "google/gemini-3.5-flash"
-    llm_model_attempt_2: str = "google/gemini-2.5-pro"
-    llm_model_attempt_3: str = "openai/gpt-5.5"
-    llm_enable_model_fallback: bool = True
-    # Optional comma-separated override. Empty means: use the other attempt models.
-    llm_fallback_models: str = ""
+    llm_model_attempt_1: str = "gpt-5"
+    llm_model_attempt_2: str = "gpt-5-mini"
+    llm_model_attempt_3: str = "gpt-4.1"
     llm_timeout_seconds: float = Field(default=300, gt=0)
     llm_max_output_tokens: int = Field(default=16_000, ge=256)
-    ocr_model: str = "google/gemini-2.5-flash"
-    ocr_fallback_models: str = ""
-    ocr_pdf_engine: str = "mistral-ocr"
+    ocr_model: str = "gpt-4.1"
+    ocr_pdf_detail: str = "high"
 
     ipro_base_url: str = "https://idev.etm.ru/api/ipro/user/registration_ipro"
     ipro_token: SecretStr | None = None
@@ -99,6 +95,44 @@ class Settings(BaseSettings):
             raise ValueError("catalog_mode must be disabled, http, or qdrant")
         return normalized
 
+    @field_validator("llm_base_url")
+    @classmethod
+    def reject_openrouter_endpoint(cls, value: str) -> str:
+        normalized = value.rstrip("/")
+        if "openrouter.ai" in normalized.lower():
+            raise ValueError("LLM_BASE_URL must point to OpenAI, not OpenRouter")
+        return normalized
+
+    @field_validator("llm_api_key")
+    @classmethod
+    def reject_openrouter_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value and value.get_secret_value().startswith("sk-or-v1-"):
+            raise ValueError("LLM_API_KEY must be an OpenAI Platform key, not OpenRouter")
+        return value
+
+    @field_validator(
+        "llm_model_attempt_1",
+        "llm_model_attempt_2",
+        "llm_model_attempt_3",
+        "ocr_model",
+    )
+    @classmethod
+    def reject_provider_prefixed_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if "/" in normalized:
+            raise ValueError(
+                "OpenAI model IDs must not use an OpenRouter provider prefix"
+            )
+        return normalized
+
+    @field_validator("ocr_pdf_detail")
+    @classmethod
+    def validate_ocr_pdf_detail(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"auto", "low", "high"}:
+            raise ValueError("ocr_pdf_detail must be auto, low, or high")
+        return normalized
+
     def model_for_attempt(self, attempt: int) -> str:
         if attempt <= 1:
             return self.llm_model_attempt_1
@@ -106,30 +140,11 @@ class Settings(BaseSettings):
             return self.llm_model_attempt_2
         return self.llm_model_attempt_3
 
-    @staticmethod
-    def _model_list(value: str) -> list[str]:
-        return [model.strip() for model in value.split(",") if model.strip()]
-
     def models_for_attempt(self, attempt: int) -> list[str]:
-        primary = self.model_for_attempt(attempt)
-        if not self.llm_enable_model_fallback:
-            return [primary]
-        configured = self._model_list(self.llm_fallback_models)
-        attempt_models = [
-            self.llm_model_attempt_1,
-            self.llm_model_attempt_2,
-            self.llm_model_attempt_3,
-        ]
-        index = min(max(attempt, 1), 3) - 1
-        candidates = configured or [*attempt_models[index:], *attempt_models[:index]]
-        return list(dict.fromkeys([primary, *candidates]))
+        return [self.model_for_attempt(attempt)]
 
     def models_for_ocr(self) -> list[str]:
-        if not self.llm_enable_model_fallback:
-            return [self.ocr_model]
-        return list(
-            dict.fromkeys([self.ocr_model, *self._model_list(self.ocr_fallback_models)])
-        )
+        return [self.ocr_model]
 
 
 @lru_cache
