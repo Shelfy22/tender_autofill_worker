@@ -1,6 +1,7 @@
 from app.models import DecisionReason, LlmDecision, NormalizedJob
 from app.services.decision import (
     ASSORTMENT_REASON,
+    PAYMENT_DELAY_REASON,
     PRICE_REASON,
     REMOTE_TERRITORY_REASON,
     HardReason,
@@ -272,3 +273,41 @@ def test_decision_prompt_lists_all_remote_territories() -> None:
     assert "Калининград/Калининградская область" in prompt
     assert "Республика Дагестан" in prompt
     assert "Республика Саха (Якутия)" in prompt
+
+
+def test_payment_delay_rejects_at_ninety_days_inclusive() -> None:
+    payment_terms = [
+        "Оплата будет произведена в течение 90 дней после поставки.",
+        "Оплата производится в течение 90 рабочих дней.",
+        "Оплата производится в течение 90 календарных дней.",
+        "Предусмотрена отсрочка платежа 90 дней.",
+    ]
+
+    for text in payment_terms:
+        reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
+        assert PAYMENT_DELAY_REASON in [item.reason for item in reasons]
+
+
+def test_payment_delay_below_ninety_days_does_not_reject() -> None:
+    reasons, _ = calculate_hard_reasons(
+        job(),
+        {},
+        product_check(),
+        "Оплата будет произведена в течение 89 дней после поставки.",
+    )
+
+    assert PAYMENT_DELAY_REASON not in [item.reason for item in reasons]
+
+
+def test_decision_prompt_uses_ninety_day_payment_threshold() -> None:
+    prompt = build_decision_prompt(
+        fields={},
+        hard_reasons=[],
+        checks={},
+        product_check=product_check(),
+        all_text="Документация тендера",
+        maximum_text_chars=10_000,
+    )
+
+    assert "при 90 днях и более (`>= 90`)" in prompt
+    assert "к рабочим, календарным и дням без уточнения типа" in prompt
