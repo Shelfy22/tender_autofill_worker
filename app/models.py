@@ -72,6 +72,44 @@ class ExtractedFieldsResponse(BaseModel):
     fields: dict[str, FieldValue | Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields_list(cls, value: Any) -> Any:
+        """Accept the legacy LLM list shape without weakening final validation.
+
+        Some providers return ``fields`` as [{fieldName, value, ...}] despite the
+        requested object schema. Convert that representation deterministically;
+        downstream field allow-list validation remains unchanged.
+        """
+        if not isinstance(value, dict) or not isinstance(value.get("fields"), list):
+            return value
+
+        data = dict(value)
+        normalized: dict[str, Any] = {}
+        for item in data["fields"]:
+            if not isinstance(item, dict):
+                continue
+            field_name = next(
+                (
+                    str(item[key]).strip()
+                    for key in ("fieldName", "field_name", "name", "key")
+                    if item.get(key) is not None and str(item[key]).strip()
+                ),
+                "",
+            )
+            if not field_name or field_name in normalized:
+                continue
+
+            field = dict(item)
+            for key in ("fieldName", "field_name", "name", "key"):
+                field.pop(key, None)
+            if "value" not in field and "fieldValue" in field:
+                field["value"] = field.pop("fieldValue")
+            normalized[field_name] = field
+
+        data["fields"] = normalized
+        return data
+
 
 def _parse_money_value(value: Any) -> float | None:
     if value is None or value == "":

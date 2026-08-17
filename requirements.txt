@@ -14,4 +14,5 @@ py7zr==0.22.0
 beautifulsoup4==4.13.3
 prometheus-client==0.21.1
 psutil==7.2.2
+json-repair==0.*
 pytest==8.3.4

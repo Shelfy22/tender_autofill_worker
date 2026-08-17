@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import base64
+import copy
+import hashlib
 import json
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from json_repair import repair_json
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -20,24 +24,173 @@ if TYPE_CHECKING:
 T = TypeVar("T", bound=BaseModel)
 
 
-def extract_json(text: str) -> dict[str, Any] | list[Any]:
+@dataclass(frozen=True)
+class JsonExtractionResult:
+    value: dict[str, Any] | list[Any]
+    source: str
+    repaired: bool = False
+    initial_error: json.JSONDecodeError | None = None
+
+
+def _json_candidates(source: str) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = [("raw", source)]
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", source, re.I)
+    if fenced:
+        candidates.append(("markdown_fence", fenced.group(1).strip()))
+
+    object_start, object_end = source.find("{"), source.rfind("}")
+    if object_start >= 0 and object_end > object_start:
+        candidates.append(("object_bounds", source[object_start : object_end + 1]))
+    unique: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name, candidate in candidates:
+        if candidate and candidate not in seen:
+            unique.append((name, candidate))
+            seen.add(candidate)
+    return unique
+
+
+def extract_json_result(
+    text: str,
+    *,
+    allow_repair: bool = True,
+) -> JsonExtractionResult:
     source = str(text or "").strip()
     if not source:
         raise ValueError("LLM вернул пустой ответ")
-    try:
-        return json.loads(source)
-    except json.JSONDecodeError:
-        pass
-    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", source, re.I)
-    if fenced:
+
+    candidates = _json_candidates(source)
+    first_error: json.JSONDecodeError | None = None
+    last_error: json.JSONDecodeError | None = None
+    for name, candidate in candidates:
         try:
-            return json.loads(fenced.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-    start, end = source.find("{"), source.rfind("}")
-    if start >= 0 and end > start:
-        return json.loads(source[start : end + 1])
+            decoded = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            first_error = first_error or exc
+            last_error = exc
+            continue
+        if isinstance(decoded, (dict, list)):
+            return JsonExtractionResult(value=decoded, source=name)
+
+    if not allow_repair:
+        if last_error is not None:
+            raise last_error
+        raise ValueError("LLM не вернул валидный JSON")
+
+    # Prefer a fenced or explicitly bounded payload over surrounding prose when
+    # invoking the permissive repair parser. Pydantic validation remains mandatory.
+    repair_priority = {
+        "markdown_fence": 0,
+        "object_bounds": 1,
+        "raw": 3,
+    }
+
+    def candidate_priority(item: tuple[str, str]) -> int:
+        name, candidate = item
+        if name == "raw" and candidate.lstrip().startswith("{"):
+            return 1
+        return repair_priority.get(name, 99)
+
+    repair_candidates = sorted(
+        candidates,
+        key=candidate_priority,
+    )
+    for name, candidate in repair_candidates:
+        try:
+            repaired = repair_json(
+                candidate,
+                return_objects=True,
+                ensure_ascii=False,
+                skip_json_loads=True,
+            )
+        except (ValueError, TypeError, IndexError):
+            continue
+        if isinstance(repaired, (dict, list)):
+            return JsonExtractionResult(
+                value=repaired,
+                source=name,
+                repaired=True,
+                initial_error=first_error,
+            )
+
+    if last_error is not None:
+        raise last_error
     raise ValueError("LLM не вернул валидный JSON")
+
+
+def extract_json(text: str) -> dict[str, Any] | list[Any]:
+    return extract_json_result(text).value
+
+
+def _strict_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Convert Pydantic's validation schema to a strict output schema.
+
+    Strict structured-output providers require every declared property and reject
+    undeclared properties. Nullable fields remain nullable through their anyOf.
+    """
+    strict_schema = copy.deepcopy(schema)
+
+    def visit(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+            return
+        if not isinstance(node, dict):
+            return
+        node.pop("default", None)
+        for definition in (node.get("$defs") or {}).values():
+            visit(definition)
+        for item in node.get("anyOf") or []:
+            visit(item)
+        if isinstance(node.get("items"), dict):
+            visit(node["items"])
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            for child in properties.values():
+                visit(child)
+            node["required"] = list(properties)
+            node["additionalProperties"] = False
+        elif isinstance(node.get("additionalProperties"), dict):
+            visit(node["additionalProperties"])
+
+    visit(strict_schema)
+    return strict_schema
+
+
+def _response_schema(schema: type[T], *, strict: bool) -> dict[str, Any]:
+    generated = schema.model_json_schema()
+    if not strict:
+        return generated
+
+    generated = _strict_json_schema(generated)
+    if schema is ExtractedFieldsResponse:
+        # Dynamic dictionary keys are incompatible with strict schemas. The worker
+        # has a fixed field contract, so expose those keys explicitly to the model.
+        field_value = generated.get("$defs", {}).get("FieldValue")
+        if isinstance(field_value, dict):
+            value_schema = field_value.get("properties", {}).get("value")
+            if isinstance(value_schema, dict):
+                value_schema.clear()
+                value_schema["anyOf"] = [
+                    {"type": "string"},
+                    {"type": "number"},
+                    {"type": "boolean"},
+                    {"type": "null"},
+                ]
+        fields_schema = generated.get("properties", {}).get("fields")
+        if isinstance(fields_schema, dict):
+            fields_schema.clear()
+            fields_schema.update(
+                {
+                    "type": "object",
+                    "properties": {
+                        name: {"$ref": "#/$defs/FieldValue"} for name in FIELD_NAMES
+                    },
+                    "required": list(FIELD_NAMES),
+                    "additionalProperties": False,
+                }
+            )
+    return generated
 
 
 FIELD_NAMES = [
@@ -91,10 +244,53 @@ class LlmClient:
             max_retries=0,
         )
 
+    def _uses_openrouter_extensions(self) -> bool:
+        return self.settings.llm_provider == "openrouter"
+
     def _fallback_body(self, models: list[str]) -> dict[str, Any]:
-        if "openrouter.ai" not in self.settings.llm_base_url.lower() or len(models) < 2:
+        if not self._uses_openrouter_extensions() or len(models) < 2:
             return {}
         return {"models": models[1:]}
+
+    def _structured_extra_body(self, models: list[str]) -> dict[str, Any]:
+        body = self._fallback_body(models)
+        if not self._uses_openrouter_extensions():
+            return body
+        if self.settings.llm_require_supported_parameters:
+            body["provider"] = {"require_parameters": True}
+        if self.settings.llm_enable_response_healing:
+            body["plugins"] = [{"id": "response-healing"}]
+        return body
+
+    def _response_format(self, schema: type[T]) -> dict[str, Any]:
+        if self.settings.llm_structured_output_mode == "json_object":
+            return {"type": "json_object"}
+        schema_name = re.sub(r"[^A-Za-z0-9_-]", "_", schema.__name__)[:64]
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name or "structured_response",
+                "strict": self.settings.llm_json_schema_strict,
+                "schema": _response_schema(
+                    schema,
+                    strict=self.settings.llm_json_schema_strict,
+                ),
+            },
+        }
+
+    @staticmethod
+    def _response_details(response: Any) -> dict[str, Any]:
+        choices = getattr(response, "choices", None) or []
+        choice = choices[0] if choices else None
+        message = getattr(choice, "message", None)
+        content = str(getattr(message, "content", None) or "")
+        return {
+            "finishReason": getattr(choice, "finish_reason", None),
+            "contentChars": len(content),
+            "contentSha256": hashlib.sha256(content.encode("utf-8")).hexdigest()
+            if content
+            else None,
+        }
 
     def _record_model(self, response: Any, primary: str) -> None:
         used = str(getattr(response, "model", None) or primary)
@@ -153,9 +349,58 @@ class LlmClient:
                 "modelChain": model_chain,
                 "fallbackUsed": fallback_used,
                 "attempt": self.attempt,
+                **(self._response_details(response) if response is not None else {}),
                 **(audit_details or {}),
             },
             counters=counters,
+        )
+
+    def _observe_parse(
+        self,
+        *,
+        operation: str,
+        response: Any,
+        started: float,
+        extraction: JsonExtractionResult | None = None,
+        fields_shape_normalized: bool = False,
+        error: BaseException | None = None,
+    ) -> None:
+        if not self.observer:
+            return
+        initial_error = extraction.initial_error if extraction else None
+        details: dict[str, Any] = {
+            **self._response_details(response),
+            "jsonSource": extraction.source if extraction else None,
+            "jsonRepaired": bool(extraction and extraction.repaired),
+            "fieldsShapeNormalized": fields_shape_normalized,
+        }
+        if initial_error is not None:
+            details.update(
+                {
+                    "initialJsonErrorLine": initial_error.lineno,
+                    "initialJsonErrorColumn": initial_error.colno,
+                    "initialJsonErrorPosition": initial_error.pos,
+                }
+            )
+        if isinstance(error, json.JSONDecodeError):
+            details.update(
+                {
+                    "jsonErrorLine": error.lineno,
+                    "jsonErrorColumn": error.colno,
+                    "jsonErrorPosition": error.pos,
+                }
+            )
+        self.observer.event(
+            event_type="llm_response_parse",
+            status="failed" if error else "completed",
+            stage=operation,
+            service="llm",
+            operation=f"{operation}_parse",
+            model=str(getattr(response, "model", None) or self.model),
+            primary_model=self.model,
+            duration_seconds=round(time.monotonic() - started, 3),
+            error=error,
+            details=details,
         )
 
     def json_call(
@@ -174,12 +419,12 @@ class LlmClient:
                 model=self.model,
                 temperature=0,
                 max_tokens=self.settings.llm_max_output_tokens,
-                response_format={"type": "json_object"},
+                response_format=self._response_format(schema),
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": f"{prompt}\n\nJSON Schema:\n{schema_json}"},
                 ],
-                extra_body=self._fallback_body(self.model_chain),
+                extra_body=self._structured_extra_body(self.model_chain),
             )
         except Exception as exc:
             self._observe_llm(
@@ -201,7 +446,41 @@ class LlmClient:
             audit_details=audit_details,
         )
         content = response.choices[0].message.content or ""
-        return schema.model_validate(extract_json(content))
+        parse_started = time.monotonic()
+        extraction: JsonExtractionResult | None = None
+        fields_shape_normalized = False
+        try:
+            finish_reason = self._response_details(response).get("finishReason")
+            extraction = extract_json_result(
+                content,
+                # Repairing a response explicitly marked as truncated could turn an
+                # incomplete business decision into an apparently valid one.
+                allow_repair=finish_reason not in {"length", "max_tokens"},
+            )
+            fields_shape_normalized = bool(
+                schema is ExtractedFieldsResponse
+                and isinstance(extraction.value, dict)
+                and isinstance(extraction.value.get("fields"), list)
+            )
+            validated = schema.model_validate(extraction.value)
+        except Exception as exc:
+            self._observe_parse(
+                operation=operation,
+                response=response,
+                started=parse_started,
+                extraction=extraction,
+                fields_shape_normalized=fields_shape_normalized,
+                error=exc,
+            )
+            raise
+        self._observe_parse(
+            operation=operation,
+            response=response,
+            started=parse_started,
+            extraction=extraction,
+            fields_shape_normalized=fields_shape_normalized,
+        )
+        return validated
 
     def extract_fields(self, combined_text: str) -> ExtractedFieldsResponse:
         skeleton = {name: {"value": None, "confidence": "low", "source": None, "evidence": None} for name in FIELD_NAMES}

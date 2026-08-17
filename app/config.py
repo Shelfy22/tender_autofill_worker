@@ -58,6 +58,9 @@ class Settings(BaseSettings):
 
     llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: SecretStr | None = None
+    # API behaviour must be explicit: production may use an internal OpenRouter proxy
+    # whose hostname does not contain "openrouter.ai".
+    llm_provider: str = "openrouter"
     llm_model_attempt_1: str = "google/gemini-3.5-flash"
     llm_model_attempt_2: str = "google/gemini-2.5-pro"
     llm_model_attempt_3: str = "openai/gpt-5.5"
@@ -66,6 +69,10 @@ class Settings(BaseSettings):
     llm_fallback_models: str = ""
     llm_timeout_seconds: float = Field(default=300, gt=0)
     llm_max_output_tokens: int = Field(default=16_000, ge=256)
+    llm_structured_output_mode: str = "json_schema"
+    llm_json_schema_strict: bool = True
+    llm_enable_response_healing: bool = True
+    llm_require_supported_parameters: bool = True
     ocr_model: str = "google/gemini-2.5-flash"
     ocr_fallback_models: str = ""
     ocr_pdf_engine: str = "mistral-ocr"
@@ -97,6 +104,24 @@ class Settings(BaseSettings):
         normalized = value.strip().lower()
         if normalized not in {"disabled", "http", "qdrant"}:
             raise ValueError("catalog_mode must be disabled, http, or qdrant")
+        return normalized
+
+    @field_validator("llm_provider")
+    @classmethod
+    def validate_llm_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"openrouter", "openai_compatible"}:
+            raise ValueError("llm_provider must be openrouter or openai_compatible")
+        return normalized
+
+    @field_validator("llm_structured_output_mode")
+    @classmethod
+    def validate_llm_structured_output_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"json_schema", "json_object"}:
+            raise ValueError(
+                "llm_structured_output_mode must be json_schema or json_object"
+            )
         return normalized
 
     def model_for_attempt(self, attempt: int) -> str:
