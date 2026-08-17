@@ -444,13 +444,7 @@ def apply_final_decision(
         note_parts.append(summary)
     reason_origin = "none"
 
-    if counterparty_requires_work:
-        status, reason, confidence = "Проработка контрагента", "Прочее", "medium"
-        reason_origin = "counterparty"
-        note_parts.append(
-            counterparty_lookup.get("reason") or "Контрагент не найден в IPro или ИНН/КПП не совпали."
-        )
-    elif hard:
+    if hard:
         status = "Отказано КУ ЦП"
         if hard_non_assortment:
             # Existing priority order is preserved among all deterministic reasons
@@ -465,16 +459,21 @@ def apply_final_decision(
             reason, confidence = hard[0].reason, "high"
             reason_origin = "deterministic"
         note_parts.append(f"Основная причина отказа: {reason}.")
+    elif llm_decision and llm_decision.decision == "reject" and llm_primary:
+        status, reason, confidence = "Отказано КУ ЦП", llm_primary, llm_decision.confidence
+        reason_origin = "llm"
+        note_parts.append(llm_decision.note or f"Подтверждён критерий отказа: {llm_primary}.")
+    elif counterparty_requires_work:
+        status, reason, confidence = "Проработка контрагента", "Прочее", "medium"
+        reason_origin = "counterparty"
+        note_parts.append(
+            counterparty_lookup.get("reason") or "Контрагент не найден в IPro или ИНН/КПП не совпали."
+        )
     elif llm_decision and llm_decision.decision == "reject":
-        if llm_primary:
-            status, reason, confidence = "Отказано КУ ЦП", llm_primary, llm_decision.confidence
-            reason_origin = "llm"
-            note_parts.append(llm_decision.note or f"Подтверждён критерий отказа: {llm_primary}.")
-        else:
-            status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
-            note_parts.append(
-                "LLM reject содержал только запрещённую/неподтверждённую controlled-причину."
-            )
+        status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
+        note_parts.append(
+            "LLM reject содержал только запрещённую/неподтверждённую controlled-причину."
+        )
     elif llm_decision and llm_decision.decision == "approve":
         status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
         note_parts.append(llm_decision.note or "Критерии отказа не подтверждены.")
@@ -482,6 +481,20 @@ def apply_final_decision(
         status, reason, confidence = "Загружен Seldon", "Прочее", "low"
         reason_origin = "fallback"
         note_parts.append("LLM решения по статусу не вернул валидный JSON; обязательные критерии не сработали.")
+
+    counterparty_advisory_only = (
+        status == "Отказано КУ ЦП" and counterparty_requires_work
+    )
+    if counterparty_advisory_only:
+        counterparty_evidence = (
+            counterparty_lookup.get("reason")
+            or "Контрагент не найден в IPro или ИНН/КПП не совпали."
+        )
+        note_parts.append(
+            "Дополнительная информация по контрагенту: "
+            f"{counterparty_evidence} Статус «Проработка контрагента» не применяется, "
+            "поскольку тендер уже имеет подтверждённую причину отказа."
+        )
 
     additional_reasons: list[dict[str, str]] = []
 
@@ -535,10 +548,15 @@ def apply_final_decision(
         fields["tenderStatusReason"] = reason
     else:
         fields.pop("tenderStatusReason", None)
+    status_source = (
+        "Проверка контрагента/МОПП"
+        if reason_origin == "counterparty"
+        else "Детерминированные правила согласования"
+        if reason_origin == "deterministic"
+        else "LLM: решение КУ ЦП"
+    )
     meta["tenderStatus"] = {
-        "source": "Проверка контрагента/МОПП" if counterparty_requires_work else (
-            "Детерминированные правила согласования" if hard else "LLM: решение КУ ЦП"
-        ),
+        "source": status_source,
         "confidence": confidence,
         "evidence": note[:1200],
     }
@@ -572,6 +590,7 @@ def apply_final_decision(
         "confidence": confidence,
         "reasonOrigin": reason_origin,
         "counterpartyRequiresWork": counterparty_requires_work,
+        "counterpartyAdvisoryOnly": counterparty_advisory_only,
         "hardReasons": [item.as_dict() for item in hard],
         "hardNonAssortmentReasons": [item.as_dict() for item in hard_non_assortment],
         "llmReasonCandidates": llm_reason_candidates,

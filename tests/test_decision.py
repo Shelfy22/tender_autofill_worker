@@ -93,7 +93,7 @@ def test_negative_remaining_days_is_preserved_by_rule() -> None:
     assert any("менее 3" in reason.reason for reason in reasons)
 
 
-def test_final_status_priority_counterparty_then_hard_then_llm() -> None:
+def test_hard_rejection_has_priority_over_counterparty_work() -> None:
     hard, _ = calculate_hard_reasons(
         job(), {"initialPrice": 100}, product_check(), ""
     )
@@ -105,9 +105,11 @@ def test_final_status_priority_counterparty_then_hard_then_llm() -> None:
         counterparty_lookup={"status": "not_found", "reason": "нет контрагента"},
         llm_decision=LlmDecision(decision="approve"),
     )
-    assert fields["tenderStatus"] == "Проработка контрагента"
-    assert fields["tenderStatusReason"] == "Прочее"
+    assert fields["tenderStatus"] == "Отказано КУ ЦП"
+    assert fields["tenderStatusReason"] == PRICE_REASON
+    assert "Дополнительная информация по контрагенту: нет контрагента" in fields["tenderStatusNote"]
     assert decision["counterpartyRequiresWork"] is True
+    assert decision["counterpartyAdvisoryOnly"] is True
 
     fields, _, _ = apply_final_decision(
         fields={},
@@ -119,6 +121,48 @@ def test_final_status_priority_counterparty_then_hard_then_llm() -> None:
     )
     assert fields["tenderStatus"] == "Отказано КУ ЦП"
     assert fields["tenderStatusReason"] == PRICE_REASON
+
+
+def test_counterparty_work_is_used_when_tender_would_otherwise_be_approved() -> None:
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=1),
+        hard_reasons=[],
+        counterparty_lookup={"status": "not_found", "reason": "ИНН/КПП не найдены в IPro"},
+        llm_decision=LlmDecision(decision="approve"),
+    )
+
+    assert fields["tenderStatus"] == "Проработка контрагента"
+    assert fields["tenderStatusReason"] == "Прочее"
+    assert decision["counterpartyRequiresWork"] is True
+    assert decision["counterpartyAdvisoryOnly"] is False
+
+
+def test_llm_rejection_has_priority_over_counterparty_work() -> None:
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=1),
+        hard_reasons=[],
+        counterparty_lookup={"status": "not_found", "reason": "контрагент отсутствует"},
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=REMOTE_TERRITORY_REASON,
+            detectedReasons=[
+                DecisionReason(
+                    reason=REMOTE_TERRITORY_REASON,
+                    evidence="Место поставки: Республика Саха (Якутия)",
+                    confidence="high",
+                )
+            ],
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Отказано КУ ЦП"
+    assert fields["tenderStatusReason"] == REMOTE_TERRITORY_REASON
+    assert "Дополнительная информация по контрагенту: контрагент отсутствует" in fields["tenderStatusNote"]
+    assert decision["counterpartyAdvisoryOnly"] is True
 
 
 def test_llm_approve_without_hard_reasons() -> None:
