@@ -1,6 +1,8 @@
 from app.models import DecisionReason, LlmDecision, NormalizedJob
 from app.services.decision import (
     ASSORTMENT_REASON,
+    DOCUMENTATION_REASON,
+    MARKET_RESEARCH_REASON,
     PAYMENT_DELAY_REASON,
     PRICE_REASON,
     REMOTE_TERRITORY_REASON,
@@ -11,11 +13,11 @@ from app.services.decision import (
 )
 
 
-def job(remaining_days: float | None = 5) -> NormalizedJob:
+def job(remaining_days: float | None = 5, report_id: int = 1) -> NormalizedJob:
     return NormalizedJob(
         job_record_key="daily:b:1:1",
         batch_id="b",
-        report_id=1,
+        report_id=report_id,
         seldon_id="1",
         remaining_days=remaining_days,
         report_fields={},
@@ -130,6 +132,41 @@ def test_llm_approve_without_hard_reasons() -> None:
     )
     assert fields["tenderStatus"] == "Согласовано КУ ЦП"
     assert "tenderStatusReason" not in fields
+
+
+def test_seldon_404_is_deterministic_missing_documentation_rejection() -> None:
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {},
+        product_check(total=1),
+        "",
+        document_context={
+            "apiCode": 404,
+            "apiDescription": "По запрошенному идентификатору закупки отсутствует документация",
+            "documentsFound": 0,
+            "documentationMissing": True,
+        },
+    )
+
+    assert DOCUMENTATION_REASON in [reason.reason for reason in reasons]
+    assert checks["documentationCheck"]["automaticApprovalAllowed"] is False
+
+
+def test_missing_products_or_coverage_cannot_be_approved() -> None:
+    empty_check = product_check(total=0, coveragePercent=None)
+    reasons, _ = calculate_hard_reasons(job(), {}, empty_check, "")
+    assert DOCUMENTATION_REASON in [reason.reason for reason in reasons]
+
+    fields, _, _ = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=empty_check,
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(decision="approve"),
+    )
+    assert fields["tenderStatus"] == "Отказано КУ ЦП"
+    assert fields["tenderStatusReason"] == DOCUMENTATION_REASON
 
 
 def test_assortment_is_primary_when_it_is_the_only_rejection_reason() -> None:
@@ -311,3 +348,98 @@ def test_decision_prompt_uses_ninety_day_payment_threshold() -> None:
 
     assert "при 90 днях и более (`>= 90`)" in prompt
     assert "к рабочим, календарным и дням без уточнения типа" in prompt
+
+
+def test_market_research_rejects_only_commercial_tenders() -> None:
+    text = "Предмет процедуры: маркетинговое исследование рынка электротехнической продукции."
+    documents_present = {
+        "apiCode": 200,
+        "apiDescription": "OK",
+        "documentsFound": 2,
+        "documentationMissing": False,
+    }
+
+    for report_id in (1, 2):
+        reasons, checks = calculate_hard_reasons(
+            job(report_id=report_id),
+            {},
+            product_check(total=1),
+            text,
+            document_context=documents_present,
+        )
+        assert MARKET_RESEARCH_REASON not in [reason.reason for reason in reasons]
+        assert checks["marketResearchCheck"]["rejectionApplicable"] is False
+
+    reasons, checks = calculate_hard_reasons(
+        job(report_id=3),
+        {},
+        product_check(total=1),
+        text,
+        document_context=documents_present,
+    )
+    assert MARKET_RESEARCH_REASON in [reason.reason for reason in reasons]
+    assert checks["marketResearchCheck"]["triggered"] is True
+
+
+def test_223_without_documents_rejects_by_documentation_not_market_research() -> None:
+    reasons, _ = calculate_hard_reasons(
+        job(report_id=1),
+        {},
+        product_check(total=1),
+        "Маркетинговое исследование рынка.",
+        document_context={
+            "apiCode": 404,
+            "apiDescription": "документация отсутствует",
+            "documentsFound": 0,
+            "documentationMissing": True,
+        },
+    )
+    reason_names = [reason.reason for reason in reasons]
+
+    assert DOCUMENTATION_REASON in reason_names
+    assert MARKET_RESEARCH_REASON not in reason_names
+
+
+def test_llm_cannot_restore_market_research_reason_for_223_or_44_fz() -> None:
+    llm_decision = LlmDecision(
+        decision="reject",
+        primaryReason=MARKET_RESEARCH_REASON,
+        detectedReasons=[
+            DecisionReason(
+                reason=MARKET_RESEARCH_REASON,
+                evidence="Маркетинговое исследование",
+                confidence="high",
+            )
+        ],
+    )
+
+    for report_id in (1, 2):
+        fields, _, decision = apply_final_decision(
+            fields={},
+            meta={},
+            product_check=product_check(total=1),
+            hard_reasons=[],
+            counterparty_lookup={"status": "matched"},
+            llm_decision=llm_decision,
+            report_id=report_id,
+        )
+        assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+        assert "tenderStatusReason" not in fields
+        assert decision["llmReasonCandidates"] == []
+        assert decision["marketResearchReasonSuppressed"] is True
+
+
+def test_prompt_excludes_market_research_from_allowed_reasons_for_223() -> None:
+    prompt = build_decision_prompt(
+        fields={},
+        hard_reasons=[],
+        checks={},
+        product_check=product_check(total=1),
+        all_text="Маркетинговое исследование",
+        maximum_text_chars=10_000,
+        report_id=1,
+    )
+    allowed_reasons = prompt.split("Правила:", 1)[0]
+
+    assert MARKET_RESEARCH_REASON not in allowed_reasons
+    assert "применяется только для коммерческих закупок (reportId=3)" in prompt

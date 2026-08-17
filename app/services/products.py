@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -257,27 +258,183 @@ def extract_deterministic_positions(text: str) -> list[TenderPosition]:
     return result
 
 
+def _first_value(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None and str(value).strip() != "":
+            return value
+    return None
+
+
+def _nested_text(value: Any, *keys: str) -> str:
+    if isinstance(value, dict):
+        return _clean(_first_value(value, *keys))
+    return _clean(value)
+
+
+def extract_seldon_positions(purchase: dict[str, Any]) -> list[TenderPosition]:
+    """Extract product rows from the structured purchase without relying on an LLM."""
+    lots = _first_value(purchase, "lotsList", "lots", "lotList") or []
+    if isinstance(lots, dict):
+        lots = [lots]
+    if not isinstance(lots, list):
+        lots = []
+
+    containers: list[dict[str, Any]] = [purchase]
+    containers.extend(lot for lot in lots if isinstance(lot, dict))
+    result: list[TenderPosition] = []
+    seen: set[tuple[str, float | None, str]] = set()
+
+    for container in containers:
+        products = _first_value(
+            container,
+            "productsList",
+            "products",
+            "productList",
+            "positions",
+            "items",
+        ) or []
+        if isinstance(products, dict):
+            products = [products]
+        if not isinstance(products, list):
+            continue
+
+        for raw_product in products:
+            if not isinstance(raw_product, dict):
+                continue
+            nested_product = raw_product.get("product")
+            source = (
+                {**nested_product, **raw_product}
+                if isinstance(nested_product, dict)
+                else raw_product
+            )
+            name = _clean(
+                _first_value(
+                    source,
+                    "name",
+                    "productName",
+                    "positionName",
+                    "subject",
+                    "title",
+                    "fullName",
+                )
+            )
+            if not name and isinstance(nested_product, str):
+                name = _clean(nested_product)
+            if not name:
+                continue
+
+            quantity = parse_quantity(
+                _first_value(
+                    source,
+                    "quantity",
+                    "amount",
+                    "count",
+                    "qty",
+                    "volume",
+                    "productQuantity",
+                )
+            )
+            unit = _nested_text(
+                _first_value(
+                    source,
+                    "unit",
+                    "okei",
+                    "measureUnit",
+                    "unitName",
+                    "measure",
+                ),
+                "name",
+                "shortName",
+                "symbol",
+                "code",
+            )
+            requirements = _clean(
+                _first_value(
+                    source,
+                    "requirements",
+                    "characteristics",
+                    "specification",
+                    "description",
+                )
+            )
+            key = (
+                re.sub(r"[^a-zа-я0-9]+", " ", name.lower().replace("ё", "е")).strip(),
+                quantity,
+                unit.lower(),
+            )
+            if not key[0] or key in seen:
+                continue
+            seen.add(key)
+            evidence = json.dumps(raw_product, ensure_ascii=False, default=str)[:500]
+            result.append(
+                TenderPosition(
+                    product=name,
+                    productQuery=name,
+                    quantity=quantity,
+                    unit=unit,
+                    evidence=evidence,
+                    requirements=requirements,
+                    source="seldon_structured",
+                )
+            )
+            if len(result) >= 100:
+                return result
+    return result
+
+
+def _position_name_key(position: TenderPosition) -> str:
+    value = _clean(position.productQuery or position.product).lower().replace("ё", "е")
+    return re.sub(r"[^a-zа-я0-9]+", " ", value).strip()
+
+
 def merge_positions(
-    deterministic: list[TenderPosition], llm_response: TenderPositionsResponse | None
+    deterministic: list[TenderPosition],
+    llm_response: TenderPositionsResponse | None,
+    seldon: list[TenderPosition] | None = None,
 ) -> tuple[list[TenderPosition], list[str]]:
-    combined = list(llm_response.products if llm_response else []) + deterministic
+    seldon = list(seldon or [])
+    combined = list(llm_response.products if llm_response else []) + seldon + deterministic
     warnings = list(llm_response.warnings if llm_response else [])
-    by_name = {position.productQuery.lower(): position for position in deterministic if position.productQuery}
+    seldon_by_name = {_position_name_key(position): position for position in seldon}
+    excel_by_name = {_position_name_key(position): position for position in deterministic}
+    if seldon and not any(position.quantity is not None for position in seldon):
+        warnings.append(
+            "Товарные позиции найдены в структурированных данных Seldon, но количество в них отсутствует."
+        )
     result: list[TenderPosition] = []
     seen: dict[tuple[str, float | None, str], int] = {}
     for position in combined:
         query = _clean(position.productQuery or position.product)
-        match = by_name.get(query.lower())
-        quantity = position.quantity if position.quantity is not None else (match.quantity if match else None)
-        unit = position.unit or (match.unit if match else "")
+        name_key = _position_name_key(position)
+        seldon_match = seldon_by_name.get(name_key)
+        excel_match = excel_by_name.get(name_key)
+        quantity = (
+            seldon_match.quantity
+            if seldon_match is not None and seldon_match.quantity is not None
+            else excel_match.quantity
+            if excel_match is not None and excel_match.quantity is not None
+            else position.quantity
+        )
+        unit = (
+            seldon_match.unit
+            if seldon_match is not None and seldon_match.unit
+            else excel_match.unit
+            if excel_match is not None and excel_match.unit
+            else position.unit
+        )
         product = _clean(position.product)
         if not product:
             continue
-        key = (product.lower().replace("ё", "е"), quantity, unit.lower())
-        if key in seen:
-            existing_index = seen[key]
+        resolved_key = (name_key, quantity, unit.lower())
+        if resolved_key in seen:
+            existing_index = seen[resolved_key]
             existing = result[existing_index]
             updates: dict[str, Any] = {}
+            if existing.quantity is None and quantity is not None:
+                updates["quantity"] = quantity
+            if not existing.unit and unit:
+                updates["unit"] = unit
             for field in (
                 "documentUnitPriceRub",
                 "documentLineTotalRub",
@@ -292,9 +449,9 @@ def merge_positions(
             if updates:
                 result[existing_index] = existing.model_copy(update=updates)
             continue
-        seen[key] = len(result)
+        seen[resolved_key] = len(result)
         update = {"productQuery": query or product, "quantity": quantity, "unit": unit}
-        if match:
+        if excel_match:
             for field in (
                 "documentUnitPriceRub",
                 "documentLineTotalRub",
@@ -302,8 +459,9 @@ def merge_positions(
                 "documentPriceEvidence",
                 "documentPriceSource",
             ):
-                if _missing(getattr(position, field)) and not _missing(getattr(match, field)):
-                    update[field] = getattr(match, field)
+                excel_value = getattr(excel_match, field)
+                if not _missing(excel_value):
+                    update[field] = excel_value
         result.append(position.model_copy(update=update))
         if len(result) >= 100:
             break

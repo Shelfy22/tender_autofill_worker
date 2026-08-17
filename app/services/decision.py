@@ -43,6 +43,8 @@ INDIVISIBLE_REASON = "Номенклатура. Лот неделимый. Не 
 PRICE_REASON = "Коммерческие условия. НМЦК менее 1 млн руб."
 REMOTE_TERRITORY_REASON = "Коммерческие условия. Поставка в удаленные территории"
 PAYMENT_DELAY_REASON = "Коммерческие условия. Отсрочка платежа 90 дней и более"
+DOCUMENTATION_REASON = "Оргвопросы. Отсутствует ТЗ / Нет документации / Некорректная ссылка"
+MARKET_RESEARCH_REASON = "Оргвопросы. Опрос рынка / Мониторинг / Анализ рынка / Анонс / КИМ"
 
 
 @dataclass(frozen=True)
@@ -132,13 +134,39 @@ def calculate_hard_reasons(
     fields: dict[str, Any],
     product_check: dict[str, Any],
     all_text: str,
+    *,
+    document_context: dict[str, Any] | None = None,
 ) -> tuple[list[HardReason], dict[str, Any]]:
     reasons: list[HardReason] = []
+    document_context = dict(document_context or {})
 
     coverage = product_check.get("coveragePercent")
     coverage_number = float(coverage) if isinstance(coverage, (int, float)) else None
     if product_check.get("hardReject") is True and coverage_number is not None and coverage_number <= 50:
         _add(reasons, ASSORTMENT_REASON, product_check.get("summary") or "Покрытие <= 50%", 5)
+
+    if document_context.get("documentationMissing") is True:
+        _add(
+            reasons,
+            DOCUMENTATION_REASON,
+            "Seldon не вернул документацию: "
+            f"code={document_context.get('apiCode')}; "
+            f"{document_context.get('apiDescription') or 'документы отсутствуют'}.",
+            25,
+        )
+
+    total = product_check.get("total")
+    products_not_evaluated = (
+        isinstance(total, (int, float)) and not isinstance(total, bool) and total <= 0
+    ) or coverage_number is None
+    if products_not_evaluated:
+        _add(
+            reasons,
+            DOCUMENTATION_REASON,
+            "Товарные позиции для проверки ассортимента не извлечены; "
+            "coverage не рассчитан. Автоматическое согласование запрещено.",
+            25,
+        )
 
     duplicate = re.search(r"\b(дубль|дубликат|повторная\s+карточка|уже\s+загружен[ао]?)\b", all_text, re.I)
     if duplicate:
@@ -191,8 +219,6 @@ def calculate_hard_reasons(
          "Номенклатура. Атомная приемка", 75),
         (r"(?:мопп|менеджер)[\s\S]{0,120}(?:пода[её]т|подача)[\s\S]{0,100}(?:самостоятельно|без\s+эцп)",
          "Оргвопросы. МОПП подается самостоятельно (подача без ЭЦП)", 16),
-        (r"\b(опрос\s+рынка|мониторинг\s+рынка|анализ\s+рынка|анонс\s+закупки|ким)\b",
-         "Оргвопросы. Опрос рынка / Мониторинг / Анализ рынка / Анонс / КИМ", 18),
         (r"\b(закрыт(?:ый|ая)\s+(?:тендер|закупка)|не\s+прошли\s+квалификац)\b",
          "Оргвопросы. Закрытый тендер / Не прошли квалификацию", 90),
         (r"\b(отказ\s+организатора|закупка\s+отменена|отказался\s+от\s+проведения)\b",
@@ -202,6 +228,21 @@ def calculate_hard_reasons(
         match = re.search(pattern, all_text, re.I)
         if match:
             _add(reasons, reason, _snippet(all_text, match), priority)
+
+    market_research_match = re.search(
+        r"\b(опрос\s+рынка|мониторинг\s+рынка|анализ\s+рынка|"
+        r"маркетингов(?:ое|ого)\s+исследовани[ея]|исследование\s+рынка|"
+        r"анонс\s+закупки|ким)\b",
+        all_text,
+        re.I,
+    )
+    if job.report_id == 3 and market_research_match:
+        _add(
+            reasons,
+            MARKET_RESEARCH_REASON,
+            _snippet(all_text, market_research_match),
+            18,
+        )
 
     for match in re.finditer(r"\b(\d{1,4}(?:[.,]\d+)?)\s*к\s*в\b", all_text, re.I):
         voltage = float(match.group(1).replace(",", "."))
@@ -260,6 +301,19 @@ def calculate_hard_reasons(
             "triggered": coverage_number is not None and coverage_number <= 50 and bool(product_check.get("hardReject")),
             "quantityAdjustedTotalComplete": product_check.get("priceEvaluationComplete") is True,
         },
+        "documentationCheck": {
+            **document_context,
+            "productsExtracted": not products_not_evaluated,
+            "automaticApprovalAllowed": not products_not_evaluated
+            and document_context.get("documentationMissing") is not True,
+        },
+        "marketResearchCheck": {
+            "reportId": job.report_id,
+            "commercialOnly": True,
+            "detectedInText": market_research_match is not None,
+            "rejectionApplicable": job.report_id == 3,
+            "triggered": job.report_id == 3 and market_research_match is not None,
+        },
         "deliveryDeadlineCheck": {
             "createdDate": created.isoformat(),
             "deliveryDate": delivery.isoformat() if delivery else None,
@@ -279,14 +333,43 @@ def apply_final_decision(
     hard_reasons: list[HardReason],
     counterparty_lookup: dict[str, Any],
     llm_decision: LlmDecision | None,
+    report_id: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     fields = dict(fields)
     meta = dict(meta)
     counterparty_requires_work = counterparty_lookup.get("status") != "matched"
+    market_research_suppressed = report_id in {1, 2}
     hard = sorted(
-        (item for item in hard_reasons if item.reason != INDIVISIBLE_REASON),
+        (
+            item
+            for item in hard_reasons
+            if item.reason != INDIVISIBLE_REASON
+            and not (
+                market_research_suppressed
+                and item.reason == MARKET_RESEARCH_REASON
+            )
+        ),
         key=lambda item: item.priority,
     )
+    coverage_value = product_check.get("coveragePercent")
+    product_total = product_check.get("total")
+    if (
+        coverage_value is None
+        or (
+            isinstance(product_total, (int, float))
+            and not isinstance(product_total, bool)
+            and product_total <= 0
+        )
+    ) and not any(item.reason == DOCUMENTATION_REASON for item in hard):
+        hard.append(
+            HardReason(
+                DOCUMENTATION_REASON,
+                "Товарные позиции не извлечены либо coverage не рассчитан. "
+                "Автоматическое согласование запрещено.",
+                25,
+            )
+        )
+        hard.sort(key=lambda item: item.priority)
     hard_non_assortment = [item for item in hard if item.reason != ASSORTMENT_REASON]
     coverage = product_check.get("coveragePercent")
 
@@ -299,6 +382,8 @@ def apply_final_decision(
                 ASSORTMENT_REASON,
                 INDIVISIBLE_REASON,
             }:
+                continue
+            if market_research_suppressed and item.reason == MARKET_RESEARCH_REASON:
                 continue
             if (
                 coverage is not None
@@ -313,7 +398,7 @@ def apply_final_decision(
         DEADLINE_REASON,
         ASSORTMENT_REASON,
         INDIVISIBLE_REASON,
-    }:
+    } or (market_research_suppressed and llm_primary == MARKET_RESEARCH_REASON):
         llm_primary = allowed_detected[0].reason if allowed_detected else None
 
     # primaryReason is kept first, followed by the complete detectedReasons list.
@@ -326,6 +411,7 @@ def apply_final_decision(
             not reason
             or reason not in REASONS
             or reason in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON}
+            or (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
             or any(item["reason"] == reason for item in llm_reason_candidates)
         ):
             return
@@ -491,6 +577,7 @@ def apply_final_decision(
         "llmReasonCandidates": llm_reason_candidates,
         "additionalReasons": additional_reasons,
         "llmDecision": llm_decision.model_dump() if llm_decision else None,
+        "marketResearchReasonSuppressed": market_research_suppressed,
     }
     return fields, meta, decision
 
@@ -498,15 +585,23 @@ def apply_final_decision(
 def build_decision_prompt(
     *, fields: dict[str, Any], hard_reasons: list[HardReason], checks: dict[str, Any],
     product_check: dict[str, Any], all_text: str, maximum_text_chars: int,
+    report_id: int | None = None,
 ) -> str:
+    market_research_suppressed = report_id in {1, 2}
     llm_reasons = [
         reason
         for reason in REASONS
         if reason not in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON}
+        and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
+    ]
+    available_reasons = [
+        reason
+        for reason in REASONS
+        if not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
     ]
     context = {
         "rulesVersion": "2026-06 / пользовательский справочник причин",
-        "reasonOptions": REASONS,
+        "reasonOptions": available_reasons,
         "productCheck": product_check,
         "hardReasons": [reason.as_dict() for reason in hard_reasons],
         **checks,
@@ -542,6 +637,10 @@ def build_decision_prompt(
 - Удалённые территории: Калининград/Калининградская область, Республика Дагестан и
   Республика Саха (Якутия).
 - Ошибка парсинга не равна отсутствию документации.
+- Причина «{MARKET_RESEARCH_REASON}» применяется только для коммерческих закупок (reportId=3).
+  Для 223-ФЗ (reportId=1) и 44/94-ФЗ (reportId=2) маркетинговое исследование само по себе
+  не является причиной отказа и не должно возвращаться в primaryReason/detectedReasons.
+  Если документы отсутствуют, действует отдельная детерминированная причина отсутствия документации.
 
 Поля: {fields}
 Контекст: {context}

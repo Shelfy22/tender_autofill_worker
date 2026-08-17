@@ -15,6 +15,41 @@ from app.services.parsers.archives import UnsafeArchiveError, extract_archive
 from app.services.parsers.common import detect_file_type, parse_file
 
 
+class DocumentProcessingError(RuntimeError):
+    """Documents existed, but the worker could not obtain usable text from any of them."""
+
+
+def ensure_documents_usable(
+    descriptors: list[dict[str, Any]], documents: list[ParsedDocument]
+) -> None:
+    if not descriptors:
+        return
+    failed = [
+        document
+        for document in documents
+        if document.parserStatus == "error" or bool(document.parserError)
+    ]
+    if failed:
+        errors = "; ".join(
+            f"{document.fileName}: "
+            f"{document.parserError or document.parserWarning or document.parserStatus}"
+            for document in failed
+        )[:2000]
+        raise DocumentProcessingError(
+            f"Не удалось скачать или распарсить {len(failed)} документ(ов): {errors}"
+        )
+    if any(document.textQualityOk for document in documents):
+        return
+    errors = "; ".join(
+        document.parserError or document.parserWarning or document.parserStatus
+        for document in documents
+    )[:2000]
+    raise DocumentProcessingError(
+        "Документы Seldon были обнаружены, но ни один документ не удалось "
+        f"успешно скачать и извлечь: {errors or 'нет текста после парсинга'}"
+    )
+
+
 def safe_filename(value: str, fallback: str) -> str:
     name = unquote(Path(value.replace("\\", "/")).name).strip()
     name = re.sub(r"[\x00-\x1f<>:\"/\\|?*]+", "_", name).strip(" .")

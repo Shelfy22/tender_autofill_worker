@@ -18,10 +18,18 @@ from app.services.decision import (
     build_decision_prompt,
     calculate_hard_reasons,
 )
-from app.services.documents import DocumentProcessor, build_combined_text
+from app.services.documents import (
+    DocumentProcessor,
+    build_combined_text,
+    ensure_documents_usable,
+)
 from app.services.llm import LlmClient
 from app.services.normalization import deduplicate_strings, normalize_job_payload
-from app.services.products import extract_deterministic_positions, merge_positions
+from app.services.products import (
+    extract_deterministic_positions,
+    extract_seldon_positions,
+    merge_positions,
+)
 from app.services.result import build_result_json
 from app.services.seldon import SeldonClient, build_page_text
 from app.services.validation import validate_fields
@@ -88,11 +96,12 @@ class TenderPipeline:
         catalog = CatalogMatcher(self.settings, llm, observer=self.observer)
         try:
             token = self._run_stage("Проверка/получение токена Seldon", lambda: seldon.get_token(job.seldon_token))
-            descriptors, seldon_warnings = self._run_stage(
+            seldon_documents = self._run_stage(
                 "Получение документов Seldon",
                 lambda: seldon.get_purchase_documents(job, token),
             )
-            self.warnings.extend(seldon_warnings)
+            descriptors = seldon_documents.documents
+            self.warnings.extend(seldon_documents.warnings)
             page_text = build_page_text(job, descriptors)
 
             if self.settings.enable_tender_html_fetch and job.tender_url:
@@ -109,6 +118,7 @@ class TenderPipeline:
                 lambda: documents_processor.process_all(descriptors),
             )
             self.warnings.extend(parser_warnings)
+            ensure_documents_usable(descriptors, parsed_documents)
             if self.observer:
                 self.observer.counters(
                     documents_requested=len(descriptors),
@@ -167,6 +177,10 @@ class TenderPipeline:
             )
             self.warnings.extend(ipro_warnings)
 
+            seldon_positions = self._run_stage(
+                "Детерминированное извлечение товарных позиций из Seldon purchase",
+                lambda: extract_seldon_positions(job.seldon_purchase),
+            )
             deterministic_positions = self._run_stage(
                 "Детерминированное извлечение товарных позиций из Excel",
                 lambda: extract_deterministic_positions(combined_text),
@@ -179,7 +193,11 @@ class TenderPipeline:
             )
             positions, position_warnings = self._run_stage(
                 "Parse Tender Positions",
-                lambda: merge_positions(deterministic_positions, llm_positions),
+                lambda: merge_positions(
+                    deterministic_positions,
+                    llm_positions,
+                    seldon_positions,
+                ),
             )
             self.warnings.extend(position_warnings)
 
@@ -195,7 +213,13 @@ class TenderPipeline:
 
             hard_reasons, checks = self._run_stage(
                 "Детерминированные правила решения",
-                lambda: calculate_hard_reasons(job, fields, product_check, combined_text),
+                lambda: calculate_hard_reasons(
+                    job,
+                    fields,
+                    product_check,
+                    combined_text,
+                    document_context=seldon_documents.decision_context(),
+                ),
             )
             checks["counterpartyRequiresWork"] = counterparty_lookup.get("status") != "matched"
             checks["counterpartyEvidence"] = counterparty_lookup.get("reason") or "Контрагент найден в IPro"
@@ -206,6 +230,7 @@ class TenderPipeline:
                 product_check=product_check,
                 all_text=combined_text,
                 maximum_text_chars=self.settings.max_decision_text_chars,
+                report_id=job.report_id,
             )
             llm_decision = self._run_stage(
                 "AI Agent - Decide Tender Status",
@@ -220,6 +245,7 @@ class TenderPipeline:
                     hard_reasons=hard_reasons,
                     counterparty_lookup=counterparty_lookup,
                     llm_decision=llm_decision,
+                    report_id=job.report_id,
                 ),
             )
 
@@ -228,6 +254,8 @@ class TenderPipeline:
                 "documentCount": len(parsed_documents),
                 "parsedDocumentCount": sum(document.textQualityOk for document in parsed_documents),
                 "documentLinks": [descriptor.get("url") for descriptor in descriptors],
+                "seldonDocumentsStatus": seldon_documents.decision_context(),
+                "seldonStructuredProductsCount": len(seldon_positions),
                 "combinedTextLength": len(combined_text),
                 "llmTextLength": len(combined_text),
                 "wasClipped": bool(combined_warnings),

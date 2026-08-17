@@ -1,5 +1,10 @@
 from app.models import DocumentPriceSource, TenderPosition, TenderPositionsResponse
-from app.services.products import extract_deterministic_positions, merge_positions, parse_quantity
+from app.services.products import (
+    extract_deterministic_positions,
+    extract_seldon_positions,
+    merge_positions,
+    parse_quantity,
+)
 
 
 def test_quantity_parsing() -> None:
@@ -50,3 +55,64 @@ def test_merge_preserves_deterministic_document_price_on_llm_position() -> None:
     assert merged[0].documentLineTotalRub == 500
     assert merged[0].documentPriceSource is not None
     assert merged[0].documentPriceSource.extractionMethod == "excel_deterministic"
+
+
+def test_seldon_structured_quantity_has_priority_over_excel_and_llm() -> None:
+    seldon = extract_seldon_positions(
+        {
+            "lotsList": [
+                {
+                    "productsList": [
+                        {
+                            "name": "Люк чугунный круглый",
+                            "quantity": "200",
+                            "okei": {"name": "шт"},
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+    excel = [
+        TenderPosition(
+            product="Люк чугунный круглый",
+            productQuery="Люк чугунный круглый",
+            quantity=70,
+            unit="комплект",
+            source="excel_table_deterministic",
+        )
+    ]
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product="Люк чугунный круглый",
+                productQuery="Люк чугунный круглый",
+                quantity=1,
+                unit="ед",
+            )
+        ]
+    )
+
+    merged, _ = merge_positions(excel, llm, seldon)
+
+    assert len(merged) == 1
+    assert merged[0].quantity == 200
+    assert merged[0].unit == "шт"
+
+
+def test_empty_llm_document_price_source_is_normalized_to_null() -> None:
+    position = TenderPosition.model_validate(
+        {
+            "product": "Таль электрическая",
+            "documentPriceSource": {
+                "row": None,
+                "sheet": "",
+                "fileName": "",
+                "lineTotalColumn": "",
+                "unitPriceColumn": "",
+                "extractionMethod": "llm",
+            },
+        }
+    )
+
+    assert position.documentPriceSource is None

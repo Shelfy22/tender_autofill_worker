@@ -164,6 +164,27 @@ class TenderPosition(BaseModel):
     documentPriceEvidence: str = ""
     documentPriceSource: DocumentPriceSource | None = None
 
+    @field_validator("documentPriceSource", mode="before")
+    @classmethod
+    def normalize_empty_document_price_source(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        meaningful_fields = (
+            "fileName",
+            "sheet",
+            "row",
+            "unitPriceColumn",
+            "lineTotalColumn",
+            "unitPriceHeader",
+            "lineTotalHeader",
+        )
+        if not any(
+            value.get(field) is not None and value.get(field) != ""
+            for field in meaningful_fields
+        ):
+            return None
+        return value
+
     @field_validator("documentUnitPriceRub", "documentLineTotalRub", mode="before")
     @classmethod
     def normalize_document_money(cls, value: Any) -> float | None:

@@ -18,7 +18,7 @@ celery_app = Celery(
 )
 celery_app.conf.update(
     task_default_queue=settings.celery_queue,
-    task_acks_late=False,
+    task_acks_late=True,
     task_reject_on_worker_lost=False,
     task_track_started=False,
     task_ignore_result=True,

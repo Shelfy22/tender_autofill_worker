@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
@@ -9,6 +10,30 @@ import redis
 
 from app.config import Settings
 from app.models import NormalizedJob
+
+
+class SeldonDocumentsError(RuntimeError):
+    """A technical Seldon failure that must be retried by the job controller."""
+
+
+@dataclass(frozen=True)
+class SeldonDocumentsResult:
+    documents: list[dict[str, Any]]
+    warnings: list[str]
+    api_code: int
+    api_description: str
+
+    @property
+    def documentation_missing(self) -> bool:
+        return self.api_code == 404 or (self.api_code == 200 and not self.documents)
+
+    def decision_context(self) -> dict[str, Any]:
+        return {
+            "apiCode": self.api_code,
+            "apiDescription": self.api_description,
+            "documentsFound": len(self.documents),
+            "documentationMissing": self.documentation_missing,
+        }
 
 
 def _first(mapping: dict[str, Any], *keys: str) -> Any:
@@ -70,7 +95,7 @@ class SeldonClient:
         self.redis.setex(self.TOKEN_KEY, int(23.5 * 3600), token)
         return token
 
-    def get_purchase_documents(self, job: NormalizedJob, token: str) -> tuple[list[dict[str, Any]], list[str]]:
+    def get_purchase_documents(self, job: NormalizedJob, token: str) -> SeldonDocumentsResult:
         lookup: dict[str, Any] = {"reportId": job.report_id}
         if job.seldon_id:
             try:
@@ -87,12 +112,21 @@ class SeldonClient:
         data = _body(response)
         code = int(data.get("status", {}).get("code", 0))
         warnings: list[str] = []
-        if code != 200:
-            description = data.get("status", {}).get("descr") or data.get("message") or "нет описания"
+        description = str(
+            data.get("status", {}).get("descr")
+            or data.get("message")
+            or "нет описания"
+        ).strip()
+        if code == 404:
             warnings.append(
                 f"Документы Seldon не получены: code={code}; {description}. Обработка продолжена по purchase."
             )
-            return [], warnings
+            return SeldonDocumentsResult([], warnings, code, description)
+        if code != 200:
+            raise SeldonDocumentsError(
+                f"Техническая ошибка Seldon при получении документов: "
+                f"code={code}; {description}"
+            )
         result = data.get("result") or {}
         groups = (
             result.get("purchasesdocuments")
@@ -136,7 +170,11 @@ class SeldonClient:
                         "publishDate": document.get("publishDate"),
                     }
                 )
-        return documents, warnings
+        if not documents:
+            warnings.append(
+                "Seldon успешно обработал запрос, но не вернул ни одного актуального документа."
+            )
+        return SeldonDocumentsResult(documents, warnings, code, description)
 
 
 def build_page_text(job: NormalizedJob, document_files: list[dict[str, Any]]) -> str:
