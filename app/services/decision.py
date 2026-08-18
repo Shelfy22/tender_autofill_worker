@@ -149,9 +149,12 @@ def calculate_hard_reasons(
         _add(
             reasons,
             DOCUMENTATION_REASON,
-            "Seldon не вернул документацию: "
-            f"code={document_context.get('apiCode')}; "
-            f"{document_context.get('apiDescription') or 'документы отсутствуют'}.",
+            str(document_context.get("documentationNote") or "").strip()
+            or (
+                "Seldon не выдал документы после запроса: "
+                f"code={document_context.get('apiCode')}; "
+                f"{document_context.get('apiDescription') or 'документация отсутствует'}."
+            ),
             25,
         )
 
@@ -459,6 +462,12 @@ def apply_final_decision(
             reason, confidence = hard[0].reason, "high"
             reason_origin = "deterministic"
         note_parts.append(f"Основная причина отказа: {reason}.")
+        documentation_reason = next(
+            (item for item in hard if item.reason == DOCUMENTATION_REASON),
+            None,
+        )
+        if documentation_reason and documentation_reason.evidence:
+            note_parts.append(documentation_reason.evidence)
     elif llm_decision and llm_decision.decision == "reject" and llm_primary:
         status, reason, confidence = "Отказано КУ ЦП", llm_primary, llm_decision.confidence
         reason_origin = "llm"

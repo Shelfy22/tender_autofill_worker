@@ -28,11 +28,25 @@ class SeldonDocumentsResult:
         return self.api_code == 404 or (self.api_code == 200 and not self.documents)
 
     def decision_context(self) -> dict[str, Any]:
+        note = ""
+        if self.documentation_missing:
+            note = (
+                "Seldon не выдал документы после запроса: "
+                f"code={self.api_code}; "
+                f"{self.api_description or 'документация отсутствует'}."
+            )
         return {
             "apiCode": self.api_code,
             "apiDescription": self.api_description,
             "documentsFound": len(self.documents),
             "documentationMissing": self.documentation_missing,
+            "documentationUnavailable": False,
+            "processingStatus": (
+                "seldon_returned_no_documents"
+                if self.documentation_missing
+                else "links_received"
+            ),
+            "documentationNote": note,
         }
 
 

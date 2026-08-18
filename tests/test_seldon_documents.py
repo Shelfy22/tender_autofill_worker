@@ -53,6 +53,9 @@ def test_explicit_seldon_404_is_business_missing_documentation_state() -> None:
     assert result.documentation_missing is True
     assert result.api_code == 404
     assert result.documents == []
+    assert "Seldon не выдал документы после запроса" in result.decision_context()[
+        "documentationNote"
+    ]
 
 
 def test_seldon_server_failure_is_technical_error_for_controller_retry() -> None:

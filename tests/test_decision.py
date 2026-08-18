@@ -196,6 +196,41 @@ def test_seldon_404_is_deterministic_missing_documentation_rejection() -> None:
     assert checks["documentationCheck"]["automaticApprovalAllowed"] is False
 
 
+def test_unavailable_documents_are_rejected_with_diagnostic_note() -> None:
+    documentation_note = (
+        "Seldon выдал ссылки на 2 документ(ов), но пригодный текст документации "
+        "не получен. Пустые файлы: specification.xlsx."
+    )
+    reasons, _ = calculate_hard_reasons(
+        job(report_id=3),
+        {},
+        product_check(total=1),
+        "",
+        document_context={
+            "apiCode": 200,
+            "documentsFound": 2,
+            "documentationMissing": True,
+            "documentationUnavailable": True,
+            "documentationNote": documentation_note,
+        },
+    )
+
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=1),
+        hard_reasons=reasons,
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(decision="approve"),
+        report_id=3,
+    )
+
+    assert fields["tenderStatus"] == "Отказано КУ ЦП"
+    assert fields["tenderStatusReason"] == DOCUMENTATION_REASON
+    assert documentation_note in fields["tenderStatusNote"]
+    assert decision["reason"] == DOCUMENTATION_REASON
+
+
 def test_missing_products_or_coverage_cannot_be_approved() -> None:
     empty_check = product_check(total=0, coveragePercent=None)
     reasons, _ = calculate_hard_reasons(job(), {}, empty_check, "")

@@ -22,41 +22,91 @@ from app.services.parsers.common import detect_file_type, parse_file
 logger = logging.getLogger(__name__)
 
 
-class DocumentProcessingError(RuntimeError):
-    """Documents existed, but the worker could not obtain usable text from any of them."""
-
-
-def ensure_documents_usable(
+def document_processing_context(
     descriptors: list[dict[str, Any]], documents: list[ParsedDocument]
-) -> None:
+) -> dict[str, Any]:
+    """Describe document availability without turning a business rejection into a job error."""
     if not descriptors:
-        return
-    # Keep errors from broken auxiliary attachments as warnings when at least
-    # one listed document produced useful text.
-    if any(document.textQualityOk for document in documents):
-        return
+        return {
+            "processingStatus": "seldon_returned_no_documents",
+            "documentsRequested": 0,
+            "documentsParsed": 0,
+            "documentationUnavailable": False,
+            "documentationNote": "",
+            "emptyFiles": [],
+            "failedFiles": [],
+            "filesWithoutUsableText": [],
+        }
+
+    usable = [document for document in documents if document.textQualityOk]
     failed = [
         document
         for document in documents
         if document.parserStatus == "error" or bool(document.parserError)
     ]
-    if failed:
-        errors = "; ".join(
-            f"{document.fileName}: "
-            f"{document.parserError or document.parserWarning or document.parserStatus}"
-            for document in failed
-        )[:2000]
-        raise DocumentProcessingError(
-            f"Не удалось скачать или распарсить {len(failed)} документ(ов): {errors}"
+    empty = [
+        document
+        for document in failed
+        if re.search(
+            r"пуст(?:ой|ые|ого)|empty\s+file|zero[- ]byte",
+            document.parserError or document.parserWarning or "",
+            re.I,
         )
-    errors = "; ".join(
-        document.parserError or document.parserWarning or document.parserStatus
+    ]
+    empty_names = [document.fileName for document in empty]
+    failed_details = [
+        {
+            "fileName": document.fileName,
+            "error": (
+                document.parserError
+                or document.parserWarning
+                or document.parserStatus
+            )[:500],
+        }
+        for document in failed
+        if document not in empty
+    ]
+    no_text = [
+        document.fileName
         for document in documents
-    )[:2000]
-    raise DocumentProcessingError(
-        "Документы Seldon были обнаружены, но ни один документ не удалось "
-        f"успешно скачать и извлечь: {errors or 'нет текста после парсинга'}"
-    )
+        if not document.textQualityOk and document not in failed
+    ]
+
+    unavailable = not usable
+    note_parts: list[str] = []
+    if unavailable:
+        note_parts.append(
+            f"Seldon выдал ссылки на {len(descriptors)} документ(ов), "
+            "но пригодный текст документации не получен."
+        )
+    if empty_names:
+        note_parts.append(f"Пустые файлы: {', '.join(empty_names[:20])}.")
+    if failed_details:
+        formatted = "; ".join(
+            f"{item['fileName']} — {item['error']}" for item in failed_details[:20]
+        )
+        note_parts.append(f"Не удалось скачать или обработать: {formatted}.")
+    if no_text:
+        note_parts.append(
+            f"Файлы без пригодного текста: {', '.join(no_text[:20])}."
+        )
+
+    return {
+        "processingStatus": (
+            "unavailable"
+            if unavailable
+            else "partial"
+            if failed or no_text
+            else "available"
+        ),
+        "documentsRequested": len(descriptors),
+        "documentsParsed": len(usable),
+        "documentationUnavailable": unavailable,
+        "documentationNote": " ".join(note_parts)[:3000],
+        "emptyFiles": empty_names,
+        "failedFiles": failed_details,
+        "filesWithoutUsableText": no_text,
+    }
 
 
 def safe_filename(value: str, fallback: str) -> str:
@@ -168,8 +218,15 @@ class DocumentProcessor:
             ),
             follow_redirects=True,
             headers={
-                "User-Agent": "Mozilla/5.0 TenderAutofillPython/0.1",
-                "Accept": "application/octet-stream,application/pdf,*/*",
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+                ),
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "application/pdf,application/octet-stream;q=0.8,*/*;q=0.7"
+                ),
+                "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.7",
             },
             verify=verify,
         )
@@ -187,8 +244,15 @@ class DocumentProcessor:
     @staticmethod
     def _request_headers(url: str) -> dict[str, str]:
         parsed = urlparse(url)
-        if parsed.hostname and parsed.hostname.lower().endswith("roseltorg.ru"):
-            return {"Referer": f"{parsed.scheme}://{parsed.netloc}/"}
+        hostname = (parsed.hostname or "").lower()
+        if hostname.endswith(("roseltorg.ru", "etp.gpb.ru", "etpgpb.ru")):
+            return {
+                "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+            }
         return {}
 
     def _download_url(

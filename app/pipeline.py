@@ -21,7 +21,7 @@ from app.services.decision import (
 from app.services.documents import (
     DocumentProcessor,
     build_combined_text,
-    ensure_documents_usable,
+    document_processing_context,
 )
 from app.services.llm import LlmClient
 from app.services.normalization import deduplicate_strings, normalize_job_payload
@@ -124,7 +124,27 @@ class TenderPipeline:
                     documents_parsed=sum(document.textQualityOk for document in parsed_documents),
                     download_bytes=documents_processor.downloaded_total,
                 )
-            ensure_documents_usable(descriptors, parsed_documents)
+            documents_context = document_processing_context(
+                descriptors, parsed_documents
+            )
+            document_context = seldon_documents.decision_context()
+            if descriptors:
+                document_context.update(documents_context)
+            if documents_context.get("documentationUnavailable") is True:
+                document_context["documentationMissing"] = True
+                documentation_note = str(
+                    documents_context.get("documentationNote") or ""
+                ).strip()
+                if documentation_note:
+                    self.warnings.append(documentation_note)
+                    self.result_logs.append(
+                        {
+                            "time": datetime.now(timezone.utc).isoformat(),
+                            "step": "Проверка доступности документации",
+                            "status": "warning",
+                            "details": documentation_note,
+                        }
+                    )
             logger.info(
                 "documents_processed",
                 extra={
@@ -218,7 +238,7 @@ class TenderPipeline:
                     fields,
                     product_check,
                     combined_text,
-                    document_context=seldon_documents.decision_context(),
+                    document_context=document_context,
                 ),
             )
             checks["counterpartyRequiresWork"] = counterparty_lookup.get("status") != "matched"
@@ -254,7 +274,7 @@ class TenderPipeline:
                 "documentCount": len(parsed_documents),
                 "parsedDocumentCount": sum(document.textQualityOk for document in parsed_documents),
                 "documentLinks": [descriptor.get("url") for descriptor in descriptors],
-                "seldonDocumentsStatus": seldon_documents.decision_context(),
+                "seldonDocumentsStatus": document_context,
                 "seldonStructuredProductsCount": len(seldon_positions),
                 "combinedTextLength": len(combined_text),
                 "llmTextLength": len(combined_text),
