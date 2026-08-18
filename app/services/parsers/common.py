@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,6 +22,23 @@ MAGIC_TYPES: list[tuple[bytes, str]] = [
 ]
 
 
+def _detect_ooxml_type(path: Path) -> str | None:
+    """Identify Office Open XML packages even when the supplied name has no suffix."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = {
+                name.replace("\\", "/").lstrip("/")
+                for name in archive.namelist()
+            }
+    except (OSError, zipfile.BadZipFile):
+        return None
+    if "xl/workbook.xml" in members:
+        return "xlsx"
+    if "word/document.xml" in members:
+        return "docx"
+    return None
+
+
 def detect_file_type(path: Path, declared_name: str | None = None, mime_type: str | None = None) -> str:
     name = declared_name or path.name
     suffix = Path(name.split("?", 1)[0]).suffix.lower().lstrip(".")
@@ -31,6 +49,9 @@ def detect_file_type(path: Path, declared_name: str | None = None, mime_type: st
         # DOCX/XLSX are ZIP packages; declared extension is decisive after validating ZIP magic.
         if suffix in {"docx", "xlsx"}:
             return suffix
+        ooxml_type = _detect_ooxml_type(path)
+        if ooxml_type:
+            return ooxml_type
         return "zip"
     if magic == "ole":
         return suffix if suffix in {"doc", "xls"} else "doc"

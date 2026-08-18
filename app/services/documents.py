@@ -6,7 +6,9 @@ import re
 import ssl
 import subprocess
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from urllib.parse import unquote, urlparse, urlunparse
 
@@ -21,6 +23,64 @@ from app.services.parsers.common import detect_file_type, parse_file
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _TransferMetadata:
+    content_type: str
+    content_disposition: str
+    http_status: int
+    byte_count: int
+
+
+class _DownloadTransportError(RuntimeError):
+    def __init__(self, message: str, *, http_status: int | None = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+
+
+def _filename_from_content_disposition(value: str) -> str | None:
+    if not value:
+        return None
+    extended = re.search(
+        r"filename\*\s*=\s*(?:[A-Za-z0-9._-]+)?''([^;]+)", value, re.I
+    )
+    if extended:
+        return unquote(extended.group(1).strip().strip('"')) or None
+    regular = re.search(r"filename\s*=\s*(?:\"([^\"]+)\"|([^;]+))", value, re.I)
+    if regular:
+        return unquote((regular.group(1) or regular.group(2) or "").strip()) or None
+    return None
+
+
+def _useful_suffix(value: str) -> str:
+    suffix = Path(value.split("?", 1)[0]).suffix.lower()
+    if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
+        return suffix
+    return ""
+
+
+def _resolved_download_name(
+    descriptor: dict[str, Any],
+    url: str,
+    content_disposition: str = "",
+) -> str:
+    index = int(descriptor.get("index") or 1)
+    fallback = f"document_{index}"
+    descriptor_name = safe_filename(str(descriptor.get("fileName") or ""), fallback)
+    url_name = safe_filename(Path(urlparse(url).path).name, fallback)
+    header_value = _filename_from_content_disposition(content_disposition)
+    header_name = safe_filename(header_value or "", fallback) if header_value else ""
+
+    if header_name and _useful_suffix(header_name):
+        return header_name
+    if _useful_suffix(descriptor_name):
+        return descriptor_name
+
+    suffix = _useful_suffix(url_name) or _useful_suffix(header_name)
+    if suffix:
+        return safe_filename(f"{descriptor_name}{suffix}", f"{fallback}{suffix}")
+    return header_name or descriptor_name or url_name
 
 
 def document_processing_context(
@@ -208,10 +268,12 @@ class DocumentProcessor:
         llm: Any = None,
         *,
         referer_url: str | None = None,
+        observer: Any = None,
     ) -> None:
         self.settings = settings
         self.temp_dir = temp_dir
         self.llm = llm
+        self.observer = observer
         self.referer_url = str(referer_url or settings.seldon_base_url).strip()
         self.downloaded_total = 0
         self.http = self._build_http_client(verify=True)
@@ -256,13 +318,59 @@ class DocumentProcessor:
         # platforms return an empty/error body when only their site root is sent.
         return {"Referer": self.referer_url} if self.referer_url else {}
 
+    def _observe_download(
+        self,
+        *,
+        status: str,
+        transport: str,
+        url: str,
+        original_name: str,
+        resolved_name: str | None,
+        detected_type: str | None,
+        content_type: str | None,
+        http_status: int | None,
+        byte_count: int | None,
+        duration_seconds: float,
+        error: BaseException | None = None,
+    ) -> None:
+        if self.observer is None:
+            return
+        self.observer.event(
+            event_type="external_call",
+            stage="document_download",
+            status=status,
+            service="document_http",
+            operation="download_document",
+            http_method="GET",
+            http_status=http_status,
+            duration_seconds=duration_seconds,
+            byte_count=byte_count,
+            error=error,
+            details={
+                "transport": transport,
+                "url": _safe_url_for_log(url),
+                "originalFileName": original_name,
+                "resolvedFileName": resolved_name,
+                "detectedType": detected_type,
+                "contentType": content_type,
+                "sslVerification": transport == "httpx",
+            },
+        )
+
+    @staticmethod
+    def _http_status_from_error(error: BaseException) -> int | None:
+        if isinstance(error, httpx.HTTPStatusError):
+            return error.response.status_code
+        value = getattr(error, "http_status", None)
+        return int(value) if isinstance(value, int) else None
+
     def _download_url(
         self,
         client: httpx.Client,
         url: str,
         destination: Path,
         name: str,
-    ) -> None:
+    ) -> _TransferMetadata:
         temporary = destination.with_suffix(f"{destination.suffix}.part")
         temporary.unlink(missing_ok=True)
         size = 0
@@ -271,6 +379,8 @@ class DocumentProcessor:
                 "GET", url, headers=self._request_headers(url)
             ) as response:
                 response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                content_disposition = response.headers.get("content-disposition", "")
                 length = response.headers.get("content-length")
                 if length and int(length) > self.settings.max_download_bytes_per_file:
                     raise ValueError(f"Документ {name} превышает лимит размера")
@@ -285,10 +395,17 @@ class DocumentProcessor:
                 _validate_downloaded_content(
                     temporary,
                     name,
-                    response.headers.get("content-type", ""),
+                    content_type,
                 )
+                http_status = response.status_code
             temporary.replace(destination)
             self.downloaded_total += size
+            return _TransferMetadata(
+                content_type=content_type,
+                content_disposition=content_disposition,
+                http_status=http_status,
+                byte_count=size,
+            )
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
@@ -298,10 +415,12 @@ class DocumentProcessor:
         url: str,
         destination: Path,
         name: str,
-    ) -> None:
+    ) -> _TransferMetadata:
         """Fallback transport for public ETP links that behave differently in Node/curl."""
         temporary = destination.with_suffix(f"{destination.suffix}.curl.part")
+        headers_file = destination.with_suffix(f"{destination.suffix}.curl.headers")
         temporary.unlink(missing_ok=True)
+        headers_file.unlink(missing_ok=True)
         remaining_total = (
             self.settings.max_download_bytes_total - self.downloaded_total
         )
@@ -338,8 +457,10 @@ class DocumentProcessor:
             [
                 "--output",
                 str(temporary),
+                "--dump-header",
+                str(headers_file),
                 "--write-out",
-                "%{content_type}",
+                "%{http_code}\n%{content_type}",
                 url,
             ]
         )
@@ -355,42 +476,135 @@ class DocumentProcessor:
                 ),
                 check=False,
             )
+            output_lines = (completed.stdout or "").strip().splitlines()
+            status_line = output_lines[0].strip() if output_lines else ""
+            http_status = int(status_line) if status_line.isdigit() else None
+            content_type = (
+                output_lines[-1].strip()
+                if output_lines and not (len(output_lines) == 1 and status_line.isdigit())
+                else ""
+            )
             if completed.returncode != 0:
                 detail = (completed.stderr or completed.stdout or "").strip()
-                raise RuntimeError(
-                    f"curl завершился с кодом {completed.returncode}: {detail[:1000]}"
+                raise _DownloadTransportError(
+                    f"curl завершился с кодом {completed.returncode}: {detail[:1000]}",
+                    http_status=http_status,
                 )
+            content_disposition = ""
+            if headers_file.exists():
+                header_text = headers_file.read_text(
+                    encoding="iso-8859-1", errors="replace"
+                )
+                matches = re.findall(
+                    r"^content-disposition:\s*(.+)$", header_text, re.I | re.M
+                )
+                if matches:
+                    content_disposition = matches[-1].strip()
             _validate_downloaded_content(
                 temporary,
                 name,
-                (completed.stdout or "").strip(),
+                content_type,
             )
             size = temporary.stat().st_size
             if size > maximum:
                 raise ValueError(f"Документ {name} превышает лимит размера")
             temporary.replace(destination)
             self.downloaded_total += size
+            return _TransferMetadata(
+                content_type=content_type,
+                content_disposition=content_disposition,
+                http_status=http_status or 200,
+                byte_count=size,
+            )
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
+        finally:
+            headers_file.unlink(missing_ok=True)
 
-    def download(self, descriptor: dict[str, Any]) -> tuple[Path, str, list[str]]:
+    def _run_download_attempt(
+        self,
+        *,
+        descriptor: dict[str, Any],
+        url: str,
+        destination: Path,
+        initial_name: str,
+        transport: str,
+        transfer: Any,
+    ) -> tuple[Path, str, str]:
+        started = perf_counter()
+        original_name = str(
+            descriptor.get("fileName") or f"document_{descriptor.get('index') or 1}"
+        )
+        try:
+            metadata: _TransferMetadata = transfer()
+            resolved_name = _resolved_download_name(
+                descriptor, url, metadata.content_disposition
+            )
+            final_path = destination.parent / (
+                f"{int(descriptor.get('index') or 1):03d}_{resolved_name}"
+            )
+            if destination != final_path:
+                final_path.unlink(missing_ok=True)
+                destination.replace(final_path)
+            detected_type = detect_file_type(
+                final_path, resolved_name, metadata.content_type
+            )
+        except Exception as exc:
+            self._observe_download(
+                status="failed",
+                transport=transport,
+                url=url,
+                original_name=original_name,
+                resolved_name=initial_name,
+                detected_type=None,
+                content_type=None,
+                http_status=self._http_status_from_error(exc),
+                byte_count=None,
+                duration_seconds=round(perf_counter() - started, 6),
+                error=exc,
+            )
+            raise
+        self._observe_download(
+            status="completed",
+            transport=transport,
+            url=url,
+            original_name=original_name,
+            resolved_name=resolved_name,
+            detected_type=detected_type,
+            content_type=metadata.content_type,
+            http_status=metadata.http_status,
+            byte_count=metadata.byte_count,
+            duration_seconds=round(perf_counter() - started, 6),
+        )
+        return final_path, resolved_name, detected_type
+
+    def download(
+        self, descriptor: dict[str, Any]
+    ) -> tuple[Path, str, str, list[str]]:
         index = int(descriptor.get("index") or 1)
         urls = _document_urls(descriptor)
         if not urls:
             raise ValueError("Для документа отсутствует URL скачивания")
-        parsed_name = Path(urlparse(urls[0]).path).name
-        name = safe_filename(
-            str(descriptor.get("fileName") or parsed_name), f"document_{index}"
-        )
-        destination = self.temp_dir / "downloads" / f"{index:03d}_{name}"
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        download_dir = self.temp_dir / "downloads"
+        download_dir.mkdir(parents=True, exist_ok=True)
         warnings: list[str] = []
         failures: list[str] = []
         for position, url in enumerate(urls, start=1):
             display_url = _safe_url_for_log(url)
+            name = _resolved_download_name(descriptor, url)
+            destination = download_dir / f"{index:03d}_{name}"
             try:
-                self._download_url(self.http, url, destination, name)
+                path, resolved_name, _ = self._run_download_attempt(
+                    descriptor=descriptor,
+                    url=url,
+                    destination=destination,
+                    initial_name=name,
+                    transport="httpx",
+                    transfer=lambda: self._download_url(
+                        self.http, url, destination, name
+                    ),
+                )
             except Exception as exc:
                 logger.warning(
                     "document_download_attempt_failed",
@@ -409,11 +623,18 @@ class DocumentProcessor:
                     and _certificate_verification_failed(exc)
                 ):
                     try:
-                        self._download_url(
-                            self._client_without_ssl_verification(),
-                            url,
-                            destination,
-                            name,
+                        path, resolved_name, _ = self._run_download_attempt(
+                            descriptor=descriptor,
+                            url=url,
+                            destination=destination,
+                            initial_name=name,
+                            transport="httpx_insecure",
+                            transfer=lambda: self._download_url(
+                                self._client_without_ssl_verification(),
+                                url,
+                                destination,
+                                name,
+                            ),
                         )
                     except Exception as insecure_exc:
                         last_error = insecure_exc
@@ -436,11 +657,20 @@ class DocumentProcessor:
                             warnings.append(
                                 f"Использован резервный URL документа: {display_url}"
                             )
-                        return destination, url, warnings
+                        return path, url, resolved_name, warnings
 
                 if self.settings.document_enable_curl_fallback:
                     try:
-                        self._download_url_with_curl(url, destination, name)
+                        path, resolved_name, _ = self._run_download_attempt(
+                            descriptor=descriptor,
+                            url=url,
+                            destination=destination,
+                            initial_name=name,
+                            transport="curl_insecure",
+                            transfer=lambda: self._download_url_with_curl(
+                                url, destination, name
+                            ),
+                        )
                     except Exception as curl_exc:
                         failures.append(
                             f"{display_url}: httpx={last_error}; curl={curl_exc}"
@@ -465,7 +695,7 @@ class DocumentProcessor:
                         warnings.append(
                             f"Использован резервный URL документа: {display_url}"
                         )
-                    return destination, url, warnings
+                    return path, url, resolved_name, warnings
 
                 failures.append(f"{display_url}: {last_error}")
                 continue
@@ -481,7 +711,7 @@ class DocumentProcessor:
                         }
                     },
                 )
-            return destination, url, warnings
+            return path, url, resolved_name, warnings
         raise RuntimeError("; ".join(failures)[:3000])
 
     def process_all(self, descriptors: list[dict[str, Any]]) -> tuple[list[ParsedDocument], list[str]]:
@@ -489,9 +719,15 @@ class DocumentProcessor:
         parsed: list[ParsedDocument] = []
         for descriptor in descriptors[: self.settings.max_documents]:
             try:
-                path, downloaded_url, download_warnings = self.download(descriptor)
+                path, downloaded_url, resolved_name, download_warnings = self.download(
+                    descriptor
+                )
                 warnings.extend(download_warnings)
-                effective_descriptor = {**descriptor, "url": downloaded_url}
+                effective_descriptor = {
+                    **descriptor,
+                    "url": downloaded_url,
+                    "fileName": resolved_name,
+                }
                 parsed.extend(self._process_path(path, effective_descriptor, depth=0))
             except Exception as exc:
                 name = str(descriptor.get("fileName") or descriptor.get("url") or "document")

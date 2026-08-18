@@ -182,6 +182,34 @@ GROUP BY service, operation, status
 ORDER BY service, operation, status;
 ```
 
+Попытки скачивания документов для выбранного execution:
+
+```sql
+SELECT
+  event_time,
+  status,
+  http_status,
+  duration_seconds,
+  byte_count,
+  details->>'transport' AS transport,
+  details->>'originalFileName' AS original_file_name,
+  details->>'resolvedFileName' AS resolved_file_name,
+  details->>'detectedType' AS detected_type,
+  details->>'contentType' AS content_type,
+  details->>'url' AS url_without_query,
+  error_type,
+  error_message
+FROM tender_autofill_job_events
+WHERE run_id = '<RUN_ID>'
+  AND service = 'document_http'
+  AND event_type = 'external_call'
+ORDER BY event_time, event_id;
+```
+
+Для каждого URL сохраняется отдельная попытка `httpx`, `httpx_insecure` или
+`curl_insecure`. Query string URL, содержимое документов и credentials в timeline
+не записываются.
+
 Зависшие/OOM candidates:
 
 ```sql

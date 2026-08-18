@@ -96,6 +96,7 @@ class TenderPipeline:
             self.temp_dir,
             llm,
             referer_url=job.tender_url or self.settings.seldon_base_url,
+            observer=self.observer,
         )
         ipro = IProClient(self.settings)
         catalog = CatalogMatcher(self.settings, llm, observer=self.observer)

@@ -11,6 +11,7 @@ from app.services.parsers.archives import (
     extract_7z,
     extract_zip,
 )
+from app.services.parsers.common import detect_file_type
 
 
 def settings(tmp_path: Path) -> Settings:
@@ -82,3 +83,27 @@ def test_rar_symlink_is_rejected() -> None:
     }
     with pytest.raises(UnsafeArchiveError):
         _rar_members_from_lsar(payload)
+
+
+def test_extensionless_ooxml_packages_are_not_treated_as_generic_zip(
+    tmp_path: Path,
+) -> None:
+    xlsx = tmp_path / "xlsx-without-extension"
+    with zipfile.ZipFile(xlsx, "w") as output:
+        output.writestr("[Content_Types].xml", "<Types/>")
+        output.writestr("xl/workbook.xml", "<workbook/>")
+    docx = tmp_path / "docx-without-extension"
+    with zipfile.ZipFile(docx, "w") as output:
+        output.writestr("[Content_Types].xml", "<Types/>")
+        output.writestr("word/document.xml", "<document/>")
+
+    assert detect_file_type(xlsx) == "xlsx"
+    assert detect_file_type(docx) == "docx"
+
+
+def test_generic_zip_remains_an_archive(tmp_path: Path) -> None:
+    archive = tmp_path / "documents-without-extension"
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("docs/specification.txt", "product | quantity")
+
+    assert detect_file_type(archive) == "zip"

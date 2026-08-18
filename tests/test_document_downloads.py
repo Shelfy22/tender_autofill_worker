@@ -40,7 +40,7 @@ def test_download_uses_source_url_after_seldon_url_fails(tmp_path: Path) -> None
     processor.http.close()
     processor.http = httpx.Client(transport=httpx.MockTransport(handler))
     try:
-        path, used_url, warnings = processor.download(
+        path, used_url, resolved_name, warnings = processor.download(
             {
                 "index": 1,
                 "fileName": "specification.pdf",
@@ -54,6 +54,7 @@ def test_download_uses_source_url_after_seldon_url_fails(tmp_path: Path) -> None
 
     assert content.startswith(b"%PDF")
     assert used_url == "https://source.test/document/1"
+    assert resolved_name == "specification.pdf"
     assert warnings == [
         "Использован резервный URL документа: https://source.test/document/1"
     ]
@@ -144,7 +145,7 @@ def test_ssl_verification_failure_retries_document_insecurely(tmp_path: Path) ->
         transport=httpx.MockTransport(insecure_handler), verify=False
     )
     try:
-        path, used_url, warnings = processor.download(
+        path, used_url, resolved_name, warnings = processor.download(
             {
                 "index": 1,
                 "fileName": "specification.pdf",
@@ -157,6 +158,7 @@ def test_ssl_verification_failure_retries_document_insecurely(tmp_path: Path) ->
 
     assert content.startswith(b"%PDF")
     assert used_url == "https://broken-tls.test/specification.pdf"
+    assert resolved_name == "specification.pdf"
     assert len(warnings) == 1
     assert "отключённой проверкой сертификата" in warnings[0]
 
@@ -190,7 +192,7 @@ def test_curl_fallback_is_used_after_http_client_returns_403(
     processor.http = httpx.Client(transport=httpx.MockTransport(handler))
     monkeypatch.setattr("app.services.documents.subprocess.run", fake_run)
     try:
-        path, used_url, warnings = processor.download(
+        path, used_url, resolved_name, warnings = processor.download(
             {
                 "index": 1,
                 "fileName": "specification.pdf",
@@ -203,4 +205,5 @@ def test_curl_fallback_is_used_after_http_client_returns_403(
 
     assert content.startswith(b"%PDF")
     assert used_url == "https://files.example.test/specification.pdf"
+    assert resolved_name == "specification.pdf"
     assert any("curl-транспортом" in warning for warning in warnings)
