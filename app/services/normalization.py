@@ -203,7 +203,20 @@ def normalize_job_payload(claim: JobClaim) -> NormalizedJob:
         remaining_days=remaining_days,
         report_fields=report_fields,
         seldon_purchase=purchase,
-        tender_url=string_or_none(first_defined(payload.get("tenderUrl"), purchase.get("purchaseLink"))),
+        tender_url=string_or_none(
+            first_defined(
+                payload.get("tenderUrl"),
+                payload.get("tender_url"),
+                purchase.get("urlSource"),
+                purchase.get("purchaseUrl"),
+                purchase.get("tenderUrl"),
+                purchase.get("purchaseLink"),
+                purchase.get("url"),
+                purchase.get("link"),
+                purchase.get("sourceUrl"),
+                purchase.get("href"),
+            )
+        ),
         source_file=string_or_none(payload.get("sourceFile")),
         seldon_token=string_or_none(
             first_defined(payload.get("seldonToken"), payload.get("token"), payload.get("apiToken"))

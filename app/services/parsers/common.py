@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 MAGIC_TYPES: list[tuple[bytes, str]] = [
     (b"%PDF", "pdf"),
     (b"PK\x03\x04", "zip"),
+    (b"PK\x05\x06", "zip"),
+    (b"PK\x07\x08", "zip"),
     (b"Rar!\x1a\x07", "rar"),
     (b"7z\xbc\xaf'\x1c", "7z"),
     (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole"),

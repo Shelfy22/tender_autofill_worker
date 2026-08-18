@@ -91,7 +91,12 @@ class TenderPipeline:
         job = self._run_stage("Normalize Input2", lambda: normalize_job_payload(claim))
         llm = LlmClient(self.settings, job.attempt, observer=self.observer)
         seldon = SeldonClient(self.settings)
-        documents_processor = DocumentProcessor(self.settings, self.temp_dir, llm)
+        documents_processor = DocumentProcessor(
+            self.settings,
+            self.temp_dir,
+            llm,
+            referer_url=job.tender_url or self.settings.seldon_base_url,
+        )
         ipro = IProClient(self.settings)
         catalog = CatalogMatcher(self.settings, llm, observer=self.observer)
         try:

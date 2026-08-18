@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     # Normal verification is always attempted first. This fallback applies only
     # to procurement document downloads, never to Seldon/LLM/database traffic.
     document_allow_insecure_ssl_fallback: bool = True
+    document_enable_curl_fallback: bool = True
+    curl_binary: str = "curl"
     conversion_timeout_seconds: int = Field(default=120, ge=10)
 
     max_documents: int = Field(default=100, ge=1)

@@ -4,6 +4,7 @@ import html
 import logging
 import re
 import ssl
+import subprocess
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -171,7 +172,7 @@ def _validate_downloaded_content(path: Path, declared_name: str, content_type: s
         )
 
     suffix = Path(declared_name).suffix.lower()
-    zip_magic = head.startswith(b"PK\x03\x04")
+    zip_magic = head[:4] in {b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"}
     seven_zip_magic = head.startswith(b"7z\xbc\xaf'\x1c")
     rar_magic = head.startswith(b"Rar!\x1a\x07")
     pdf_magic = head.startswith(b"%PDF")
@@ -200,10 +201,18 @@ def _validate_downloaded_content(path: Path, declared_name: str, content_type: s
 
 
 class DocumentProcessor:
-    def __init__(self, settings: Settings, temp_dir: Path, llm: Any = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        temp_dir: Path,
+        llm: Any = None,
+        *,
+        referer_url: str | None = None,
+    ) -> None:
         self.settings = settings
         self.temp_dir = temp_dir
         self.llm = llm
+        self.referer_url = str(referer_url or settings.seldon_base_url).strip()
         self.downloaded_total = 0
         self.http = self._build_http_client(verify=True)
         self._insecure_http: httpx.Client | None = None
@@ -218,15 +227,16 @@ class DocumentProcessor:
             ),
             follow_redirects=True,
             headers={
+                # Keep these values aligned with the proven n8n Download Document node.
                 "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/120 Safari/537.36"
                 ),
                 "Accept": (
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                    "application/pdf,application/octet-stream;q=0.8,*/*;q=0.7"
+                    "application/octet-stream,application/pdf,"
+                    "application/vnd.openxmlformats-officedocument."
+                    "wordprocessingml.document,*/*"
                 ),
-                "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.7",
             },
             verify=verify,
         )
@@ -241,19 +251,10 @@ class DocumentProcessor:
             self._insecure_http = self._build_http_client(verify=False)
         return self._insecure_http
 
-    @staticmethod
-    def _request_headers(url: str) -> dict[str, str]:
-        parsed = urlparse(url)
-        hostname = (parsed.hostname or "").lower()
-        if hostname.endswith(("roseltorg.ru", "etp.gpb.ru", "etpgpb.ru")):
-            return {
-                "Referer": f"{parsed.scheme}://{parsed.netloc}/",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin",
-            }
-        return {}
+    def _request_headers(self, _: str) -> dict[str, str]:
+        # n8n uses tenderUrl, falling back to the Seldon base URL. Some public
+        # platforms return an empty/error body when only their site root is sent.
+        return {"Referer": self.referer_url} if self.referer_url else {}
 
     def _download_url(
         self,
@@ -292,6 +293,87 @@ class DocumentProcessor:
             temporary.unlink(missing_ok=True)
             raise
 
+    def _download_url_with_curl(
+        self,
+        url: str,
+        destination: Path,
+        name: str,
+    ) -> None:
+        """Fallback transport for public ETP links that behave differently in Node/curl."""
+        temporary = destination.with_suffix(f"{destination.suffix}.curl.part")
+        temporary.unlink(missing_ok=True)
+        remaining_total = (
+            self.settings.max_download_bytes_total - self.downloaded_total
+        )
+        maximum = min(self.settings.max_download_bytes_per_file, remaining_total)
+        if maximum <= 0:
+            raise ValueError("Общий размер документов tender превышает лимит")
+
+        command = [
+            self.settings.curl_binary,
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--location",
+            "--max-redirs",
+            "10",
+            "--connect-timeout",
+            str(self.settings.http_connect_timeout_seconds),
+            "--max-time",
+            str(self.settings.document_download_timeout_seconds),
+            "--max-filesize",
+            str(maximum),
+            "--proto",
+            "=http,https",
+            "--insecure",
+            "--compressed",
+            "--user-agent",
+            str(self.http.headers.get("user-agent") or ""),
+            "--header",
+            f"Accept: {self.http.headers.get('accept') or '*/*'}",
+        ]
+        if self.referer_url:
+            command.extend(["--referer", self.referer_url])
+        command.extend(
+            [
+                "--output",
+                str(temporary),
+                "--write-out",
+                "%{content_type}",
+                url,
+            ]
+        )
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=(
+                    self.settings.document_download_timeout_seconds
+                    + self.settings.http_connect_timeout_seconds
+                    + 10
+                ),
+                check=False,
+            )
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or "").strip()
+                raise RuntimeError(
+                    f"curl завершился с кодом {completed.returncode}: {detail[:1000]}"
+                )
+            _validate_downloaded_content(
+                temporary,
+                name,
+                (completed.stdout or "").strip(),
+            )
+            size = temporary.stat().st_size
+            if size > maximum:
+                raise ValueError(f"Документ {name} превышает лимит размера")
+            temporary.replace(destination)
+            self.downloaded_total += size
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
     def download(self, descriptor: dict[str, Any]) -> tuple[Path, str, list[str]]:
         index = int(descriptor.get("index") or 1)
         urls = _document_urls(descriptor)
@@ -321,6 +403,7 @@ class DocumentProcessor:
                         }
                     },
                 )
+                last_error: Exception = exc
                 if (
                     self.settings.document_allow_insecure_ssl_fallback
                     and _certificate_verification_failed(exc)
@@ -333,26 +416,58 @@ class DocumentProcessor:
                             name,
                         )
                     except Exception as insecure_exc:
-                        failures.append(f"{display_url}: {insecure_exc}")
+                        last_error = insecure_exc
+                    else:
+                        warnings.append(
+                            "TLS-сертификат источника не прошёл проверку; документ скачан "
+                            f"с отключённой проверкой сертификата: {display_url}"
+                        )
+                        logger.warning(
+                            "document_downloaded_without_ssl_verification",
+                            extra={
+                                "event": {
+                                    "stage": "document_download",
+                                    "file_name": name,
+                                    "url": display_url,
+                                }
+                            },
+                        )
+                        if position > 1:
+                            warnings.append(
+                                f"Использован резервный URL документа: {display_url}"
+                            )
+                        return destination, url, warnings
+
+                if self.settings.document_enable_curl_fallback:
+                    try:
+                        self._download_url_with_curl(url, destination, name)
+                    except Exception as curl_exc:
+                        failures.append(
+                            f"{display_url}: httpx={last_error}; curl={curl_exc}"
+                        )
                         continue
                     warnings.append(
-                        "TLS-сертификат источника не прошёл проверку; документ скачан "
-                        f"с отключённой проверкой сертификата: {display_url}"
+                        "Документ скачан резервным curl-транспортом после ошибки "
+                        f"основного HTTP-клиента: {display_url}"
                     )
                     logger.warning(
-                        "document_downloaded_without_ssl_verification",
+                        "document_downloaded_with_curl_fallback",
                         extra={
                             "event": {
                                 "stage": "document_download",
                                 "file_name": name,
                                 "url": display_url,
+                                "httpx_error": str(last_error),
                             }
                         },
                     )
                     if position > 1:
-                        warnings.append(f"Использован резервный URL документа: {display_url}")
+                        warnings.append(
+                            f"Использован резервный URL документа: {display_url}"
+                        )
                     return destination, url, warnings
-                failures.append(f"{display_url}: {exc}")
+
+                failures.append(f"{display_url}: {last_error}")
                 continue
             if position > 1:
                 warnings.append(f"Использован резервный URL документа: {display_url}")
