@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import html
+import logging
 import re
+import ssl
+import zipfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 import httpx
+import py7zr
 from bs4 import BeautifulSoup
 
 from app.config import Settings
 from app.models import ParsedDocument
 from app.services.parsers.archives import UnsafeArchiveError, extract_archive
 from app.services.parsers.common import detect_file_type, parse_file
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentProcessingError(RuntimeError):
@@ -23,6 +30,10 @@ def ensure_documents_usable(
     descriptors: list[dict[str, Any]], documents: list[ParsedDocument]
 ) -> None:
     if not descriptors:
+        return
+    # Keep errors from broken auxiliary attachments as warnings when at least
+    # one listed document produced useful text.
+    if any(document.textQualityOk for document in documents):
         return
     failed = [
         document
@@ -38,8 +49,6 @@ def ensure_documents_usable(
         raise DocumentProcessingError(
             f"Не удалось скачать или распарсить {len(failed)} документ(ов): {errors}"
         )
-    if any(document.textQualityOk for document in documents):
-        return
     errors = "; ".join(
         document.parserError or document.parserWarning or document.parserStatus
         for document in documents
@@ -56,62 +65,255 @@ def safe_filename(value: str, fallback: str) -> str:
     return name[:220] or fallback
 
 
+def _safe_url_for_log(value: str) -> str:
+    """Remove credentials and query strings before recording a document URL."""
+    parsed = urlparse(value)
+    hostname = parsed.hostname or ""
+    netloc = f"{hostname}:{parsed.port}" if parsed.port else hostname
+    return urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
+
+
+def _certificate_verification_failed(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        message = str(current).upper()
+        if "CERTIFICATE_VERIFY_FAILED" in message or "CERTIFICATE VERIFY FAILED" in message:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _document_urls(descriptor: dict[str, Any]) -> list[str]:
+    candidates = [
+        descriptor.get("urlSeldon"),
+        descriptor.get("urlSource"),
+        descriptor.get("url"),
+        descriptor.get("downloadUrl"),
+    ]
+    return list(
+        dict.fromkeys(
+            str(candidate).strip()
+            for candidate in candidates
+            if candidate is not None and str(candidate).strip()
+        )
+    )
+
+
+def _validate_downloaded_content(path: Path, declared_name: str, content_type: str) -> None:
+    """Reject login/error pages and corrupt binary containers before parsing."""
+    if path.stat().st_size == 0:
+        raise ValueError("Сервер вернул пустой файл")
+    with path.open("rb") as source:
+        head = source.read(4096)
+    stripped = head.lstrip().lower()
+    normalized_type = content_type.lower().split(";", 1)[0].strip()
+    if (
+        normalized_type in {"text/html", "application/xhtml+xml"}
+        or stripped.startswith(b"<!doctype html")
+        or stripped.startswith(b"<html")
+    ):
+        raise ValueError(
+            "Вместо документа сервер вернул HTML-страницу (возможно, страницу входа или ошибки)"
+        )
+
+    suffix = Path(declared_name).suffix.lower()
+    zip_magic = head.startswith(b"PK\x03\x04")
+    seven_zip_magic = head.startswith(b"7z\xbc\xaf'\x1c")
+    rar_magic = head.startswith(b"Rar!\x1a\x07")
+    pdf_magic = head.startswith(b"%PDF")
+    ole_magic = head.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+
+    if zip_magic and not zipfile.is_zipfile(path):
+        raise ValueError("Повреждённый или неполный ZIP/OOXML-файл")
+    if seven_zip_magic and not py7zr.is_7zfile(path):
+        raise ValueError("Повреждённый или неполный 7Z-архив")
+
+    required_binary_signatures = {
+        ".zip": zip_magic,
+        ".7z": seven_zip_magic,
+        ".rar": rar_magic,
+        ".pdf": pdf_magic,
+        ".docx": zip_magic,
+        ".xlsx": zip_magic,
+    }
+    expected = required_binary_signatures.get(suffix)
+    if expected is False and not any(
+        (zip_magic, seven_zip_magic, rar_magic, pdf_magic, ole_magic)
+    ):
+        raise ValueError(
+            f"Содержимое файла не соответствует заявленному формату {suffix or declared_name}"
+        )
+
+
 class DocumentProcessor:
     def __init__(self, settings: Settings, temp_dir: Path, llm: Any = None) -> None:
         self.settings = settings
         self.temp_dir = temp_dir
         self.llm = llm
         self.downloaded_total = 0
-        self.http = httpx.Client(
+        self.http = self._build_http_client(verify=True)
+        self._insecure_http: httpx.Client | None = None
+
+    def _build_http_client(self, *, verify: bool) -> httpx.Client:
+        return httpx.Client(
             timeout=httpx.Timeout(
-                connect=settings.http_connect_timeout_seconds,
-                read=settings.document_download_timeout_seconds,
-                write=settings.document_download_timeout_seconds,
-                pool=settings.http_connect_timeout_seconds,
+                connect=self.settings.http_connect_timeout_seconds,
+                read=self.settings.document_download_timeout_seconds,
+                write=self.settings.document_download_timeout_seconds,
+                pool=self.settings.http_connect_timeout_seconds,
             ),
             follow_redirects=True,
             headers={
                 "User-Agent": "Mozilla/5.0 TenderAutofillPython/0.1",
                 "Accept": "application/octet-stream,application/pdf,*/*",
             },
+            verify=verify,
         )
 
     def close(self) -> None:
         self.http.close()
+        if self._insecure_http is not None:
+            self._insecure_http.close()
 
-    def download(self, descriptor: dict[str, Any]) -> Path:
+    def _client_without_ssl_verification(self) -> httpx.Client:
+        if self._insecure_http is None:
+            self._insecure_http = self._build_http_client(verify=False)
+        return self._insecure_http
+
+    @staticmethod
+    def _request_headers(url: str) -> dict[str, str]:
+        parsed = urlparse(url)
+        if parsed.hostname and parsed.hostname.lower().endswith("roseltorg.ru"):
+            return {"Referer": f"{parsed.scheme}://{parsed.netloc}/"}
+        return {}
+
+    def _download_url(
+        self,
+        client: httpx.Client,
+        url: str,
+        destination: Path,
+        name: str,
+    ) -> None:
+        temporary = destination.with_suffix(f"{destination.suffix}.part")
+        temporary.unlink(missing_ok=True)
+        size = 0
+        try:
+            with client.stream(
+                "GET", url, headers=self._request_headers(url)
+            ) as response:
+                response.raise_for_status()
+                length = response.headers.get("content-length")
+                if length and int(length) > self.settings.max_download_bytes_per_file:
+                    raise ValueError(f"Документ {name} превышает лимит размера")
+                with temporary.open("wb") as output:
+                    for chunk in response.iter_bytes(1024 * 1024):
+                        size += len(chunk)
+                        if size > self.settings.max_download_bytes_per_file:
+                            raise ValueError(f"Документ {name} превышает лимит размера")
+                        if self.downloaded_total + size > self.settings.max_download_bytes_total:
+                            raise ValueError("Общий размер документов tender превышает лимит")
+                        output.write(chunk)
+                _validate_downloaded_content(
+                    temporary,
+                    name,
+                    response.headers.get("content-type", ""),
+                )
+            temporary.replace(destination)
+            self.downloaded_total += size
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    def download(self, descriptor: dict[str, Any]) -> tuple[Path, str, list[str]]:
         index = int(descriptor.get("index") or 1)
-        url = str(descriptor["url"])
-        parsed_name = Path(urlparse(url).path).name
+        urls = _document_urls(descriptor)
+        if not urls:
+            raise ValueError("Для документа отсутствует URL скачивания")
+        parsed_name = Path(urlparse(urls[0]).path).name
         name = safe_filename(
             str(descriptor.get("fileName") or parsed_name), f"document_{index}"
         )
         destination = self.temp_dir / "downloads" / f"{index:03d}_{name}"
         destination.parent.mkdir(parents=True, exist_ok=True)
-        size = 0
-        with self.http.stream("GET", url) as response:
-            response.raise_for_status()
-            length = response.headers.get("content-length")
-            if length and int(length) > self.settings.max_download_bytes_per_file:
-                raise ValueError(f"Документ {name} превышает лимит размера")
-            with destination.open("wb") as output:
-                for chunk in response.iter_bytes(1024 * 1024):
-                    size += len(chunk)
-                    if size > self.settings.max_download_bytes_per_file:
-                        raise ValueError(f"Документ {name} превышает лимит размера")
-                    if self.downloaded_total + size > self.settings.max_download_bytes_total:
-                        raise ValueError("Общий размер документов tender превышает лимит")
-                    output.write(chunk)
-        self.downloaded_total += size
-        return destination
+        warnings: list[str] = []
+        failures: list[str] = []
+        for position, url in enumerate(urls, start=1):
+            display_url = _safe_url_for_log(url)
+            try:
+                self._download_url(self.http, url, destination, name)
+            except Exception as exc:
+                logger.warning(
+                    "document_download_attempt_failed",
+                    extra={
+                        "event": {
+                            "stage": "document_download",
+                            "file_name": name,
+                            "url": display_url,
+                            "error": str(exc),
+                        }
+                    },
+                )
+                if (
+                    self.settings.document_allow_insecure_ssl_fallback
+                    and _certificate_verification_failed(exc)
+                ):
+                    try:
+                        self._download_url(
+                            self._client_without_ssl_verification(),
+                            url,
+                            destination,
+                            name,
+                        )
+                    except Exception as insecure_exc:
+                        failures.append(f"{display_url}: {insecure_exc}")
+                        continue
+                    warnings.append(
+                        "TLS-сертификат источника не прошёл проверку; документ скачан "
+                        f"с отключённой проверкой сертификата: {display_url}"
+                    )
+                    logger.warning(
+                        "document_downloaded_without_ssl_verification",
+                        extra={
+                            "event": {
+                                "stage": "document_download",
+                                "file_name": name,
+                                "url": display_url,
+                            }
+                        },
+                    )
+                    if position > 1:
+                        warnings.append(f"Использован резервный URL документа: {display_url}")
+                    return destination, url, warnings
+                failures.append(f"{display_url}: {exc}")
+                continue
+            if position > 1:
+                warnings.append(f"Использован резервный URL документа: {display_url}")
+                logger.info(
+                    "document_downloaded_from_fallback_url",
+                    extra={
+                        "event": {
+                            "stage": "document_download",
+                            "file_name": name,
+                            "url": display_url,
+                        }
+                    },
+                )
+            return destination, url, warnings
+        raise RuntimeError("; ".join(failures)[:3000])
 
     def process_all(self, descriptors: list[dict[str, Any]]) -> tuple[list[ParsedDocument], list[str]]:
         warnings: list[str] = []
         parsed: list[ParsedDocument] = []
         for descriptor in descriptors[: self.settings.max_documents]:
             try:
-                path = self.download(descriptor)
-                parsed.extend(self._process_path(path, descriptor, depth=0))
+                path, downloaded_url, download_warnings = self.download(descriptor)
+                warnings.extend(download_warnings)
+                effective_descriptor = {**descriptor, "url": downloaded_url}
+                parsed.extend(self._process_path(path, effective_descriptor, depth=0))
             except Exception as exc:
                 name = str(descriptor.get("fileName") or descriptor.get("url") or "document")
                 warning = f"{name}: {exc}"
@@ -162,7 +364,21 @@ class DocumentProcessor:
                     "extractedFromArchive": True,
                     "parentArchiveFileName": path.name,
                 }
-                result.extend(self._process_path(child, child_descriptor, depth + 1))
+                try:
+                    result.extend(self._process_path(child, child_descriptor, depth + 1))
+                except Exception as exc:
+                    result.append(
+                        ParsedDocument(
+                            documentIndex=int(child_descriptor["index"]),
+                            documentUrl=str(child_descriptor.get("url") or ""),
+                            fileName=child.name,
+                            extractedFromArchive=True,
+                            parentArchiveFileName=path.name,
+                            parserStatus="error",
+                            parserWarning=f"{child.name}: {exc}",
+                            parserError=str(exc),
+                        )
+                    )
             return result
 
         text, status, warnings = parse_file(path, kind, self.settings, self.llm)

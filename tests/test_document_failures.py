@@ -19,7 +19,7 @@ def test_all_listed_documents_failing_is_a_technical_error() -> None:
         ensure_documents_usable(descriptors, parsed)
 
 
-def test_partial_document_failure_is_still_a_technical_error() -> None:
+def test_partial_document_failure_can_continue_with_usable_text() -> None:
     descriptors = [
         {"index": 1, "url": "https://example.test/one.pdf"},
         {"index": 2, "url": "https://example.test/two.pdf"},
@@ -35,8 +35,7 @@ def test_partial_document_failure_is_still_a_technical_error() -> None:
         ),
     ]
 
-    with pytest.raises(DocumentProcessingError, match="one.pdf"):
-        ensure_documents_usable(descriptors, parsed)
+    ensure_documents_usable(descriptors, parsed)
 
 
 def test_parser_warning_with_usable_text_can_continue() -> None:

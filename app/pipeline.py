@@ -118,13 +118,13 @@ class TenderPipeline:
                 lambda: documents_processor.process_all(descriptors),
             )
             self.warnings.extend(parser_warnings)
-            ensure_documents_usable(descriptors, parsed_documents)
             if self.observer:
                 self.observer.counters(
                     documents_requested=len(descriptors),
                     documents_parsed=sum(document.textQualityOk for document in parsed_documents),
                     download_bytes=documents_processor.downloaded_total,
                 )
+            ensure_documents_usable(descriptors, parsed_documents)
             logger.info(
                 "documents_processed",
                 extra={

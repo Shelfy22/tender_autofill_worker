@@ -2,11 +2,13 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import py7zr
 
 from app.config import Settings
 from app.services.parsers.archives import (
     UnsafeArchiveError,
     _rar_members_from_lsar,
+    extract_7z,
     extract_zip,
 )
 
@@ -37,6 +39,19 @@ def test_zip_member_limit_is_enforced(tmp_path: Path) -> None:
             output.writestr(f"{index}.txt", "x")
     with pytest.raises(UnsafeArchiveError):
         extract_zip(archive, tmp_path / "out", settings(tmp_path))
+
+
+def test_7z_archive_is_extracted(tmp_path: Path) -> None:
+    source = tmp_path / "specification.txt"
+    source.write_text("product | quantity\nCable | 10", encoding="utf-8")
+    archive = tmp_path / "documents.7z"
+    with py7zr.SevenZipFile(archive, "w") as output:
+        output.write(source, arcname="docs/specification.txt")
+
+    extracted = extract_7z(archive, tmp_path / "out-7z", settings(tmp_path))
+
+    assert len(extracted) == 1
+    assert extracted[0].read_text(encoding="utf-8") == "product | quantity\nCable | 10"
 
 
 def test_rar_lsar_listing_preserves_sizes() -> None:
