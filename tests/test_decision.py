@@ -353,6 +353,20 @@ def test_decision_prompt_requires_full_analysis_after_assortment_rejection() -> 
     assert "Не останавливай проверку после анализа товарного ассортимента" in prompt
 
 
+def test_decision_prompt_excludes_actual_cost_reason_from_llm_options() -> None:
+    prompt = build_decision_prompt(
+        fields={"initialPrice": 1_300_000},
+        hard_reasons=[],
+        checks={},
+        product_check=product_check(quantityAdjustedTotalRub=2_000_000),
+        all_text="Документация тендера",
+        maximum_text_chars=10_000,
+        report_id=1,
+    )
+
+    assert "Коммерческие условия. НМЦК менее фактической стоимости" not in prompt
+
+
 def test_all_remote_territories_trigger_deterministic_rejection() -> None:
     territory_texts = [
         "Место поставки: Калининградская область.",

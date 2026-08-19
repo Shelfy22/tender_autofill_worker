@@ -41,6 +41,7 @@ DEADLINE_REASON = "Оргвопросы. На момент согласован�
 ASSORTMENT_REASON = "Непоставляемый ассортимент"
 INDIVISIBLE_REASON = "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры"
 PRICE_REASON = "Коммерческие условия. НМЦК менее 1 млн руб."
+ACTUAL_COST_REASON = "Коммерческие условия. НМЦК менее фактической стоимости"
 REMOTE_TERRITORY_REASON = "Коммерческие условия. Поставка в удаленные территории"
 PAYMENT_DELAY_REASON = "Коммерческие условия. Отсрочка платежа 90 дней и более"
 DOCUMENTATION_REASON = "Оргвопросы. Отсутствует ТЗ / Нет документации / Некорректная ссылка"
@@ -619,13 +620,19 @@ def build_decision_prompt(
     llm_reasons = [
         reason
         for reason in REASONS
-        if reason not in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON}
+        if reason not in {
+            DEADLINE_REASON,
+            ASSORTMENT_REASON,
+            INDIVISIBLE_REASON,
+            ACTUAL_COST_REASON,
+        }
         and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
     ]
     available_reasons = [
         reason
         for reason in REASONS
-        if not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
+        if reason != ACTUAL_COST_REASON
+        and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
     ]
     context = {
         "rulesVersion": "2026-06 / пользовательский справочник причин",
