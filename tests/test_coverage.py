@@ -50,24 +50,73 @@ def test_supplied_is_full_match_or_allowed_analog() -> None:
     assert result["analogMatchCount"] == 1
     assert result["coveragePercent"] == 50.0
     assert result["hardReject"] is True
-
-
-def test_coverage_must_be_strictly_greater_than_50() -> None:
-    exactly_half = summarize_product_coverage(
-        [item(1, "Полное соответствие"), item(2, "Товар не найден")]
+    assert result["hardRejectReason"] == (
+        "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры"
     )
-    above_half = summarize_product_coverage(
+
+
+def test_indivisible_lot_requires_at_least_eighty_percent() -> None:
+    below_threshold = summarize_product_coverage(
         [
             item(1, "Полное соответствие"),
-            item(2, "Аналог", analogs_allowed=True),
-            item(3, "Товар не найден"),
+            item(2, "Полное соответствие"),
+            item(3, "Полное соответствие"),
+            item(4, "Товар не найден"),
+        ],
+        lot_divisible="нет",
+    )
+    exactly_threshold = summarize_product_coverage(
+        [
+            item(1, "Полное соответствие"),
+            item(2, "Полное соответствие"),
+            item(3, "Полное соответствие"),
+            item(4, "Полное соответствие"),
+            item(5, "Товар не найден"),
+        ],
+        lot_divisible="нет",
+    )
+    assert below_threshold["coveragePercent"] == 75.0
+    assert below_threshold["coverageApproved"] is False
+    assert below_threshold["hardReject"] is True
+    assert exactly_threshold["coveragePercent"] == 80.0
+    assert exactly_threshold["coverageApproved"] is True
+    assert exactly_threshold["hardReject"] is False
+    assert exactly_threshold["approvalThresholdInclusive"] == 80
+
+
+def test_divisible_lot_passes_with_one_supplied_position() -> None:
+    one_found = summarize_product_coverage(
+        [item(1, "Полное соответствие"), *[
+            item(index, "Товар не найден") for index in range(2, 101)
+        ]],
+        lot_divisible="да",
+    )
+    none_found = summarize_product_coverage(
+        [item(1, "Товар не найден"), item(2, "Товар не найден")],
+        lot_divisible="yes",
+    )
+
+    assert one_found["coveragePercent"] == 1.0
+    assert one_found["coverageApproved"] is True
+    assert one_found["hardReject"] is False
+    assert one_found["minimumSuppliedPositions"] == 1
+    assert none_found["coverageApproved"] is False
+    assert none_found["hardReject"] is True
+
+
+def test_unknown_lot_divisibility_uses_safe_indivisible_rule() -> None:
+    result = summarize_product_coverage(
+        [
+            item(1, "Полное соответствие"),
+            item(2, "Полное соответствие"),
+            item(3, "Полное соответствие"),
+            item(4, "Товар не найден"),
         ]
     )
-    assert exactly_half["coverageApproved"] is False
-    assert exactly_half["hardReject"] is True
-    assert above_half["coveragePercent"] == 66.67
-    assert above_half["coverageApproved"] is True
-    assert above_half["hardReject"] is False
+
+    assert result["coveragePercent"] == 75.0
+    assert result["lotDivisible"] is False
+    assert result["coverageApproved"] is False
 
 
 def test_position_total_is_median_unit_price_times_quantity() -> None:

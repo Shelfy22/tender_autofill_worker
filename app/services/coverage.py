@@ -6,6 +6,11 @@ from app.models import ProductMatchItem
 from app.services.normalization import parse_number
 
 
+COVERAGE_REJECTION_REASON = (
+    "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры"
+)
+
+
 def round_money(value: float) -> float:
     return round(value + 1e-12, 2)
 
@@ -21,7 +26,27 @@ def _real_value(value: Any) -> str | None:
     return text
 
 
-def summarize_product_coverage(items: Iterable[ProductMatchItem | dict[str, Any]]) -> dict[str, Any]:
+def normalize_lot_divisible(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    text = str(value or "").strip().lower().replace("ё", "е")
+    if text in {"да", "yes", "true", "1", "делимый", "делим"}:
+        return True
+    if text in {"нет", "no", "false", "0", "неделимый", "неделим"}:
+        return False
+    return None
+
+
+def summarize_product_coverage(
+    items: Iterable[ProductMatchItem | dict[str, Any]],
+    *,
+    lot_divisible: Any = None,
+) -> dict[str, Any]:
     normalized = [item if isinstance(item, ProductMatchItem) else ProductMatchItem.model_validate(item) for item in items]
     details: list[dict[str, Any]] = []
 
@@ -154,8 +179,16 @@ def summarize_product_coverage(items: Iterable[ProductMatchItem | dict[str, Any]
         bool(detail["analogMatch"] and not detail["analogAccepted"]) for detail in details
     )
     coverage = round(supplied_count / total * 100, 2) if total else None
-    coverage_approved = total > 0 and coverage is not None and coverage > 50
-    assortment_reject = total > 0 and coverage is not None and coverage <= 50
+    normalized_lot_divisible = normalize_lot_divisible(lot_divisible)
+    is_divisible_lot = normalized_lot_divisible is True
+    if is_divisible_lot:
+        coverage_approved = total > 0 and supplied_count >= 1
+        coverage_reject = total > 0 and supplied_count == 0
+        coverage_rule = "divisible_at_least_one_position"
+    else:
+        coverage_approved = total > 0 and coverage is not None and coverage >= 80
+        coverage_reject = total > 0 and coverage is not None and coverage < 80
+        coverage_rule = "indivisible_at_least_80_percent"
 
     priced_count = sum(detail["medianUnitPriceRub"] is not None for detail in supplied_details)
     quantity_known_count = sum(detail["quantity"] is not None for detail in supplied_details)
@@ -194,9 +227,16 @@ def summarize_product_coverage(items: Iterable[ProductMatchItem | dict[str, Any]
             "Сумма медианных цен поставляемого ассортимента: 0,00 руб.; "
             "точные совпадения и допустимые аналоги не найдены."
         )
-        coverage_summary = (
-            f"Покрытие ассортимента {coverage}% (0 из {total}); порог согласования не пройден."
-        )
+        if is_divisible_lot:
+            coverage_summary = (
+                f"Покрытие ассортимента {coverage}% (0 из {total}). Лот делимый, "
+                "но не найдена ни одна поставляемая позиция; проверка не пройдена."
+            )
+        else:
+            coverage_summary = (
+                f"Покрытие ассортимента {coverage}% (0 из {total}); "
+                "порог не менее 80% для неделимого лота не пройден."
+            )
 
     else:
         median_part = (
@@ -215,11 +255,27 @@ def summarize_product_coverage(items: Iterable[ProductMatchItem | dict[str, Any]
                 "поэтому автоматический порог 1 млн руб. не применяется."
             )
         price_summary = f"{median_part} {quantity_part}"
+        if is_divisible_lot:
+            rule_summary = (
+                "Лот делимый: найдена хотя бы одна поставляемая позиция, проверка пройдена."
+                if coverage_approved
+                else "Лот делимый, но не найдена ни одна поставляемая позиция; проверка не пройдена."
+            )
+        else:
+            lot_label = (
+                "Лот неделимый"
+                if normalized_lot_divisible is False
+                else "Делимость лота не подтверждена; применяется правило неделимого лота"
+            )
+            rule_summary = (
+                f"{lot_label}: порог не менее 80% пройден."
+                if coverage_approved
+                else f"{lot_label}: порог не менее 80% не пройден."
+            )
         coverage_summary = (
             f"Покрытие ассортимента {coverage}% ({supplied_count} из {total}); "
             f"точных совпадений {full_match_count}, допустимых аналогов {analog_count}, "
-            f"не закрыто {total - supplied_count}. "
-            + ("Порог больше 50% пройден." if coverage_approved else "Порог больше 50% не пройден.")
+            f"не закрыто {total - supplied_count}. {rule_summary}"
         )
 
     if document_priced_count:
@@ -246,9 +302,14 @@ def summarize_product_coverage(items: Iterable[ProductMatchItem | dict[str, Any]
         "notFoundCount": max(0, total - supplied_count),
         "coveragePercent": coverage,
         "coverageApproved": coverage_approved,
-        "approvalThresholdExclusive": 50,
-        "hardReject": assortment_reject,
-        "hardRejectReason": "Непоставляемый ассортимент" if assortment_reject else None,
+        "coverageRule": coverage_rule,
+        "lotDivisible": is_divisible_lot,
+        "lotDivisibleSourceValue": lot_divisible,
+        "approvalThresholdExclusive": None,
+        "approvalThresholdInclusive": None if is_divisible_lot else 80,
+        "minimumSuppliedPositions": 1 if is_divisible_lot else None,
+        "hardReject": coverage_reject,
+        "hardRejectReason": COVERAGE_REJECTION_REASON if coverage_reject else None,
         "pricedSuppliedCount": priced_count,
         "quantityKnownSuppliedCount": quantity_known_count,
         "fullyCalculatedSuppliedCount": fully_calculated_count,

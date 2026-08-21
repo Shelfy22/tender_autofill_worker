@@ -234,7 +234,10 @@ class TenderPipeline:
             self.warnings.extend(catalog_warnings)
             product_check = self._run_stage(
                 "Summarize Product Coverage",
-                lambda: summarize_product_coverage(match_items),
+                lambda: summarize_product_coverage(
+                    match_items,
+                    lot_divisible=fields.get("lotDivisible"),
+                ),
             )
 
             hard_reasons, checks = self._run_stage(

@@ -40,6 +40,7 @@ REASONS = [
 DEADLINE_REASON = "Оргвопросы. На момент согласования менее 3 рабочих дней до подачи заявки"
 ASSORTMENT_REASON = "Непоставляемый ассортимент"
 INDIVISIBLE_REASON = "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры"
+COVERAGE_REASON = INDIVISIBLE_REASON
 PRICE_REASON = "Коммерческие условия. НМЦК менее 1 млн руб."
 ACTUAL_COST_REASON = "Коммерческие условия. НМЦК менее фактической стоимости"
 REMOTE_TERRITORY_REASON = "Коммерческие условия. Поставка в удаленные территории"
@@ -143,8 +144,13 @@ def calculate_hard_reasons(
 
     coverage = product_check.get("coveragePercent")
     coverage_number = float(coverage) if isinstance(coverage, (int, float)) else None
-    if product_check.get("hardReject") is True and coverage_number is not None and coverage_number <= 50:
-        _add(reasons, ASSORTMENT_REASON, product_check.get("summary") or "Покрытие <= 50%", 5)
+    if product_check.get("hardReject") is True:
+        _add(
+            reasons,
+            COVERAGE_REASON,
+            product_check.get("summary") or "Проверка комплектования лота не пройдена.",
+            5,
+        )
 
     if document_context.get("documentationMissing") is True:
         _add(
@@ -193,8 +199,7 @@ def calculate_hard_reasons(
         product_check.get("supplyValueHardReject") is True
         and product_check.get("supplyValueThresholdApplicable") is True
         and product_check.get("priceEvaluationComplete") is True
-        and coverage_number is not None
-        and coverage_number > 50
+        and product_check.get("coverageApproved") is True
         and isinstance(total_price, (int, float))
         and total_price < 1_000_000
     ):
@@ -300,9 +305,12 @@ def calculate_hard_reasons(
         },
         "productCoverageCheck": {
             "coveragePercent": coverage_number,
-            "approvalThresholdExclusive": 50,
-            "approved": coverage_number is not None and coverage_number > 50,
-            "triggered": coverage_number is not None and coverage_number <= 50 and bool(product_check.get("hardReject")),
+            "coverageRule": product_check.get("coverageRule"),
+            "lotDivisible": product_check.get("lotDivisible"),
+            "approvalThresholdInclusive": product_check.get("approvalThresholdInclusive"),
+            "minimumSuppliedPositions": product_check.get("minimumSuppliedPositions"),
+            "approved": product_check.get("coverageApproved") is True,
+            "triggered": product_check.get("hardReject") is True,
             "quantityAdjustedTotalComplete": product_check.get("priceEvaluationComplete") is True,
         },
         "documentationCheck": {
@@ -347,8 +355,7 @@ def apply_final_decision(
         (
             item
             for item in hard_reasons
-            if item.reason != INDIVISIBLE_REASON
-            and not (
+            if not (
                 market_research_suppressed
                 and item.reason == MARKET_RESEARCH_REASON
             )
@@ -374,7 +381,11 @@ def apply_final_decision(
             )
         )
         hard.sort(key=lambda item: item.priority)
-    hard_non_assortment = [item for item in hard if item.reason != ASSORTMENT_REASON]
+    hard_non_coverage = [
+        item
+        for item in hard
+        if item.reason not in {ASSORTMENT_REASON, COVERAGE_REASON}
+    ]
     coverage = product_check.get("coveragePercent")
 
     # Controlled reasons cannot be reintroduced by the LLM.
@@ -390,8 +401,7 @@ def apply_final_decision(
             if market_research_suppressed and item.reason == MARKET_RESEARCH_REASON:
                 continue
             if (
-                coverage is not None
-                and coverage > 50
+                product_check.get("coverageApproved") is True
                 and re.search(r"ассортимент|номенклатур", item.evidence, re.I)
             ):
                 continue
@@ -406,8 +416,8 @@ def apply_final_decision(
         llm_primary = allowed_detected[0].reason if allowed_detected else None
 
     # primaryReason is kept first, followed by the complete detectedReasons list.
-    # This order matches the n8n final node and matters when assortment is the only
-    # deterministic reason: another confirmed LLM reason becomes the primary one.
+    # The deterministic coverage reason remains a fallback primary reason: another
+    # confirmed LLM reason becomes primary while coverage is retained in the note.
     llm_reason_candidates: list[dict[str, str]] = []
 
     def add_llm_reason_candidate(reason: str | None, evidence: str, confidence: str) -> None:
@@ -450,15 +460,15 @@ def apply_final_decision(
 
     if hard:
         status = "Отказано КУ ЦП"
-        if hard_non_assortment:
+        if hard_non_coverage:
             # Existing priority order is preserved among all deterministic reasons
-            # except assortment, which is now only the fallback primary reason.
-            reason, confidence = hard_non_assortment[0].reason, "high"
+            # except coverage, which is only the fallback primary reason.
+            reason, confidence = hard_non_coverage[0].reason, "high"
             reason_origin = "deterministic"
         elif preferred_llm_alternative:
             reason = preferred_llm_alternative["reason"]
             confidence = preferred_llm_alternative["confidence"]
-            reason_origin = "llm_alternative_over_assortment"
+            reason_origin = "llm_alternative_over_coverage"
         else:
             reason, confidence = hard[0].reason, "high"
             reason_origin = "deterministic"
@@ -477,7 +487,7 @@ def apply_final_decision(
         status, reason, confidence = "Проработка контрагента", "Прочее", "medium"
         reason_origin = "counterparty"
         note_parts.append(
-            counterparty_lookup.get("reason") or "Контрагент не найден в IPro или ИНН/КПП не совпали."
+            counterparty_lookup.get("reason") or "Контрагент с указанным ИНН не найден в IPro."
         )
     elif llm_decision and llm_decision.decision == "reject":
         status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
@@ -498,7 +508,7 @@ def apply_final_decision(
     if counterparty_advisory_only:
         counterparty_evidence = (
             counterparty_lookup.get("reason")
-            or "Контрагент не найден в IPro или ИНН/КПП не совпали."
+            or "Контрагент с указанным ИНН не найден в IPro."
         )
         note_parts.append(
             "Дополнительная информация по контрагенту: "
@@ -579,8 +589,8 @@ def apply_final_decision(
         reason_source = {
             "counterparty": "Проверка контрагента/МОПП",
             "deterministic": "Детерминированные правила согласования",
-            "llm_alternative_over_assortment": (
-                "LLM: альтернативная причина при обязательном отказе по ассортименту"
+            "llm_alternative_over_coverage": (
+                "LLM: альтернативная причина при обязательном отказе по комплектованию лота"
             ),
             "llm": "LLM: классификация причины",
             "fallback": "Ветка согласования тендера",
@@ -602,7 +612,9 @@ def apply_final_decision(
         "counterpartyRequiresWork": counterparty_requires_work,
         "counterpartyAdvisoryOnly": counterparty_advisory_only,
         "hardReasons": [item.as_dict() for item in hard],
-        "hardNonAssortmentReasons": [item.as_dict() for item in hard_non_assortment],
+        # Keep the historical JSON key for Finalizer compatibility. Its value now
+        # means deterministic reasons other than the coverage/lot reason.
+        "hardNonAssortmentReasons": [item.as_dict() for item in hard_non_coverage],
         "llmReasonCandidates": llm_reason_candidates,
         "additionalReasons": additional_reasons,
         "llmDecision": llm_decision.model_dump() if llm_decision else None,
@@ -631,7 +643,12 @@ def build_decision_prompt(
     available_reasons = [
         reason
         for reason in REASONS
-        if reason != ACTUAL_COST_REASON
+        if reason not in {
+            DEADLINE_REASON,
+            ASSORTMENT_REASON,
+            INDIVISIBLE_REASON,
+            ACTUAL_COST_REASON,
+        }
         and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
     ]
     context = {
@@ -649,22 +666,24 @@ def build_decision_prompt(
 - Проверь каждый пункт справочника по тексту документации и извлечённым фактам.
 - Не придумывай основание; каждое основание требует evidence.
 - hardReasons рассчитаны кодом и не могут быть отменены; их можно только дополнить.
-- Наличие hardReasons не означает, что анализ можно закончить. Даже если уже есть обязательный отказ,
-  включая «Непоставляемый ассортимент», обязательно проверь все остальные причины справочника.
+- Наличие hardReasons не означает, что анализ можно закончить. Даже если уже есть обязательный отказ
+  по комплектованию лота, обязательно проверь все остальные причины справочника.
 - detectedReasons должен содержать полный список всех подтверждённых недетерминированных причин,
   а не только основную. Если причин несколько, верни их все с evidence.
-- Если вместе с детерминированным «Непоставляемый ассортимент» найдена другая подтверждённая причина,
+- Если вместе с детерминированной причиной «{COVERAGE_REASON}» найдена другая подтверждённая причина,
   верни её в detectedReasons и используй как primaryReason среди причин, доступных LLM.
-  Код сам сохранит ассортимент как дополнительную причину.
+  Код сам сохранит причину комплектования лота как дополнительную.
 - Не останавливай проверку после анализа товарного ассортимента: независимо проверь остальные основания
   отказа по документации.
 - Нулевая/пустая/null начальная цена не является отказом.
-- Расчётный порог 1 млн применяется только при coverage > 50 и priceEvaluationComplete=true.
+- Расчётный порог 1 млн применяется только при productCheck.coverageApproved=true и
+  priceEvaluationComplete=true.
 - Отсрочка оплаты является причиной отказа при 90 днях и более (`>= 90`). Правило применяется
   к рабочим, календарным и дням без уточнения типа.
-- «Непоставляемый ассортимент» полностью детерминирован; LLM запрещено выбирать эту причину.
-- Ассортимент проходит только при coverage строго > 50; ровно 50 не проходит.
-- Старый порог 80% для неделимого лота отключён.
+- Причина «{COVERAGE_REASON}» полностью детерминирована; LLM запрещено выбирать её.
+- Для неделимого лота проверка проходит при coverage не менее 80% (`>= 80`).
+- Для делимого лота проверка проходит, если найдена хотя бы одна поставляемая позиция.
+- Если делимость лота не подтверждена, применяется безопасное правило неделимого лота: coverage >= 80%.
 - Причина менее 3 дней полностью детерминирована только по remainingDays < 3; значение 3 проходит.
 - Упоминание Росатома/АЭС не равно атомной приёмке без прямой формулировки.
 - Упоминание 275-ФЗ/Минобороны не равно военной приёмке без прямой формулировки.

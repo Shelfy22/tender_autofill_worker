@@ -94,6 +94,31 @@ def validate_fields(
     _set(fields, meta, "counterpartyInn", fields.get("counterpartyInn") or customer_inn, "Seldon/Daily", "medium", str(customer_inn or ""))
     _set(fields, meta, "counterpartyKpp", fields.get("counterpartyKpp") or customer_kpp, "Seldon/Daily", "medium", str(customer_kpp or ""))
 
+    report_lot_divisible = job.report_fields.get("Лот делимый")
+    if report_lot_divisible is None:
+        report_lot_divisible = job.report_fields.get("lotDivisible")
+    report_lot_text = str(report_lot_divisible or "").strip().lower().replace("ё", "е")
+    if report_lot_text in {"да", "yes", "true", "1", "делимый", "делим"}:
+        _set(
+            fields,
+            meta,
+            "lotDivisible",
+            "yes",
+            "Daily / колонка «Лот делимый»",
+            "high",
+            f"Лот делимый: {report_lot_divisible}",
+        )
+    elif report_lot_text in {"нет", "no", "false", "0", "неделимый", "неделим"}:
+        _set(
+            fields,
+            meta,
+            "lotDivisible",
+            "no",
+            "Daily / колонка «Лот делимый»",
+            "high",
+            f"Лот делимый: {report_lot_divisible}",
+        )
+
     text_lower = combined_text.lower().replace("ё", "е")
     if not fields.get("federalLaw"):
         law = "223" if "223-фз" in text_lower or job.report_id == 1 else "44" if "44-фз" in text_lower or job.report_id == 2 else "commercial" if job.report_id == 3 else None
@@ -122,7 +147,11 @@ def validate_fields(
 
     lot_text = f"{fields.get('lotDivisible', '')} {meta.get('lotDivisible', {}).get('evidence', '')}"
     direct_lot = re.search(r"лот\s+неделим|делени[ея]\s+лота\s+не\s+допуска|лот\s+делим|подач[а-я]+\s+на\s+част[ьи]\s+лота", lot_text, re.I)
-    if fields.get("lotDivisible") and not direct_lot:
+    trusted_lot_column = (
+        meta.get("lotDivisible", {}).get("source")
+        == "Daily / колонка «Лот делимый»"
+    )
+    if fields.get("lotDivisible") and not direct_lot and not trusted_lot_column:
         fields.pop("lotDivisible", None)
         meta.pop("lotDivisible", None)
         warnings.append("Лот делимый не заполнен: нет прямого evidence.")

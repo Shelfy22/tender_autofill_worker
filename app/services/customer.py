@@ -205,20 +205,16 @@ class IProClient:
 
         candidates = [normalized(row) for row in rows if isinstance(row, dict)]
         by_inn = [row for row in candidates if row["inn"] == inn]
+        # Business approval is based on INN only. Prefer the row with the same
+        # KPP for display data when it exists, but a KPP mismatch never sends the
+        # tender to counterparty review.
         match = next((row for row in by_inn if kpp and row["kpp"] == kpp), None)
-        match_type = "inn+kpp" if match else None
-        if not match and not kpp and len(by_inn) == 1:
-            match, match_type = by_inn[0], "unique_inn"
+        if match is None and by_inn:
+            match = by_inn[0]
+        match_type = "inn" if match else None
         if not match:
-            if kpp and by_inn:
-                reason = f"В IPro найден ИНН {inn}, но КПП {kpp} не совпал."
-                match_kind = "kpp_mismatch"
-            elif not kpp and len(by_inn) > 1:
-                reason = f"В IPro несколько организаций по ИНН {inn}; нужен КПП."
-                match_kind = "inn_ambiguous"
-            else:
-                reason = f"Организация с ИНН {inn}" + (f" и КПП {kpp}" if kpp else "") + " в IPro не найдена."
-                match_kind = "none"
+            reason = f"Организация с ИНН {inn} в IPro не найдена."
+            match_kind = "none"
             lookup = {"status": "not_found", "matchType": match_kind, "reason": reason, "inn": inn, "kpp": kpp, "byInnCount": len(by_inn)}
             return updated_fields, updated_meta, lookup, [reason]
         name = match["fullName"] or match["shortName"] or fields.get("counterpartyName")
@@ -228,13 +224,13 @@ class IProClient:
             updated_fields["counterpartyFullName"] = name
         updated_fields["counterpartyInn"] = match["inn"] or inn
         updated_fields["inn"] = updated_fields["counterpartyInn"]
-        if match["kpp"]:
+        if match["kpp"] and not kpp:
             updated_fields["counterpartyKpp"] = match["kpp"]
             updated_fields["kpp"] = match["kpp"]
-        evidence = f"IPro API: совпадение {match_type} по ИНН {inn}" + (f" и КПП {match['kpp']}" if match["kpp"] else "")
+        evidence = f"IPro API: найдено совпадение по ИНН {inn}; КПП в проверке не участвует."
         for key in ("counterpartyName", "counterpartyInn", "counterpartyKpp"):
             if updated_fields.get(key):
-                updated_meta[key] = {"source": "IPro API /orgByBir", "confidence": "high" if match_type == "inn+kpp" else "medium", "evidence": evidence}
+                updated_meta[key] = {"source": "IPro API /orgByBir", "confidence": "high", "evidence": evidence}
         updated_meta["counterparty"] = updated_meta.get("counterpartyName")
         updated_meta["counterpartyFullName"] = updated_meta.get("counterpartyName")
         lookup = {
