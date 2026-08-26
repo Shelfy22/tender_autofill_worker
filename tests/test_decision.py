@@ -2,6 +2,7 @@ from app.models import DecisionReason, LlmDecision, NormalizedJob
 from app.services.decision import (
     COVERAGE_REASON,
     DOCUMENTATION_REASON,
+    HIGH_VOLTAGE_REASON,
     MARKET_RESEARCH_REASON,
     PAYMENT_DELAY_REASON,
     PRICE_REASON,
@@ -537,3 +538,131 @@ def test_prompt_excludes_market_research_from_allowed_reasons_for_223() -> None:
 
     assert MARKET_RESEARCH_REASON not in allowed_reasons
     assert "применяется только для коммерческих закупок (reportId=3)" in prompt
+
+
+def _voltage_product_check(
+    source_product: str,
+    *,
+    evidence: str = "",
+    requirements: str = "",
+) -> dict[str, object]:
+    return product_check(
+        details=[
+            {
+                "positionIndex": 1,
+                "sourceProduct": source_product,
+                "productQuery": source_product,
+                "sourceEvidence": evidence,
+                "sourceRequirements": requirements,
+            }
+        ]
+    )
+
+
+def test_apparent_power_kva_does_not_trigger_35_kv_reason() -> None:
+    evidence = (
+        "Мощность: 1000 кВ∙А. "
+        "Напряжение ВН – 10 кВ, напряжение НН – 0,4 кВ."
+    )
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {},
+        _voltage_product_check(
+            "Трансформатор ТМГ-1000/10/0,4 кВ",
+            evidence=evidence,
+        ),
+        evidence,
+    )
+
+    assert HIGH_VOLTAGE_REASON not in [item.reason for item in reasons]
+    assert checks["highVoltageCheck"]["triggered"] is False
+    assert all(
+        item["voltageKv"] < 35
+        for item in checks["highVoltageCheck"]["parsedVoltages"]
+    )
+
+
+def test_power_units_are_never_treated_as_voltage() -> None:
+    power_values = (
+        "35 кВА",
+        "35 кВ·А",
+        "35 кВ∙А",
+        "35 кВ А",
+        "35 kVA",
+        "35 кВт",
+    )
+    for value in power_values:
+        reasons, _ = calculate_hard_reasons(
+            job(),
+            {},
+            _voltage_product_check(f"Трансформатор, мощность {value}"),
+            value,
+        )
+        assert HIGH_VOLTAGE_REASON not in [item.reason for item in reasons], value
+
+
+def test_compound_35_10_kv_in_product_position_triggers_reason() -> None:
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {},
+        _voltage_product_check("Трансформатор 35/10 кВ"),
+        "",
+    )
+
+    reason = next(item for item in reasons if item.reason == HIGH_VOLTAGE_REASON)
+    assert "35/10" in reason.evidence
+    assert checks["highVoltageCheck"]["triggered"] is True
+    assert [
+        item["voltageKv"] for item in checks["highVoltageCheck"]["parsedVoltages"]
+    ] == [35.0, 10.0]
+
+
+def test_voltage_in_contextual_position_evidence_triggers_reason() -> None:
+    reasons, _ = calculate_hard_reasons(
+        job(),
+        {},
+        _voltage_product_check(
+            "Трансформатор",
+            evidence="Класс напряжения: 110 кВ.",
+        ),
+        "",
+    )
+
+    assert HIGH_VOLTAGE_REASON in [item.reason for item in reasons]
+
+
+def test_unrelated_voltage_in_combined_text_does_not_trigger_reason() -> None:
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {},
+        _voltage_product_check("Трансформатор 10/0,4 кВ"),
+        "Справочная информация о сети 110 кВ.",
+    )
+
+    assert HIGH_VOLTAGE_REASON not in [item.reason for item in reasons]
+    assert checks["highVoltageCheck"]["triggered"] is False
+
+
+def test_llm_cannot_reintroduce_deterministic_35_kv_reason() -> None:
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(),
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=HIGH_VOLTAGE_REASON,
+            detectedReasons=[
+                DecisionReason(
+                    reason=HIGH_VOLTAGE_REASON,
+                    evidence="Неподтвержденное предположение",
+                    confidence="high",
+                )
+            ],
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert "tenderStatusReason" not in fields
+    assert decision["llmReasonCandidates"] == []

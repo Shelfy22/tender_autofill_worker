@@ -146,6 +146,26 @@ class DocumentPriceSource(BaseModel):
     lineTotalHeader: str = ""
     extractionMethod: Literal["excel_deterministic", "llm"] = "llm"
 
+    @field_validator("extractionMethod", mode="before")
+    @classmethod
+    def normalize_extraction_method(cls, value: Any) -> str:
+        text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if text in {
+            "excel_deterministic",
+            "excel",
+            "xls",
+            "xlsx",
+            "spreadsheet",
+            "deterministic",
+        }:
+            return "excel_deterministic"
+        if text in {"llm", "ai", "model", "openai", "gpt", "gemini"}:
+            return "llm"
+        # Unknown values in this field come from an LLM response. Keep the job
+        # running and record the conservative source classification instead of
+        # failing all retries on a diagnostic-only field.
+        return "llm"
+
 
 class TenderPosition(BaseModel):
     product: str
@@ -299,6 +319,7 @@ class ProductMatchItem(BaseModel):
     unit: str = ""
     analogsAllowed: bool | None = None
     evidence: str = ""
+    requirements: str = ""
     documentUnitPriceRub: float | None = None
     documentLineTotalRub: float | None = None
     documentCurrency: str | None = None

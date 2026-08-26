@@ -48,6 +48,30 @@ PAYMENT_DELAY_REASON = "Коммерческие условия. Отсрочк�
 DOCUMENTATION_REASON = "Оргвопросы. Отсутствует ТЗ / Нет документации / Некорректная ссылка"
 MARKET_RESEARCH_REASON = "Оргвопросы. Опрос рынка / Мониторинг / Анализ рынка / Анонс / КИМ"
 
+HIGH_VOLTAGE_REASON = "Номенклатура. Оборудование 35 кВ и выше"
+_VOLTAGE_COMPONENT = r"\d{1,4}(?:[.,]\d+)?"
+_POWER_SUFFIX_GUARD = r"(?!\s*(?:[·∙*×xх]\s*)?[аa]\b)"
+_COMPOUND_VOLTAGE_PATTERN = re.compile(
+    rf"\b(?P<values>{_VOLTAGE_COMPONENT}(?:\s*/\s*{_VOLTAGE_COMPONENT})+)"
+    rf"\s*(?:кв|kv)\b{_POWER_SUFFIX_GUARD}",
+    re.IGNORECASE,
+)
+_SINGLE_VOLTAGE_PATTERN = re.compile(
+    rf"\b(?P<value>{_VOLTAGE_COMPONENT})\s*(?:кв|kv)\b{_POWER_SUFFIX_GUARD}",
+    re.IGNORECASE,
+)
+_VOLTAGE_COMPONENT_PATTERN = re.compile(_VOLTAGE_COMPONENT)
+_VOLTAGE_CONTEXT_PATTERN = re.compile(
+    r"\b(?:напряжени[еяю]|"
+    r"класс(?:а|у|ом)?\s+напряжения|вн|нн)\b",
+    re.IGNORECASE,
+)
+_TRANSFORMER_MODEL_PREFIX_PATTERN = re.compile(
+    r"\b(?:\u0442\u043c\u0433\d*|\u0442\u0434\u043d\d*|\u0442\u0434\u0442\u043d\d*|\u0442\u0440\u0434\u043d\d*|"
+    r"\u0442\u0441\u0437\u043b?\d*|\u0442\u043c\u043d\d*|\u0442\u043c\u0437\d*|\u0442\u0434\u0446\d*)\s*[-\u2013\u2014]?\s*$",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class HardReason:
@@ -120,6 +144,101 @@ def add_months(value: date, months: int) -> date:
 
 def _snippet(text: str, match: re.Match[str], radius: int = 180) -> str:
     return re.sub(r"\s+", " ", text[max(0, match.start() - radius): match.end() + radius]).strip()
+
+
+
+def _voltage_text_snippet(text: str, start: int, end: int, radius: int = 120) -> str:
+    return re.sub(r"\s+", " ", text[max(0, start - radius): end + radius]).strip()
+
+
+def _extract_voltage_mentions(text: str) -> list[dict[str, Any]]:
+    mentions: list[dict[str, Any]] = []
+    compound_spans: list[tuple[int, int]] = []
+    for match in _COMPOUND_VOLTAGE_PATTERN.finditer(text):
+        compound_spans.append(match.span())
+        components = _VOLTAGE_COMPONENT_PATTERN.findall(match.group("values"))
+        prefix = text[max(0, match.start() - 80): match.start()]
+        if len(components) >= 3 and _TRANSFORMER_MODEL_PREFIX_PATTERN.search(prefix):
+            # Transformer model names commonly encode apparent power first:
+            # TMG-1000/10/0.4 kV means 1000 kVA and voltages 10/0.4 kV.
+            components = components[1:]
+        for component in components:
+            mentions.append(
+                {
+                    "voltageKv": float(component.replace(",", ".")),
+                    "matchedText": match.group(0),
+                    "start": match.start(),
+                    "end": match.end(),
+                }
+            )
+
+    for match in _SINGLE_VOLTAGE_PATTERN.finditer(text):
+        if any(start <= match.start() and match.end() <= end for start, end in compound_spans):
+            continue
+        mentions.append(
+            {
+                "voltageKv": float(match.group("value").replace(",", ".")),
+                "matchedText": match.group(0),
+                "start": match.start(),
+                "end": match.end(),
+            }
+        )
+    return mentions
+
+
+def _collect_product_voltage_mentions(product_check: dict[str, Any]) -> list[dict[str, Any]]:
+    details = product_check.get("details")
+    if not isinstance(details, list):
+        return []
+
+    collected: list[dict[str, Any]] = []
+    seen: set[tuple[int, str, float, str]] = set()
+    primary_fields = {"sourceProduct", "productQuery", "sourceRequirements"}
+    for fallback_index, detail in enumerate(details, start=1):
+        if not isinstance(detail, dict):
+            continue
+        position_index = detail.get("positionIndex") or fallback_index
+        source_product = str(detail.get("sourceProduct") or "").strip()
+        seen_texts: set[str] = set()
+        for source_field in (
+            "sourceProduct",
+            "productQuery",
+            "sourceRequirements",
+            "sourceEvidence",
+        ):
+            source_text = str(detail.get(source_field) or "").strip()
+            normalized_text = re.sub(r"\s+", " ", source_text).casefold()
+            if not source_text or normalized_text in seen_texts:
+                continue
+            seen_texts.add(normalized_text)
+            for mention in _extract_voltage_mentions(source_text):
+                context = _voltage_text_snippet(
+                    source_text,
+                    int(mention["start"]),
+                    int(mention["end"]),
+                )
+                if source_field not in primary_fields and not _VOLTAGE_CONTEXT_PATTERN.search(context):
+                    continue
+                key = (
+                    int(position_index),
+                    source_field,
+                    float(mention["voltageKv"]),
+                    str(mention["matchedText"]).casefold(),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                collected.append(
+                    {
+                        "positionIndex": position_index,
+                        "sourceProduct": source_product,
+                        "sourceField": source_field,
+                        "voltageKv": mention["voltageKv"],
+                        "matchedText": mention["matchedText"],
+                        "evidence": context,
+                    }
+                )
+    return collected
 
 
 def _add(reasons: list[HardReason], reason: str, evidence: str, priority: int) -> None:
@@ -253,11 +372,24 @@ def calculate_hard_reasons(
             18,
         )
 
-    for match in re.finditer(r"\b(\d{1,4}(?:[.,]\d+)?)\s*к\s*в\b", all_text, re.I):
-        voltage = float(match.group(1).replace(",", "."))
-        if voltage >= 35:
-            _add(reasons, "Номенклатура. Оборудование 35 кВ и выше", _snippet(all_text, match), 55)
-            break
+    voltage_mentions = _collect_product_voltage_mentions(product_check)
+    high_voltage_mention = next(
+        (item for item in voltage_mentions if item["voltageKv"] >= 35),
+        None,
+    )
+    if high_voltage_mention:
+        voltage = float(high_voltage_mention["voltageKv"])
+        voltage_text = f"{voltage:g}".replace(".", ",")
+        source_product = high_voltage_mention.get("sourceProduct") or ""
+        product_label = f" «{source_product}»" if source_product else ""
+        evidence = (
+            f"Товарная позиция {high_voltage_mention['positionIndex']}"
+            f"{product_label}: "
+            f"в поле {high_voltage_mention['sourceField']} найдено "
+            f"напряжение {voltage_text} кВ. "
+            f"Фрагмент: {high_voltage_mention['evidence']}"
+        )
+        _add(reasons, HIGH_VOLTAGE_REASON, evidence, 55)
 
     for match in re.finditer(
         r"(?:отсрочк[а-я]*|оплат[а-яё\s]{0,120}?в\s+течение)"
@@ -318,6 +450,12 @@ def calculate_hard_reasons(
             "productsExtracted": not products_not_evaluated,
             "automaticApprovalAllowed": not products_not_evaluated
             and document_context.get("documentationMissing") is not True,
+        },
+        "highVoltageCheck": {
+            "source": "productCheck.details / structured tender positions",
+            "thresholdInclusiveKv": 35,
+            "parsedVoltages": voltage_mentions[:100],
+            "triggered": high_voltage_mention is not None,
         },
         "marketResearchCheck": {
             "reportId": job.report_id,
@@ -396,6 +534,7 @@ def apply_final_decision(
                 DEADLINE_REASON,
                 ASSORTMENT_REASON,
                 INDIVISIBLE_REASON,
+                HIGH_VOLTAGE_REASON,
             }:
                 continue
             if market_research_suppressed and item.reason == MARKET_RESEARCH_REASON:
@@ -412,6 +551,7 @@ def apply_final_decision(
         DEADLINE_REASON,
         ASSORTMENT_REASON,
         INDIVISIBLE_REASON,
+        HIGH_VOLTAGE_REASON,
     } or (market_research_suppressed and llm_primary == MARKET_RESEARCH_REASON):
         llm_primary = allowed_detected[0].reason if allowed_detected else None
 
@@ -424,7 +564,7 @@ def apply_final_decision(
         if (
             not reason
             or reason not in REASONS
-            or reason in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON}
+            or reason in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON, HIGH_VOLTAGE_REASON}
             or (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
             or any(item["reason"] == reason for item in llm_reason_candidates)
         ):
@@ -636,6 +776,7 @@ def build_decision_prompt(
             DEADLINE_REASON,
             ASSORTMENT_REASON,
             INDIVISIBLE_REASON,
+            HIGH_VOLTAGE_REASON,
             ACTUAL_COST_REASON,
         }
         and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
@@ -647,6 +788,7 @@ def build_decision_prompt(
             DEADLINE_REASON,
             ASSORTMENT_REASON,
             INDIVISIBLE_REASON,
+            HIGH_VOLTAGE_REASON,
             ACTUAL_COST_REASON,
         }
         and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
@@ -681,6 +823,7 @@ def build_decision_prompt(
 - Отсрочка оплаты является причиной отказа при 90 днях и более (`>= 90`). Правило применяется
   к рабочим, календарным и дням без уточнения типа.
 - Причина «{COVERAGE_REASON}» полностью детерминирована; LLM запрещено выбирать её.
+- Причина «{HIGH_VOLTAGE_REASON}» полностью детерминирована по товарным позициям; LLM запрещено выбирать её.
 - Для неделимого лота проверка проходит при coverage не менее 80% (`>= 80`).
 - Для делимого лота проверка проходит, если найдена хотя бы одна поставляемая позиция.
 - Если делимость лота не подтверждена, применяется безопасное правило неделимого лота: coverage >= 80%.

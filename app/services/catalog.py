@@ -336,6 +336,7 @@ class CatalogMatcher:
                     unit=product.unit,
                     analogsAllowed=product.analogsAllowed,
                     evidence=product.evidence,
+                    requirements=product.requirements,
                     documentUnitPriceRub=product.documentUnitPriceRub,
                     documentLineTotalRub=product.documentLineTotalRub,
                     documentCurrency=product.documentCurrency,

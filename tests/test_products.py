@@ -116,3 +116,20 @@ def test_empty_llm_document_price_source_is_normalized_to_null() -> None:
     )
 
     assert position.documentPriceSource is None
+
+
+def test_excel_extraction_method_alias_is_normalized() -> None:
+    position = TenderPosition.model_validate(
+        {
+            "product": "?????????????",
+            "documentPriceSource": {
+                "fileName": "????????????.xlsx",
+                "sheet": "????1",
+                "row": 37,
+                "extractionMethod": "excel",
+            },
+        }
+    )
+
+    assert position.documentPriceSource is not None
+    assert position.documentPriceSource.extractionMethod == "excel_deterministic"
