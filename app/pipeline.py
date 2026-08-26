@@ -236,6 +236,7 @@ class TenderPipeline:
                 "Summarize Product Coverage",
                 lambda: summarize_product_coverage(
                     match_items,
+                    supply_value_threshold_enabled=job.report_id == 3,
                     lot_divisible=fields.get("lotDivisible"),
                 ),
             )

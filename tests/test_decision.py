@@ -50,15 +50,31 @@ def test_initial_price_missing_or_zero_does_not_reject() -> None:
 
 
 def test_positive_initial_price_below_one_million_rejects() -> None:
-    reasons, _ = calculate_hard_reasons(
-        job(), {"initialPrice": "999 999,00 рублей"}, product_check(), ""
+    for report_id in (1, 2):
+        reasons, _ = calculate_hard_reasons(
+            job(report_id=report_id),
+            {"initialPrice": "999 999,00 рублей"},
+            product_check(),
+            "",
+        )
+        assert PRICE_REASON in [reason.reason for reason in reasons]
+
+
+def test_commercial_initial_price_does_not_drive_one_million_rule() -> None:
+    reasons, checks = calculate_hard_reasons(
+        job(report_id=3),
+        {"initialPrice": "100 000,00 рублей"},
+        product_check(),
+        "",
     )
-    assert PRICE_REASON in [reason.reason for reason in reasons]
+
+    assert PRICE_REASON not in [reason.reason for reason in reasons]
+    assert checks["priceThresholdCheck"]["mode"] == "calculated_qdrant_price_times_quantity"
 
 
 def test_calculated_supply_price_reject_requires_complete_evaluation() -> None:
     complete, _ = calculate_hard_reasons(
-        job(),
+        job(report_id=3),
         {"initialPrice": 0},
         product_check(
             supplyValueHardReject=True,
@@ -69,7 +85,7 @@ def test_calculated_supply_price_reject_requires_complete_evaluation() -> None:
         "",
     )
     incomplete, _ = calculate_hard_reasons(
-        job(),
+        job(report_id=3),
         {"initialPrice": 0},
         product_check(
             supplyValueHardReject=False,
@@ -81,6 +97,56 @@ def test_calculated_supply_price_reject_requires_complete_evaluation() -> None:
     )
     assert PRICE_REASON in [reason.reason for reason in complete]
     assert PRICE_REASON not in [reason.reason for reason in incomplete]
+
+
+def test_calculated_supply_price_is_informational_for_223_and_44() -> None:
+    calculated_below_threshold = product_check(
+        supplyValueHardReject=True,
+        supplyValueThresholdApplicable=True,
+        priceEvaluationComplete=True,
+        supplyTotalPriceRub=13_830.33,
+    )
+
+    for report_id in (1, 2):
+        reasons, checks = calculate_hard_reasons(
+            job(report_id=report_id),
+            {"initialPrice": "2 000 000 рублей"},
+            calculated_below_threshold,
+            "",
+        )
+        assert PRICE_REASON not in [reason.reason for reason in reasons]
+        assert checks["priceThresholdCheck"]["mode"] == "initial_price_only"
+        assert checks["priceThresholdCheck"]["calculatedValueInformationalOnly"] is True
+
+
+def test_llm_cannot_reintroduce_deterministic_one_million_reason() -> None:
+    llm_decision = LlmDecision(
+        decision="reject",
+        primaryReason=PRICE_REASON,
+        detectedReasons=[
+            DecisionReason(
+                reason=PRICE_REASON,
+                evidence="Расчётная сумма 13 830,33 руб.",
+                confidence="high",
+            )
+        ],
+        note="Сумма ниже порога.",
+        confidence="high",
+    )
+
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(),
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=llm_decision,
+        report_id=1,
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert "tenderStatusReason" not in fields
+    assert decision["llmReasonCandidates"] == []
 
 
 def test_remaining_days_rule_is_strict() -> None:

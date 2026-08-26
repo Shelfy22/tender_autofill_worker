@@ -150,6 +150,20 @@ def test_price_threshold_and_incomplete_evaluation() -> None:
     assert incomplete["supplyValueHardReject"] is False
 
 
+def test_calculated_price_can_be_kept_as_information_without_threshold() -> None:
+    result = summarize_product_coverage(
+        [item(1, "Полное соответствие", quantity=1, price=13_830.33)],
+        supply_value_threshold_enabled=False,
+    )
+
+    assert result["quantityAdjustedTotalRub"] == 13_830.33
+    assert result["priceEvaluationComplete"] is True
+    assert result["supplyValueThresholdApplicable"] is False
+    assert result["supplyValueHardReject"] is False
+    assert result["supplyValueEvaluationMode"] == "informational_only_223_44"
+    assert "расчётная сумма является справочной" in result["priceSummary"]
+
+
 def test_russian_formatted_median_price_is_parsed() -> None:
     match = ProductMatch.model_validate(
         {"Медианная цена": "1 251 000,50 руб.", "Соответствие": "Товар не найден"}

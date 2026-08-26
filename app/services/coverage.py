@@ -46,6 +46,7 @@ def summarize_product_coverage(
     items: Iterable[ProductMatchItem | dict[str, Any]],
     *,
     lot_divisible: Any = None,
+    supply_value_threshold_enabled: bool = True,
 ) -> dict[str, Any]:
     normalized = [item if isinstance(item, ProductMatchItem) else ProductMatchItem.model_validate(item) for item in items]
     details: list[dict[str, Any]] = []
@@ -199,7 +200,9 @@ def summarize_product_coverage(
     quantity_total = round_money(sum(detail["positionTotalPriceRub"] or 0 for detail in supplied_details))
     median_complete = supplied_count > 0 and priced_count == supplied_count
     price_complete = supplied_count > 0 and fully_calculated_count == supplied_count
-    threshold_applicable = coverage_approved and price_complete
+    threshold_applicable = (
+        supply_value_threshold_enabled and coverage_approved and price_complete
+    )
     value_reject = threshold_applicable and quantity_total < 1_000_000
     document_priced_count = sum(
         detail["documentUnitPriceRub"] is not None or detail["documentLineTotalRub"] is not None
@@ -257,6 +260,11 @@ def summarize_product_coverage(
                 "поэтому автоматический порог 1 млн руб. не применяется."
             )
         price_summary = f"{median_part} {quantity_part}"
+        if not supply_value_threshold_enabled:
+            price_summary += (
+                " Для закупок 223-ФЗ/44-ФЗ расчётная сумма является справочной и "
+                "не применяется для порога 1 млн руб.; проверяется только начальная цена."
+            )
         if is_divisible_lot:
             rule_summary = (
                 "Лот делимый: найдена хотя бы одна поставляемая позиция, проверка пройдена."
@@ -295,6 +303,11 @@ def summarize_product_coverage(
         document_price_summary = "Цена товарных позиций в документах не извлечена."
 
     return {
+        "supplyValueEvaluationMode": (
+            "commercial_calculated_total"
+            if supply_value_threshold_enabled
+            else "informational_only_223_44"
+        ),
         "status": "evaluated" if total else "not_evaluated",
         "total": total,
         "suppliedCount": supplied_count,

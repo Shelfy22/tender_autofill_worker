@@ -310,12 +310,20 @@ def calculate_hard_reasons(
         )
 
     initial_price = parse_money(_field(fields, "initialPrice"))
-    if initial_price is not None and initial_price > 0 and initial_price < 1_000_000:
+    regulated_purchase = job.report_id in {1, 2}
+    commercial_purchase = job.report_id == 3
+    if (
+        regulated_purchase
+        and initial_price is not None
+        and initial_price > 0
+        and initial_price < 1_000_000
+    ):
         _add(reasons, PRICE_REASON, f"НМЦК: {_field(fields, 'initialPrice')}", 20)
 
     total_price = product_check.get("supplyTotalPriceRub")
     if (
-        product_check.get("supplyValueHardReject") is True
+        commercial_purchase
+        and product_check.get("supplyValueHardReject") is True
         and product_check.get("supplyValueThresholdApplicable") is True
         and product_check.get("priceEvaluationComplete") is True
         and product_check.get("coverageApproved") is True
@@ -428,6 +436,20 @@ def calculate_hard_reasons(
     reasons.sort(key=lambda item: item.priority)
     checks = {
         "initialPriceNumeric": initial_price,
+        "priceThresholdCheck": {
+            "reportId": job.report_id,
+            "mode": (
+                "initial_price_only"
+                if regulated_purchase
+                else "calculated_qdrant_price_times_quantity"
+                if commercial_purchase
+                else "not_configured"
+            ),
+            "initialPriceNumeric": initial_price,
+            "calculatedSupplyValueRub": product_check.get("supplyTotalPriceRub"),
+            "calculatedValueInformationalOnly": regulated_purchase,
+            "thresholdRub": 1_000_000,
+        },
         "submissionDeadlineCheck": {
             "source": "Seldon / колонка «Осталось дней»",
             "remainingDays": job.remaining_days,
@@ -535,6 +557,8 @@ def apply_final_decision(
                 ASSORTMENT_REASON,
                 INDIVISIBLE_REASON,
                 HIGH_VOLTAGE_REASON,
+                PRICE_REASON,
+                ACTUAL_COST_REASON,
             }:
                 continue
             if market_research_suppressed and item.reason == MARKET_RESEARCH_REASON:
@@ -552,6 +576,8 @@ def apply_final_decision(
         ASSORTMENT_REASON,
         INDIVISIBLE_REASON,
         HIGH_VOLTAGE_REASON,
+        PRICE_REASON,
+        ACTUAL_COST_REASON,
     } or (market_research_suppressed and llm_primary == MARKET_RESEARCH_REASON):
         llm_primary = allowed_detected[0].reason if allowed_detected else None
 
@@ -777,6 +803,7 @@ def build_decision_prompt(
             ASSORTMENT_REASON,
             INDIVISIBLE_REASON,
             HIGH_VOLTAGE_REASON,
+            PRICE_REASON,
             ACTUAL_COST_REASON,
         }
         and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
@@ -789,6 +816,7 @@ def build_decision_prompt(
             ASSORTMENT_REASON,
             INDIVISIBLE_REASON,
             HIGH_VOLTAGE_REASON,
+            PRICE_REASON,
             ACTUAL_COST_REASON,
         }
         and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
@@ -817,9 +845,13 @@ def build_decision_prompt(
   Код сам сохранит причину комплектования лота как дополнительную.
 - Не останавливай проверку после анализа товарного ассортимента: независимо проверь остальные основания
   отказа по документации.
-- Нулевая/пустая/null начальная цена не является отказом.
-- Расчётный порог 1 млн применяется только при productCheck.coverageApproved=true и
+- Причина «{PRICE_REASON}» полностью детерминирована; LLM запрещено выбирать её.
+- Для reportId 1 (223-ФЗ) и reportId 2 (гос/44-ФЗ) порог 1 млн проверяется только по
+  initialPrice. Расчётная стоимость productCheck носит справочный характер и не является причиной отказа.
+- Для reportId 3 (коммерция) initialPrice не используется для порога 1 млн. Порог применяется
+  только к расчётной сумме Qdrant-цена × количество при productCheck.coverageApproved=true и
   priceEvaluationComplete=true.
+- Нулевая/пустая/null начальная цена сама по себе не является отказом.
 - Отсрочка оплаты является причиной отказа при 90 днях и более (`>= 90`). Правило применяется
   к рабочим, календарным и дням без уточнения типа.
 - Причина «{COVERAGE_REASON}» полностью детерминирована; LLM запрещено выбирать её.
