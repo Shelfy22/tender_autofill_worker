@@ -21,6 +21,24 @@ ALLOWED_FIELDS = {
 }
 
 
+_DELIVERY_DEADLINE_EVIDENCE_PATTERN = re.compile(
+    r"(?:срок(?:и|ом)?\s+(?:поставк[иа]|доставк[иа])|"
+    r"дат[аы]\s+(?:поставк[и]|доставк[и])|"
+    r"поставк[а-яё]*\s+(?:товар[а-яё]*\s+)?(?:осуществля[а-яё]*\s+)?"
+    r"(?:до|не\s+позднее|в\s+течение|с|по)|"
+    r"доставк[а-яё]*\s+(?:товар[а-яё]*\s+)?(?:осуществля[а-яё]*\s+)?"
+    r"(?:до|не\s+позднее|в\s+течение|с|по)|"
+    r"(?:поставить|поставляет|доставить|доставляет)[\s\S]{0,100}?"
+    r"(?:до|не\s+позднее|в\s+течение))",
+    re.IGNORECASE,
+)
+
+
+def _has_explicit_delivery_deadline_evidence(evidence: Any) -> bool:
+    text = re.sub(r"\s+", " ", str(evidence or "")).strip()
+    return bool(text and _DELIVERY_DEADLINE_EVIDENCE_PATTERN.search(text))
+
+
 def _normalize_date(value: Any) -> Any:
     text = str(value or "").strip()
     if not text:
@@ -155,6 +173,20 @@ def validate_fields(
         fields.pop("lotDivisible", None)
         meta.pop("lotDivisible", None)
         warnings.append("Лот делимый не заполнен: нет прямого evidence.")
+
+    for key in ("deliveryDate", "deliveryDays"):
+        if not fields.get(key):
+            continue
+        evidence = str(meta.get(key, {}).get("evidence") or "").strip()
+        if _has_explicit_delivery_deadline_evidence(evidence):
+            continue
+        fields.pop(key, None)
+        meta.pop(key, None)
+        evidence_preview = re.sub(r"\s+", " ", evidence)[:300]
+        warnings.append(
+            f"{key} отброшен: в evidence нет прямой связи со сроком поставки. "
+            f"Фрагмент: {evidence_preview}"
+        )
 
     for key in ("dateCreated", "submissionDeadlineDate", "resultDate", "contractDate", "deliveryDate", "tenderSubmittedDate", "tenderWonDate"):
         if fields.get(key):

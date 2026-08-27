@@ -38,6 +38,7 @@ REASONS = [
 ]
 
 DEADLINE_REASON = "Оргвопросы. На момент согласования менее 3 рабочих дней до подачи заявки"
+DELIVERY_DEADLINE_REASON = "Коммерческие условия. Не проходим по сроку поставки"
 ASSORTMENT_REASON = "Непоставляемый ассортимент"
 INDIVISIBLE_REASON = "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры"
 COVERAGE_REASON = INDIVISIBLE_REASON
@@ -47,6 +48,72 @@ REMOTE_TERRITORY_REASON = "Коммерческие условия. Постав
 PAYMENT_DELAY_REASON = "Коммерческие условия. Отсрочка платежа 90 дней и более"
 DOCUMENTATION_REASON = "Оргвопросы. Отсутствует ТЗ / Нет документации / Некорректная ссылка"
 MARKET_RESEARCH_REASON = "Оргвопросы. Опрос рынка / Мониторинг / Анализ рынка / Анонс / КИМ"
+SUPPLY_WORK_REASON = "Номенклатура. Поставка с работами"
+REPAIR_KIT_REASON = "Номенклатура. Ремкомплект / ЗИП / Продукция по чертежу"
+
+_REPAIR_KIT_PRODUCT_PATTERN = re.compile(
+    r"^\s*(?:(?:комплект|набор)\s+(?:зип\b|запасн[а-яё]*\s+част[а-яё]*\b)|"
+    r"зип\b(?:\s|:|-|$)|ремкомплект[а-яё]*\b|"
+    r"ремонтн[а-яё]*\s+комплект[а-яё]*\b|"
+    r"запасн[а-яё]*\s+част[а-яё]*\b)",
+    re.IGNORECASE,
+)
+_DRAWING_PRODUCT_PATTERN = re.compile(
+    r"\b(?:изготовлени[ея]\s+(?:детал[а-яё]*|продукц[а-яё]*|издели[а-яё]*)?\s*"
+    r"по\s+чертеж[а-яё]*|продукци[яи]\s+по\s+чертеж[а-яё]*)\b",
+    re.IGNORECASE,
+)
+
+_SUPPLY_WORK_TERM = (
+    r"(?:монтаж[а-яё]*|установк[а-яё]*|пусконаладк[а-яё]*|"
+    r"пуско-наладк[а-яё]*|ввод\s+в\s+эксплуатацию)"
+)
+_SUPPLIER_TERM = r"(?:поставщик[а-яё]*|подрядчик[а-яё]*|исполнител[а-яё]*)"
+_SUPPLY_WORK_PATTERNS = (
+    re.compile(
+        rf"{_SUPPLIER_TERM}\s+(?:обязан[а-яё]*|должен|должна|должно|должны|"
+        rf"выполняет|осуществляет|производит|обеспечивает)[\s\S]{{0,180}}?{_SUPPLY_WORK_TERM}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_SUPPLY_WORK_TERM}[\s\S]{{0,140}}?"
+        r"(?:выполняется|осуществляется|производится|обеспечивается)\s+"
+        rf"{_SUPPLIER_TERM}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_SUPPLY_WORK_TERM}[\s\S]{{0,140}}?"
+        r"(?:выполняет|осуществляет|производит|обеспечивает)\s+"
+        rf"{_SUPPLIER_TERM}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_SUPPLY_WORK_TERM}[\s\S]{{0,140}}?"
+        r"(?:входит|включен[а-яё]*)\s+в\s+"
+        r"(?:предмет|стоимость|объ[её]м|комплект)\s+поставк[а-яё]*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:предмет|стоимость|объ[её]м|комплект)\s+поставк[а-яё]*"
+        r"[\s\S]{0,140}?(?:включает|содержит|предусматривает)[\s\S]{0,80}?"
+        rf"{_SUPPLY_WORK_TERM}",
+        re.IGNORECASE,
+    ),
+)
+_SUPPLY_WORK_EXCLUSION_PATTERN = re.compile(
+    r"(?:эксперт[а-яё]*|экспертиз[а-яё]*|"
+    r"(?:проверк[а-яё]*|контрол[а-яё]*)\s+качеств[а-яё]*|"
+    r"гарантийн[а-яё\s]{0,40}случа[а-яё]*|"
+    r"устранен[а-яё]*\s+(?:выявленн[а-яё]*\s+)?недостатк[а-яё]*|"
+    r"дефект[а-яё]*|претензи[а-яё]*)",
+    re.IGNORECASE,
+)
+_SUPPLY_WORK_NEGATION_PATTERN = re.compile(
+    rf"(?:{_SUPPLY_WORK_TERM}[\s\S]{{0,50}}?не\s+(?:требуется|входит)|"
+    rf"не\s+(?:требуется|предусмотрен[а-яё]*|входит)[\s\S]{{0,50}}?{_SUPPLY_WORK_TERM}|"
+    r"без\s+монтаж[а-яё]*)",
+    re.IGNORECASE,
+)
 
 HIGH_VOLTAGE_REASON = "Номенклатура. Оборудование 35 кВ и выше"
 _VOLTAGE_COMPONENT = r"\d{1,4}(?:[.,]\d+)?"
@@ -145,6 +212,68 @@ def add_months(value: date, months: int) -> date:
 def _snippet(text: str, match: re.Match[str], radius: int = 180) -> str:
     return re.sub(r"\s+", " ", text[max(0, match.start() - radius): match.end() + radius]).strip()
 
+
+def _work_context(text: str, match: re.Match[str], maximum_length: int = 800) -> str:
+    left = max(
+        text.rfind(separator, 0, match.start())
+        for separator in ("\n", ".", "!", "?")
+    )
+    right_candidates = [
+        position
+        for separator in ("\n", ".", "!", "?")
+        if (position := text.find(separator, match.end())) >= 0
+    ]
+    right = min(right_candidates) if right_candidates else len(text)
+    context = text[left + 1 : right]
+    if len(context) > maximum_length:
+        context = text[max(0, match.start() - 300) : match.end() + 300]
+    return re.sub(r"\s+", " ", context).strip()
+
+
+def _find_supply_work_evidence(text: str) -> str | None:
+    for pattern in _SUPPLY_WORK_PATTERNS:
+        for match in pattern.finditer(text or ""):
+            context = _work_context(text, match)
+            if _SUPPLY_WORK_EXCLUSION_PATTERN.search(context):
+                continue
+            if _SUPPLY_WORK_NEGATION_PATTERN.search(context):
+                continue
+            return context
+    return None
+
+
+def _find_repair_kit_product_evidence(product_check: dict[str, Any]) -> str | None:
+    details = product_check.get("details")
+    if not isinstance(details, list):
+        return None
+
+    for fallback_index, detail in enumerate(details, start=1):
+        if not isinstance(detail, dict):
+            continue
+        position_index = detail.get("positionIndex") or fallback_index
+        seen: set[str] = set()
+        for field_name in ("sourceProduct", "productQuery"):
+            source_text = re.sub(
+                r"\s+",
+                " ",
+                str(detail.get(field_name) or ""),
+            ).strip()
+            normalized = source_text.casefold()
+            if not source_text or normalized in seen:
+                continue
+            seen.add(normalized)
+
+            # Product extraction may retain a long table row. Only its leading
+            # subject/name is authoritative; later columns often describe the
+            # main product's completeness and may contain incidental "ЗИП:".
+            subject = re.split(r"[|\n\r]", source_text, maxsplit=1)[0].strip()
+            subject = subject[:500]
+            if (
+                _REPAIR_KIT_PRODUCT_PATTERN.search(subject)
+                or _DRAWING_PRODUCT_PATTERN.search(subject)
+            ):
+                return f"Позиция {position_index}: {subject}"
+    return None
 
 
 def _voltage_text_snippet(text: str, start: int, end: int, radius: int = 120) -> str:
@@ -347,8 +476,6 @@ def calculate_hard_reasons(
          "Коммерческие условия. Консигнация / Хранение у Покупателя за счет Поставщика", 45),
         (r"(?:частотн[а-я]*\s+(?:привод|преобразователь)|пч)[\s\S]{0,120}\b(?:6|10|6\s*[-–]\s*10)\s*к\s*в\b",
          "Номенклатура. Частотный привод 6–10 кВ", 60),
-        (r"\b(ремкомплект|ремонтн[а-я]*\s+комплект|зип|запасн[а-я]*\s+част|изготовлени[ея]\s+по\s+чертеж|продукци[яи]\s+по\s+чертеж)\b",
-         "Номенклатура. Ремкомплект / ЗИП / Продукция по чертежу", 65),
         (r"\b(военн[а-я]*\s+при[её]мк[а-я]*|при[её]мк[а-я]*\s+военн[а-я]*\s+представитель|контрол[ья]\s+военн[а-я]*\s+представитель)\b",
          "Номенклатура. Военная приемка", 70),
         (r"\b(атомн[а-я]*\s+при[её]мк[а-я]*|при[её]мк[а-я]*\s+для\s+о(?:бъект|иаэ)|класс\s+безопасности\s+[1-4])\b",
@@ -364,6 +491,10 @@ def calculate_hard_reasons(
         match = re.search(pattern, all_text, re.I)
         if match:
             _add(reasons, reason, _snippet(all_text, match), priority)
+
+    repair_kit_evidence = _find_repair_kit_product_evidence(product_check)
+    if repair_kit_evidence:
+        _add(reasons, REPAIR_KIT_REASON, repair_kit_evidence, 65)
 
     market_research_match = re.search(
         r"\b(опрос\s+рынка|мониторинг\s+рынка|анализ\s+рынка|"
@@ -418,20 +549,14 @@ def calculate_hard_reasons(
     if delivery and delivery > delivery_limit:
         _add(
             reasons,
-            "Коммерческие условия. Не проходим по сроку поставки",
+            DELIVERY_DEADLINE_REASON,
             f"Дата заведения: {created}; предел 18 месяцев: {delivery_limit}; поставка: {delivery}",
             32,
         )
 
-    work_match = re.search(
-        r"(?:монтаж|установк[а-я]*|пусконаладк[а-я]*|ввод\s+в\s+эксплуатацию)[\s\S]{0,100}(?:поставщиком|подрядчиком|силами\s+поставщика|входит\s+в\s+(?:предмет|стоимость|объ[её]м))",
-        all_text,
-        re.I,
-    )
-    if work_match:
-        context = _snippet(all_text, work_match, 120)
-        if not re.search(r"не\s+требуется|не\s+входит|заказчик|без\s+монтажа", context, re.I):
-            _add(reasons, "Номенклатура. Поставка с работами", context, 80)
+    supply_work_evidence = _find_supply_work_evidence(all_text)
+    if supply_work_evidence:
+        _add(reasons, SUPPLY_WORK_REASON, supply_work_evidence, 80)
 
     reasons.sort(key=lambda item: item.priority)
     checks = {
@@ -479,6 +604,12 @@ def calculate_hard_reasons(
             "parsedVoltages": voltage_mentions[:100],
             "triggered": high_voltage_mention is not None,
         },
+        "repairKitCheck": {
+            "source": "productCheck.details.sourceProduct/productQuery",
+            "scope": "product_position_subject_only",
+            "evidence": repair_kit_evidence,
+            "triggered": repair_kit_evidence is not None,
+        },
         "marketResearchCheck": {
             "reportId": job.report_id,
             "commercialOnly": True,
@@ -511,6 +642,7 @@ def apply_final_decision(
     meta = dict(meta)
     counterparty_requires_work = counterparty_lookup.get("status") != "matched"
     market_research_suppressed = report_id in {1, 2}
+    confirmed_repair_kit_evidence = _find_repair_kit_product_evidence(product_check)
     hard = sorted(
         (
             item
@@ -554,6 +686,7 @@ def apply_final_decision(
         for item in llm_decision.detectedReasons:
             if item.reason not in REASONS or item.reason in {
                 DEADLINE_REASON,
+                DELIVERY_DEADLINE_REASON,
                 ASSORTMENT_REASON,
                 INDIVISIBLE_REASON,
                 HIGH_VOLTAGE_REASON,
@@ -564,6 +697,16 @@ def apply_final_decision(
             if market_research_suppressed and item.reason == MARKET_RESEARCH_REASON:
                 continue
             if (
+                item.reason == REPAIR_KIT_REASON
+                and confirmed_repair_kit_evidence is None
+            ):
+                continue
+            if (
+                item.reason == SUPPLY_WORK_REASON
+                and _find_supply_work_evidence(item.evidence) is None
+            ):
+                continue
+            if (
                 product_check.get("coverageApproved") is True
                 and re.search(r"ассортимент|номенклатур", item.evidence, re.I)
             ):
@@ -571,14 +714,25 @@ def apply_final_decision(
             allowed_detected.append(item)
 
     llm_primary = llm_decision.primaryReason if llm_decision else None
+    invalid_supply_work_primary = (
+        llm_primary == SUPPLY_WORK_REASON
+        and not any(item.reason == SUPPLY_WORK_REASON for item in allowed_detected)
+    )
+    invalid_repair_kit_primary = (
+        llm_primary == REPAIR_KIT_REASON
+        and confirmed_repair_kit_evidence is None
+    )
     if llm_primary not in REASONS or llm_primary in {
         DEADLINE_REASON,
+        DELIVERY_DEADLINE_REASON,
         ASSORTMENT_REASON,
         INDIVISIBLE_REASON,
         HIGH_VOLTAGE_REASON,
         PRICE_REASON,
         ACTUAL_COST_REASON,
-    } or (market_research_suppressed and llm_primary == MARKET_RESEARCH_REASON):
+    } or (
+        market_research_suppressed and llm_primary == MARKET_RESEARCH_REASON
+    ) or invalid_supply_work_primary or invalid_repair_kit_primary:
         llm_primary = allowed_detected[0].reason if allowed_detected else None
 
     # primaryReason is kept first, followed by the complete detectedReasons list.
@@ -590,7 +744,13 @@ def apply_final_decision(
         if (
             not reason
             or reason not in REASONS
-            or reason in {DEADLINE_REASON, ASSORTMENT_REASON, INDIVISIBLE_REASON, HIGH_VOLTAGE_REASON}
+            or reason in {
+                DEADLINE_REASON,
+                DELIVERY_DEADLINE_REASON,
+                ASSORTMENT_REASON,
+                INDIVISIBLE_REASON,
+                HIGH_VOLTAGE_REASON,
+            }
             or (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
             or any(item["reason"] == reason for item in llm_reason_candidates)
         ):
@@ -800,6 +960,7 @@ def build_decision_prompt(
         for reason in REASONS
         if reason not in {
             DEADLINE_REASON,
+            DELIVERY_DEADLINE_REASON,
             ASSORTMENT_REASON,
             INDIVISIBLE_REASON,
             HIGH_VOLTAGE_REASON,
@@ -813,6 +974,7 @@ def build_decision_prompt(
         for reason in REASONS
         if reason not in {
             DEADLINE_REASON,
+            DELIVERY_DEADLINE_REASON,
             ASSORTMENT_REASON,
             INDIVISIBLE_REASON,
             HIGH_VOLTAGE_REASON,
@@ -852,6 +1014,9 @@ def build_decision_prompt(
   только к расчётной сумме Qdrant-цена × количество при productCheck.coverageApproved=true и
   priceEvaluationComplete=true.
 - Нулевая/пустая/null начальная цена сама по себе не является отказом.
+- Причина «{DELIVERY_DEADLINE_REASON}» полностью детерминирована по проверенному deliveryDate
+  или deliveryDays. LLM запрещено выбирать её самостоятельно.
+- Срок действия договора, оплаты, гарантии, приёмки или подачи заявок не является сроком поставки.
 - Отсрочка оплаты является причиной отказа при 90 днях и более (`>= 90`). Правило применяется
   к рабочим, календарным и дням без уточнения типа.
 - Причина «{COVERAGE_REASON}» полностью детерминирована; LLM запрещено выбирать её.
@@ -862,7 +1027,14 @@ def build_decision_prompt(
 - Причина менее 3 дней полностью детерминирована только по remainingDays < 3; значение 3 проходит.
 - Упоминание Росатома/АЭС не равно атомной приёмке без прямой формулировки.
 - Упоминание 275-ФЗ/Минобороны не равно военной приёмке без прямой формулировки.
-- Одиночное слово «монтаж» не является поставкой с работами; нужна обязанность поставщика.
+- Причина «{SUPPLY_WORK_REASON}» допустима только при прямой обязанности поставщика выполнить
+  монтаж, установку, пусконаладку или ввод в эксплуатацию как часть предмета/стоимости/объёма поставки.
+- Не считать поставкой с работами монтаж/демонтаж товара только для экспертизы, проверки или контроля
+  качества, гарантийного случая, рассмотрения претензии, дефекта либо устранения недостатков.
+- Причина «{REPAIR_KIT_REASON}» допустима только тогда, когда сама извлечённая товарная позиция
+  является ЗИП, ремкомплектом, запасной частью или продукцией, изготавливаемой по чертежу.
+- Не считать ЗИП/ремкомплектом основной товар, если ЗИП, сменные наконечники, предохранители
+  или запасные части лишь входят в его комплектность/комплект поставки либо прилагаются к нему.
 - Удалённые территории: Калининград/Калининградская область, Республика Дагестан и
   Республика Саха (Якутия).
 - Ошибка парсинга не равна отсутствию документации.

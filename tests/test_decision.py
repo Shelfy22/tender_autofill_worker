@@ -1,12 +1,15 @@
 from app.models import DecisionReason, LlmDecision, NormalizedJob
 from app.services.decision import (
     COVERAGE_REASON,
+    DELIVERY_DEADLINE_REASON,
     DOCUMENTATION_REASON,
     HIGH_VOLTAGE_REASON,
     MARKET_RESEARCH_REASON,
     PAYMENT_DELAY_REASON,
     PRICE_REASON,
+    REPAIR_KIT_REASON,
     REMOTE_TERRITORY_REASON,
+    SUPPLY_WORK_REASON,
     HardReason,
     apply_final_decision,
     build_decision_prompt,
@@ -117,6 +120,184 @@ def test_calculated_supply_price_is_informational_for_223_and_44() -> None:
         assert PRICE_REASON not in [reason.reason for reason in reasons]
         assert checks["priceThresholdCheck"]["mode"] == "initial_price_only"
         assert checks["priceThresholdCheck"]["calculatedValueInformationalOnly"] is True
+
+
+def test_expertise_mounting_costs_are_not_supply_with_work() -> None:
+    text = (
+        "Оплата услуг эксперта, экспертной организации, а также всех расходов, "
+        "в том числе связанных с транспортировкой, монтажом (демонтажем) Товара "
+        "для экспертизы, осуществляется Поставщиком."
+    )
+
+    reasons, _ = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(total=2),
+        text,
+    )
+
+    assert SUPPLY_WORK_REASON not in [reason.reason for reason in reasons]
+
+
+def test_direct_supplier_mounting_obligation_is_supply_with_work() -> None:
+    text = "Поставщик обязан выполнить монтаж и пусконаладочные работы на объекте заказчика."
+
+    reasons, _ = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(total=2),
+        text,
+    )
+
+    matching = [reason for reason in reasons if reason.reason == SUPPLY_WORK_REASON]
+    assert len(matching) == 1
+    assert "Поставщик обязан выполнить монтаж" in matching[0].evidence
+
+
+def test_zip_in_main_product_completeness_is_not_repair_kit() -> None:
+    main_product = "Маркер по металлу электроискровой ЭИМ"
+    text = (
+        f"{main_product}. Комплектность: источник питания — 1 шт.; "
+        "ЗИП: сменные наконечники — 3 шт.; предохранитель 2А — 1 шт."
+    )
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(
+            total=1,
+            details=[
+                {
+                    "positionIndex": 1,
+                    "sourceProduct": main_product,
+                    "productQuery": main_product,
+                }
+            ],
+        ),
+        text,
+    )
+
+    assert REPAIR_KIT_REASON not in [reason.reason for reason in reasons]
+    assert checks["repairKitCheck"]["triggered"] is False
+
+
+def test_repair_kit_product_position_triggers_reason() -> None:
+    product_name = "Комплект ЗИП для трансформатора ТМГ"
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(
+            total=1,
+            details=[
+                {
+                    "positionIndex": 1,
+                    "sourceProduct": product_name,
+                    "productQuery": product_name,
+                }
+            ],
+        ),
+        "",
+    )
+
+    matching = [reason for reason in reasons if reason.reason == REPAIR_KIT_REASON]
+    assert len(matching) == 1
+    assert product_name in matching[0].evidence
+    assert checks["repairKitCheck"]["triggered"] is True
+
+
+def test_llm_zip_reason_is_suppressed_for_main_product_completeness() -> None:
+    main_product = "Маркер по металлу электроискровой ЭИМ"
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(
+            total=1,
+            details=[
+                {
+                    "positionIndex": 1,
+                    "sourceProduct": main_product,
+                    "productQuery": main_product,
+                }
+            ],
+        ),
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=REPAIR_KIT_REASON,
+            detectedReasons=[
+                DecisionReason(
+                    reason=REPAIR_KIT_REASON,
+                    evidence=(
+                        "Маркер поставляется в комплекте; ЗИП включает "
+                        "сменные наконечники и предохранитель."
+                    ),
+                    confidence="high",
+                )
+            ],
+            confidence="high",
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert "tenderStatusReason" not in fields
+    assert decision["llmReasonCandidates"] == []
+
+
+def test_llm_cannot_reintroduce_delivery_deadline_without_validated_date() -> None:
+    evidence = "Договор действует по 30.03.2028."
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=1),
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=DELIVERY_DEADLINE_REASON,
+            detectedReasons=[
+                DecisionReason(
+                    reason=DELIVERY_DEADLINE_REASON,
+                    evidence=evidence,
+                    confidence="high",
+                )
+            ],
+            confidence="high",
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert "tenderStatusReason" not in fields
+    assert decision["llmReasonCandidates"] == []
+
+
+def test_llm_supply_work_reason_is_suppressed_for_expertise_context() -> None:
+    evidence = (
+        "Расходы, связанные с транспортировкой, монтажом (демонтажем) товара "
+        "для экспертизы, осуществляются поставщиком."
+    )
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=2),
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=SUPPLY_WORK_REASON,
+            detectedReasons=[
+                DecisionReason(
+                    reason=SUPPLY_WORK_REASON,
+                    evidence=evidence,
+                    confidence="high",
+                )
+            ],
+            confidence="high",
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert "tenderStatusReason" not in fields
+    assert decision["llmReasonCandidates"] == []
 
 
 def test_llm_cannot_reintroduce_deterministic_one_million_reason() -> None:
@@ -419,6 +600,22 @@ def test_decision_prompt_requires_full_analysis_after_coverage_rejection() -> No
     assert "обязательно проверь все остальные причины справочника" in prompt
     assert "detectedReasons должен содержать полный список" in prompt
     assert "Не останавливай проверку после анализа товарного ассортимента" in prompt
+
+
+def test_decision_prompt_distinguishes_supply_work_from_expertise() -> None:
+    prompt = build_decision_prompt(
+        fields={},
+        hard_reasons=[],
+        checks={},
+        product_check=product_check(total=1),
+        all_text="Документация тендера",
+        maximum_text_chars=10_000,
+    )
+
+    assert "прямой обязанности поставщика" in prompt
+    assert "монтаж/демонтаж товара только для экспертизы" in prompt
+    assert "сама извлечённая товарная позиция" in prompt
+    assert "лишь входят в его комплектность" in prompt
 
 
 def test_decision_prompt_excludes_actual_cost_reason_from_llm_options() -> None:
