@@ -1,3 +1,5 @@
+import json
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -9,6 +11,7 @@ from app.services.parsers.archives import (
     UnsafeArchiveError,
     _rar_members_from_lsar,
     extract_7z,
+    extract_rar,
     extract_zip,
 )
 from app.services.parsers.common import detect_file_type
@@ -83,6 +86,82 @@ def test_rar_symlink_is_rejected() -> None:
     }
     with pytest.raises(UnsafeArchiveError):
         _rar_members_from_lsar(payload)
+
+
+def test_rar_falls_back_to_bsdtar_when_unar_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "documents.rar"
+    archive.write_bytes(b"Rar!\x1a\x07\x01\x00")
+    events: list[dict[str, object]] = []
+
+    def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if command[0] == "lsar":
+            payload = {
+                "lsarContents": [
+                    {
+                        "XADFileName": "docs/specification.xlsx",
+                        "XADFileSize": 20,
+                        "XADCompressedSize": 8,
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+        if command[0] == "unar":
+            return subprocess.CompletedProcess(command, 1, "", "Unsupported RAR5 method")
+        if command[0] == "bsdtar":
+            destination = Path(command[command.index("-C") + 1])
+            extracted = destination / "docs" / "specification.xlsx"
+            extracted.parent.mkdir(parents=True, exist_ok=True)
+            extracted.write_bytes(b"document-placeholder")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    extracted = extract_rar(
+        archive,
+        tmp_path / "out-rar",
+        settings(tmp_path),
+        observer=events.append,
+    )
+
+    assert len(extracted) == 1
+    assert extracted[0].name == "specification.xlsx"
+    assert [(event["extractor"], event["status"]) for event in events] == [
+        ("unar", "failed"),
+        ("bsdtar", "completed"),
+    ]
+    assert events[0]["stderr"] == "Unsupported RAR5 method"
+    assert events[1]["fallbackUsed"] is True
+
+
+def test_rar_reports_both_extractor_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "documents.rar"
+    archive.write_bytes(b"Rar!\x1a\x07\x01\x00")
+
+    def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if command[0] == "lsar":
+            payload = {
+                "lsarContents": [
+                    {
+                        "XADFileName": "specification.xlsx",
+                        "XADFileSize": 20,
+                        "XADCompressedSize": 8,
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+        if command[0] == "unar":
+            return subprocess.CompletedProcess(command, 1, "", "unar failed")
+        if command[0] == "bsdtar":
+            return subprocess.CompletedProcess(command, 2, "", "bsdtar failed")
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(UnsafeArchiveError, match="unar failed.*bsdtar failed"):
+        extract_rar(archive, tmp_path / "out-rar", settings(tmp_path))
 
 
 def test_extensionless_ooxml_packages_are_not_treated_as_generic_zip(

@@ -11,6 +11,7 @@ RUN apt-get update \
        libreoffice-core \
        libreoffice-writer \
        libreoffice-calc \
+       libarchive-tools \
        p7zip-full \
        unar \
        fonts-dejavu-core \

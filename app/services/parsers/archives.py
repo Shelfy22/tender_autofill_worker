@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
+from time import perf_counter
+from typing import Any
 
 import py7zr
 
 from app.config import Settings
+
+
+logger = logging.getLogger(__name__)
+ArchiveAttemptObserver = Callable[[dict[str, Any]], None]
 
 
 class UnsafeArchiveError(ValueError):
@@ -123,7 +131,89 @@ def _rar_members_from_lsar(payload: object) -> list[tuple[str, int, int]]:
     return members
 
 
-def extract_rar(path: Path, destination: Path, settings: Settings) -> list[Path]:
+def _process_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return value.strip()
+
+
+def _run_archive_extractor(
+    command: list[str], settings: Settings
+) -> tuple[bool, int | None, str, str, float]:
+    started = perf_counter()
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=settings.conversion_timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        duration = round(perf_counter() - started, 3)
+        stdout = _process_output(exc.stdout)
+        stderr = _process_output(exc.stderr)
+        detail = stderr or stdout or f"timeout after {settings.conversion_timeout_seconds}s"
+        return False, None, stdout, detail, duration
+    except OSError as exc:
+        duration = round(perf_counter() - started, 3)
+        return False, None, "", str(exc), duration
+
+    duration = round(perf_counter() - started, 3)
+    stdout = _process_output(completed.stdout)
+    stderr = _process_output(completed.stderr)
+    return completed.returncode == 0, completed.returncode, stdout, stderr, duration
+
+
+def _notify_archive_attempt(
+    observer: ArchiveAttemptObserver | None,
+    *,
+    path: Path,
+    extractor: str,
+    status: str,
+    exit_code: int | None,
+    stdout: str,
+    stderr: str,
+    duration_seconds: float,
+    fallback_used: bool,
+    result_count: int | None = None,
+    byte_count: int | None = None,
+) -> None:
+    payload = {
+        "archiveName": path.name,
+        "archiveFormat": "rar",
+        "extractor": extractor,
+        "status": status,
+        "exitCode": exit_code,
+        "stdout": stdout[:2000],
+        "stderr": stderr[:2000],
+        "durationSeconds": duration_seconds,
+        "fallbackUsed": fallback_used,
+        "resultCount": result_count,
+        "byteCount": byte_count,
+    }
+    if observer is not None:
+        observer(payload)
+    log = logger.info if status == "completed" else logger.warning
+    log(
+        "RAR extraction %s: archive=%s extractor=%s exit_code=%s fallback=%s stderr=%s",
+        status,
+        path.name,
+        extractor,
+        exit_code,
+        fallback_used,
+        stderr[:1000],
+    )
+
+
+def extract_rar(
+    path: Path,
+    destination: Path,
+    settings: Settings,
+    observer: ArchiveAttemptObserver | None = None,
+) -> list[Path]:
     destination.mkdir(parents=True, exist_ok=True)
     listing = subprocess.run(
         [settings.lsar_binary, "-json", "-no-recursion", str(path)],
@@ -144,36 +234,101 @@ def extract_rar(path: Path, destination: Path, settings: Settings) -> list[Path]
         sum(compressed for _, _, compressed in members),
         settings,
     )
-    subprocess.run(
-        [
-            settings.unar_binary,
-            "-force-overwrite",
-            "-no-directory",
-            "-output-directory",
-            str(destination),
-            str(path),
-        ],
-        capture_output=True,
-        timeout=settings.conversion_timeout_seconds,
-        check=True,
+    unar_command = [
+        settings.unar_binary,
+        "-force-overwrite",
+        "-no-directory",
+        "-output-directory",
+        str(destination),
+        str(path),
+    ]
+    succeeded, exit_code, stdout, stderr, duration = _run_archive_extractor(
+        unar_command, settings
     )
+    extractor = "unar"
+    extraction_root = destination
+    fallback_used = False
+
+    if not succeeded:
+        _notify_archive_attempt(
+            observer,
+            path=path,
+            extractor="unar",
+            status="failed",
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration_seconds=duration,
+            fallback_used=False,
+        )
+        unar_error = stderr or stdout or f"exit code {exit_code}"
+        fallback_used = True
+        extractor = "bsdtar"
+        extraction_root = destination.with_name(f"{destination.name}_bsdtar")
+        extraction_root.mkdir(parents=True, exist_ok=True)
+        bsdtar_command = [
+            settings.bsdtar_binary,
+            "-xf",
+            str(path),
+            "-C",
+            str(extraction_root),
+        ]
+        succeeded, exit_code, stdout, stderr, duration = _run_archive_extractor(
+            bsdtar_command, settings
+        )
+        if not succeeded:
+            _notify_archive_attempt(
+                observer,
+                path=path,
+                extractor="bsdtar",
+                status="failed",
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
+                duration_seconds=duration,
+                fallback_used=True,
+            )
+            bsdtar_error = stderr or stdout or f"exit code {exit_code}"
+            raise UnsafeArchiveError(
+                "RAR extraction failed: "
+                f"unar: {unar_error[:1000]}; bsdtar: {bsdtar_error[:1000]}"
+            )
     output: list[Path] = []
-    for file in destination.rglob("*"):
+    for file in extraction_root.rglob("*"):
         if file.is_symlink():
             raise UnsafeArchiveError(f"Symbolic link запрещён: {file}")
         if file.is_file():
-            _safe_target(destination, str(file.relative_to(destination)))
+            _safe_target(extraction_root, str(file.relative_to(extraction_root)))
             output.append(file)
     actual_size = sum(file.stat().st_size for file in output)
     _check_limits(len(output), actual_size, path.stat().st_size, settings)
+    _notify_archive_attempt(
+        observer,
+        path=path,
+        extractor=extractor,
+        status="completed",
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        duration_seconds=duration,
+        fallback_used=fallback_used,
+        result_count=len(output),
+        byte_count=actual_size,
+    )
     return output
 
 
-def extract_archive(path: Path, file_type: str, destination: Path, settings: Settings) -> list[Path]:
+def extract_archive(
+    path: Path,
+    file_type: str,
+    destination: Path,
+    settings: Settings,
+    observer: ArchiveAttemptObserver | None = None,
+) -> list[Path]:
     if file_type == "zip":
         return extract_zip(path, destination, settings)
     if file_type == "7z":
         return extract_7z(path, destination, settings)
     if file_type == "rar":
-        return extract_rar(path, destination, settings)
+        return extract_rar(path, destination, settings, observer=observer)
     raise ValueError(f"Unsupported archive type: {file_type}")

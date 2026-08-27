@@ -357,6 +357,36 @@ class DocumentProcessor:
             },
         )
 
+    def _observe_archive_attempt(self, details: dict[str, Any]) -> None:
+        if self.observer is None:
+            return
+        status = str(details.get("status") or "failed")
+        stderr = str(details.get("stderr") or "")
+        stdout = str(details.get("stdout") or "")
+        exit_code = details.get("exitCode")
+        error_text = stderr or stdout or f"extractor exit code {exit_code}"
+        error = RuntimeError(error_text) if status == "failed" else None
+        self.observer.event(
+            event_type="archive_extraction",
+            stage="document_archive_extract",
+            status=status,
+            service="archive",
+            operation="extract_rar",
+            duration_seconds=float(details.get("durationSeconds") or 0),
+            result_count=(
+                int(details["resultCount"])
+                if details.get("resultCount") is not None
+                else None
+            ),
+            byte_count=(
+                int(details["byteCount"])
+                if details.get("byteCount") is not None
+                else None
+            ),
+            error=error,
+            details=details,
+        )
+
     @staticmethod
     def _http_status_from_error(error: BaseException) -> int | None:
         if isinstance(error, httpx.HTTPStatusError):
@@ -768,7 +798,13 @@ class DocumentProcessor:
                     )
                 ]
             destination = self.temp_dir / "extracted" / f"archive_{index}_{depth}"
-            children = extract_archive(path, kind, destination, self.settings)
+            children = extract_archive(
+                path,
+                kind,
+                destination,
+                self.settings,
+                observer=self._observe_archive_attempt,
+            )
             result: list[ParsedDocument] = []
             for child_number, child in enumerate(children[: self.settings.max_archive_members], start=1):
                 child_descriptor = {

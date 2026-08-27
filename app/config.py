@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     seven_zip_binary: str = "7z"
     unar_binary: str = "unar"
     lsar_binary: str = "lsar"
+    bsdtar_binary: str = "bsdtar"
 
     @field_validator("catalog_mode")
     @classmethod
