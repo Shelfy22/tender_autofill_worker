@@ -45,11 +45,16 @@ COVERAGE_REASON = INDIVISIBLE_REASON
 PRICE_REASON = "Коммерческие условия. НМЦК менее 1 млн руб."
 ACTUAL_COST_REASON = "Коммерческие условия. НМЦК менее фактической стоимости"
 REMOTE_TERRITORY_REASON = "Коммерческие условия. Поставка в удаленные территории"
+CONSIGNMENT_REASON = "Коммерческие условия. Консигнация / Хранение у Покупателя за счет Поставщика"
 PAYMENT_DELAY_REASON = "Коммерческие условия. Отсрочка платежа 90 дней и более"
 DOCUMENTATION_REASON = "Оргвопросы. Отсутствует ТЗ / Нет документации / Некорректная ссылка"
 MARKET_RESEARCH_REASON = "Оргвопросы. Опрос рынка / Мониторинг / Анализ рынка / Анонс / КИМ"
 SUPPLY_WORK_REASON = "Номенклатура. Поставка с работами"
 REPAIR_KIT_REASON = "Номенклатура. Ремкомплект / ЗИП / Продукция по чертежу"
+PAYMENT_DEPENDENCY_REASON = (
+    "Коммерческие условия. Оплата Покупателем после оплаты Генподрядчиком / Госзаказчиком"
+)
+ORGANIZER_CANCELLATION_REASON = "Оргвопросы. Отказ организатора от проведения тендера"
 
 _REPAIR_KIT_PRODUCT_PATTERN = re.compile(
     r"^\s*(?:(?:комплект|набор)\s+(?:зип\b|запасн[а-яё]*\s+част[а-яё]*\b)|"
@@ -58,9 +63,63 @@ _REPAIR_KIT_PRODUCT_PATTERN = re.compile(
     r"запасн[а-яё]*\s+част[а-яё]*\b)",
     re.IGNORECASE,
 )
+_DRAWING_REFERENCE = r"(?:чертеж[а-яё]*|эскиз[а-яё]*|макет[а-яё]*)"
 _DRAWING_PRODUCT_PATTERN = re.compile(
-    r"\b(?:изготовлени[ея]\s+(?:детал[а-яё]*|продукц[а-яё]*|издели[а-яё]*)?\s*"
-    r"по\s+чертеж[а-яё]*|продукци[яи]\s+по\s+чертеж[а-яё]*)\b",
+    rf"\b(?:изготовлени[ея]\s+(?:детал[а-яё]*|продукц[а-яё]*|издели[а-яё]*)?\s*"
+    rf"по\s+{_DRAWING_REFERENCE}|продукци[яи]\s+по\s+{_DRAWING_REFERENCE}|"
+    rf"(?:изготавлива[а-яё]*|выполня[а-яё]*)[\s\S]{{0,100}}?"
+    rf"(?:по|в\s+соответствии\s+с)\s+{_DRAWING_REFERENCE}|"
+    rf"(?:по|в\s+соответствии\s+с)\s+{_DRAWING_REFERENCE}\s+заказчик[а-яё]*)\b",
+    re.IGNORECASE,
+)
+
+_REMOTE_TERRITORY_PATTERN = re.compile(
+    r"\b(?:республик[а-яё]*\s+саха(?:\s*\(якутия\))?|якут(?:ия|ск[а-яё]*)|"
+    r"дагестан(?:ск[а-яё]*)?|калининград(?:ск[а-яё]*)?)\b",
+    re.IGNORECASE,
+)
+_DELIVERY_LOCATION_CONTEXT_PATTERN = re.compile(
+    r"\b(?:мест[оа]\s+поставк[аи]|адрес\s+(?:поставк[аи]|доставк[аи])|"
+    r"мест[оа]\s+доставк[аи]|грузополучател[ья]|пункт\s+назначения|"
+    r"поставк[аи]\s+(?:осуществляется|производится|выполняется)\s+(?:по\s+адресу|в)|"
+    r"достав(?:ить|ка|ку|ки)\s+(?:по\s+адресу|в))\b",
+    re.IGNORECASE,
+)
+_DELIVERY_FIELD_NAMES = (
+    "deliveryNote",
+    "deliveryAddress",
+    "deliveryPlace",
+    "deliveryRegion",
+    "placeOfDelivery",
+    "shippingAddress",
+)
+
+_CONSIGNMENT_DIRECT_PATTERN = re.compile(
+    r"\b(?:консигнац[а-яё]*|консигнационн[а-яё]*\s+склад[а-яё]*)\b",
+    re.IGNORECASE,
+)
+_CONSIGNMENT_STORAGE_PATTERN = re.compile(
+    r"\b(?:ответственн[а-яё]*\s+хранени[а-яё]*|хранени[а-яё]*\s+у\s+покупател[а-яё]*)"
+    r"[\s\S]{0,400}?(?:до\s+(?:момент[а-яё]*\s+)?(?:реализац[а-яё]*|"
+    r"использовани[а-яё]*|выборк[а-яё]*|продаж[а-яё]*|оплат[а-яё]*)|"
+    r"оплат[а-яё]*\s+по\s+мере\s+(?:реализац[а-яё]*|использовани[а-яё]*|выборк[а-яё]*))",
+    re.IGNORECASE,
+)
+_CONSIGNMENT_EXCLUSION_PATTERN = re.compile(
+    r"\b(?:отказ[а-яё]*\s+(?:от\s+)?(?:при[её]мк[а-яё]*|товар[а-яё]*)|"
+    r"возврат[а-яё]*|замен[а-яё]*|дефект[а-яё]*|недостатк[а-яё]*|"
+    r"рекламац[а-яё]*|претензи[а-яё]*|гарантийн[а-яё]*|"
+    r"эксперт[а-яё]*|экспертиз[а-яё]*|"
+    r"(?:проверк[а-яё]*|контрол[а-яё]*)\s+качеств[а-яё]*|"
+    r"без\s+(?:необходим[а-яё]*\s+|сопроводительн[а-яё]*\s+)?документ[а-яё]*|"
+    r"отсутстви[ея]\s+(?:необходим[а-яё]*\s+|сопроводительн[а-яё]*\s+)?документ[а-яё]*|"
+    r"не\s+исполн[а-яё]*\s+(?:свои\s+)?обязательств[а-яё]*|"
+    r"ненадлежащ[а-яё]*\s+(?:исполнени[а-яё]*|поставк[а-яё]*)|"
+    r"нарушени[а-яё]*|расторжени[а-яё]*|прекращени[а-яё]*\s+договор[а-яё]*)\b",
+    re.IGNORECASE,
+)
+_CONSIGNMENT_NEGATION_PATTERN = re.compile(
+    r"\b(?:не\s+является|не\s+считается|без)\s+консигнац[а-яё]*\b",
     re.IGNORECASE,
 )
 
@@ -114,6 +173,34 @@ _SUPPLY_WORK_NEGATION_PATTERN = re.compile(
     r"без\s+монтаж[а-яё]*)",
     re.IGNORECASE,
 )
+_SUPPLY_WORK_CONDITIONAL_PATTERN = re.compile(
+    rf"(?:если|в\s+случае\s+если|при\s+необходимости|при\s+условии)"
+    rf"[\s\S]{{0,180}}?{_SUPPLY_WORK_TERM}|"
+    rf"{_SUPPLY_WORK_TERM}[\s\S]{{0,100}}?"
+    r"(?:если\s+(?:он|она|они)?\s*осуществляется|при\s+необходимости)",
+    re.IGNORECASE,
+)
+
+_PAYMENT_DEPENDENCY_PATTERN = re.compile(
+    r"(?:оплат[а-яё]*|расч[её]т[а-яё]*)[\s\S]{0,140}?"
+    r"(?:только\s+)?(?:после|по\s+мере|при\s+условии|по\s+факту)"
+    r"[\s\S]{0,140}?(?:оплат[а-яё]*|получени[ея]\s+денежн[а-яё]*\s+средств)"
+    r"[\s\S]{0,100}?(?:генподрядчик[а-яё]*|госзаказчик[а-яё]*)",
+    re.IGNORECASE,
+)
+_OPTIONAL_ADVANCE_PATTERN = re.compile(
+    r"\b(?:аванс[а-яё]*|авансировани[а-яё]*)\b[\s\S]{0,220}?"
+    r"(?:не\s+более|в\s+пределах|ограничен[а-яё]*|при\s+наличии)",
+    re.IGNORECASE,
+)
+_ORGANIZER_CANCELLATION_PATTERN = re.compile(
+    r"\b(?:отказ\s+(?:организатор[а-яё]*|заказчик[а-яё]*)\s+от\s+проведения"
+    r"(?:\s+(?:тендер[а-яё]*|закупк[а-яё]*|процедур[а-яё]*))?|"
+    r"(?:организатор[а-яё]*|заказчик[а-яё]*)\s+отказал[а-яё]*\s+от\s+проведения"
+    r"\s+(?:тендер[а-яё]*|закупк[а-яё]*|процедур[а-яё]*)|"
+    r"(?:закупк[а-яё]*|тендер[а-яё]*|процедур[а-яё]*)\s+отменен[а-яё]*)\b",
+    re.IGNORECASE,
+)
 
 HIGH_VOLTAGE_REASON = "Номенклатура. Оборудование 35 кВ и выше"
 _VOLTAGE_COMPONENT = r"\d{1,4}(?:[.,]\d+)?"
@@ -136,6 +223,17 @@ _VOLTAGE_CONTEXT_PATTERN = re.compile(
 _TRANSFORMER_MODEL_PREFIX_PATTERN = re.compile(
     r"\b(?:\u0442\u043c\u0433\d*|\u0442\u0434\u043d\d*|\u0442\u0434\u0442\u043d\d*|\u0442\u0440\u0434\u043d\d*|"
     r"\u0442\u0441\u0437\u043b?\d*|\u0442\u043c\u043d\d*|\u0442\u043c\u0437\d*|\u0442\u0434\u0446\d*)\s*[-\u2013\u2014]?\s*$",
+    re.IGNORECASE,
+)
+_NON_ELECTRICAL_SITE_PRODUCT_PATTERN = re.compile(
+    r"\b(?:жил[а-яё]*\s+модул[а-яё]*|блок[-\s]?контейнер[а-яё]*|"
+    r"бытовк[а-яё]*|модульн[а-яё]*\s+(?:здани[а-яё]*|помещени[а-яё]*)|"
+    r"контейнерн[а-яё]*\s+(?:здани[а-яё]*|помещени[а-яё]*))\b",
+    re.IGNORECASE,
+)
+_SUBSTATION_DESTINATION_PATTERN = re.compile(
+    r"\b(?:для|на|в)\s+(?:пс\b|подстанци[а-яё]*)[\s\S]{0,80}?"
+    r"\d{2,4}(?:[.,]\d+)?(?:\s*/\s*\d{1,4}(?:[.,]\d+)?)*\s*(?:кв|kv)\b",
     re.IGNORECASE,
 )
 
@@ -238,6 +336,63 @@ def _find_supply_work_evidence(text: str) -> str | None:
                 continue
             if _SUPPLY_WORK_NEGATION_PATTERN.search(context):
                 continue
+            if _SUPPLY_WORK_CONDITIONAL_PATTERN.search(context):
+                continue
+            return context
+    return None
+
+
+def _find_payment_dependency_evidence(text: str) -> str | None:
+    source = text or ""
+    for match in _PAYMENT_DEPENDENCY_PATTERN.finditer(source):
+        context = _work_context(source, match, maximum_length=1200)
+        if _OPTIONAL_ADVANCE_PATTERN.search(context):
+            continue
+        return context
+    return None
+
+
+def _find_organizer_cancellation_evidence(text: str) -> str | None:
+    match = _ORGANIZER_CANCELLATION_PATTERN.search(text or "")
+    return _snippet(text, match) if match else None
+
+
+def _find_consignment_evidence(text: str) -> str | None:
+    """Return only planned consignment/storage terms, not acceptance remedies."""
+    source = text or ""
+    for match in _CONSIGNMENT_DIRECT_PATTERN.finditer(source):
+        context = _work_context(source, match, maximum_length=1200)
+        if _CONSIGNMENT_NEGATION_PATTERN.search(context):
+            continue
+        return context
+
+    for match in _CONSIGNMENT_STORAGE_PATTERN.finditer(source):
+        context = _work_context(source, match, maximum_length=1200)
+        if _CONSIGNMENT_EXCLUSION_PATTERN.search(context):
+            continue
+        return context
+    return None
+
+
+def _find_remote_delivery_evidence(
+    fields: dict[str, Any],
+    all_text: str,
+) -> str | None:
+    """Require a delivery location; customer/organizer registration is insufficient."""
+    for field_name in _DELIVERY_FIELD_NAMES:
+        field_text = re.sub(
+            r"\s+",
+            " ",
+            str(_field(fields, field_name) or ""),
+        ).strip()
+        match = _REMOTE_TERRITORY_PATTERN.search(field_text)
+        if match:
+            return f"{field_name}: {field_text[:1000]}"
+
+    source = all_text or ""
+    for match in _REMOTE_TERRITORY_PATTERN.finditer(source):
+        context = _work_context(source, match, maximum_length=1000)
+        if _DELIVERY_LOCATION_CONTEXT_PATTERN.search(context):
             return context
     return None
 
@@ -273,6 +428,16 @@ def _find_repair_kit_product_evidence(product_check: dict[str, Any]) -> str | No
                 or _DRAWING_PRODUCT_PATTERN.search(subject)
             ):
                 return f"Позиция {position_index}: {subject}"
+
+        requirements = re.sub(
+            r"\s+",
+            " ",
+            str(detail.get("sourceRequirements") or ""),
+        ).strip()
+        drawing_match = _DRAWING_PRODUCT_PATTERN.search(requirements)
+        if drawing_match:
+            evidence = _snippet(requirements, drawing_match, radius=260)
+            return f"Позиция {position_index}, требования: {evidence[:900]}"
     return None
 
 
@@ -341,6 +506,11 @@ def _collect_product_voltage_mentions(product_check: dict[str, Any]) -> list[dic
                 continue
             seen_texts.add(normalized_text)
             for mention in _extract_voltage_mentions(source_text):
+                if (
+                    _NON_ELECTRICAL_SITE_PRODUCT_PATTERN.search(source_text)
+                    and _SUBSTATION_DESTINATION_PATTERN.search(source_text)
+                ):
+                    continue
                 context = _voltage_text_snippet(
                     source_text,
                     int(mention["start"]),
@@ -462,18 +632,6 @@ def calculate_hard_reasons(
         _add(reasons, PRICE_REASON, product_check.get("priceSummary") or str(total_price), 21)
 
     patterns: list[tuple[str, str, int]] = [
-        (
-            r"(?:оплат[а-я]*|расч[её]т[а-я]*)[\s\S]{0,100}(?:после|по\s+мере)[\s\S]{0,100}(?:генподрядчик|госзаказчик)",
-            "Коммерческие условия. Оплата Покупателем после оплаты Генподрядчиком / Госзаказчиком", 30,
-        ),
-        (
-            r"\b(республик[а-я]*\s+саха(?:\s*\(якутия\))?|якут(?:ия|ск[а-я]*)|"
-            r"дагестан(?:ск[а-я]*)?|калининград(?:ск[а-я]*)?)\b",
-            REMOTE_TERRITORY_REASON,
-            40,
-        ),
-        (r"\b(консигнац|ответственн(?:ое|ого)\s+хранени|хранени[ея]\s+у\s+покупателя)[\s\S]{0,140}(?:за\s+сч[её]т\s+поставщика|поставщик)",
-         "Коммерческие условия. Консигнация / Хранение у Покупателя за счет Поставщика", 45),
         (r"(?:частотн[а-я]*\s+(?:привод|преобразователь)|пч)[\s\S]{0,120}\b(?:6|10|6\s*[-–]\s*10)\s*к\s*в\b",
          "Номенклатура. Частотный привод 6–10 кВ", 60),
         (r"\b(военн[а-я]*\s+при[её]мк[а-я]*|при[её]мк[а-я]*\s+военн[а-я]*\s+представитель|контрол[ья]\s+военн[а-я]*\s+представитель)\b",
@@ -484,13 +642,37 @@ def calculate_hard_reasons(
          "Оргвопросы. МОПП подается самостоятельно (подача без ЭЦП)", 16),
         (r"\b(закрыт(?:ый|ая)\s+(?:тендер|закупка)|не\s+прошли\s+квалификац)\b",
          "Оргвопросы. Закрытый тендер / Не прошли квалификацию", 90),
-        (r"\b(отказ\s+организатора|закупка\s+отменена|отказался\s+от\s+проведения)\b",
-         "Оргвопросы. Отказ организатора от проведения тендера", 91),
     ]
     for pattern, reason, priority in patterns:
         match = re.search(pattern, all_text, re.I)
         if match:
             _add(reasons, reason, _snippet(all_text, match), priority)
+
+    payment_dependency_evidence = _find_payment_dependency_evidence(all_text)
+    if payment_dependency_evidence:
+        _add(reasons, PAYMENT_DEPENDENCY_REASON, payment_dependency_evidence, 30)
+
+    organizer_cancellation_evidence = _find_organizer_cancellation_evidence(all_text)
+    if organizer_cancellation_evidence:
+        _add(
+            reasons,
+            ORGANIZER_CANCELLATION_REASON,
+            organizer_cancellation_evidence,
+            91,
+        )
+
+    remote_delivery_evidence = _find_remote_delivery_evidence(fields, all_text)
+    if remote_delivery_evidence:
+        _add(
+            reasons,
+            REMOTE_TERRITORY_REASON,
+            remote_delivery_evidence,
+            40,
+        )
+
+    consignment_evidence = _find_consignment_evidence(all_text)
+    if consignment_evidence:
+        _add(reasons, CONSIGNMENT_REASON, consignment_evidence, 45)
 
     repair_kit_evidence = _find_repair_kit_product_evidence(product_check)
     if repair_kit_evidence:
@@ -605,10 +787,33 @@ def calculate_hard_reasons(
             "triggered": high_voltage_mention is not None,
         },
         "repairKitCheck": {
-            "source": "productCheck.details.sourceProduct/productQuery",
-            "scope": "product_position_subject_only",
+            "source": (
+                "productCheck.details.sourceProduct/productQuery/sourceRequirements"
+            ),
+            "scope": (
+                "ZIP/repair kit in product subject; drawing/sketch/layout "
+                "in product subject or requirements"
+            ),
             "evidence": repair_kit_evidence,
             "triggered": repair_kit_evidence is not None,
+        },
+        "remoteTerritoryCheck": {
+            "source": "structured delivery fields / explicit delivery-location context",
+            "customerOrOrganizerRegionAccepted": False,
+            "evidence": remote_delivery_evidence,
+            "triggered": remote_delivery_evidence is not None,
+        },
+        "consignmentCheck": {
+            "source": "strict deterministic evidence validator",
+            "excludedRemedyContexts": [
+                "refusal",
+                "return_or_replacement",
+                "defect_or_claim",
+                "missing_documents",
+                "expertise_or_quality_check",
+            ],
+            "evidence": consignment_evidence,
+            "triggered": consignment_evidence is not None,
         },
         "marketResearchCheck": {
             "reportId": job.report_id,
@@ -654,6 +859,33 @@ def apply_final_decision(
         ),
         key=lambda item: item.priority,
     )
+    confirmed_consignment_evidence = next(
+        (
+            item.evidence
+            for item in hard
+            if item.reason == CONSIGNMENT_REASON
+            and _find_consignment_evidence(item.evidence) is not None
+        ),
+        None,
+    )
+    confirmed_payment_dependency_evidence = next(
+        (
+            item.evidence
+            for item in hard
+            if item.reason == PAYMENT_DEPENDENCY_REASON
+            and _find_payment_dependency_evidence(item.evidence) is not None
+        ),
+        None,
+    )
+    confirmed_organizer_cancellation_evidence = next(
+        (
+            item.evidence
+            for item in hard
+            if item.reason == ORGANIZER_CANCELLATION_REASON
+            and _find_organizer_cancellation_evidence(item.evidence) is not None
+        ),
+        None,
+    )
     coverage_value = product_check.get("coveragePercent")
     product_total = product_check.get("total")
     if (
@@ -692,6 +924,7 @@ def apply_final_decision(
                 HIGH_VOLTAGE_REASON,
                 PRICE_REASON,
                 ACTUAL_COST_REASON,
+                REMOTE_TERRITORY_REASON,
             }:
                 continue
             if market_research_suppressed and item.reason == MARKET_RESEARCH_REASON:
@@ -704,6 +937,21 @@ def apply_final_decision(
             if (
                 item.reason == SUPPLY_WORK_REASON
                 and _find_supply_work_evidence(item.evidence) is None
+            ):
+                continue
+            if (
+                item.reason == CONSIGNMENT_REASON
+                and confirmed_consignment_evidence is None
+            ):
+                continue
+            if (
+                item.reason == PAYMENT_DEPENDENCY_REASON
+                and confirmed_payment_dependency_evidence is None
+            ):
+                continue
+            if (
+                item.reason == ORGANIZER_CANCELLATION_REASON
+                and confirmed_organizer_cancellation_evidence is None
             ):
                 continue
             if (
@@ -722,6 +970,18 @@ def apply_final_decision(
         llm_primary == REPAIR_KIT_REASON
         and confirmed_repair_kit_evidence is None
     )
+    invalid_consignment_primary = (
+        llm_primary == CONSIGNMENT_REASON
+        and confirmed_consignment_evidence is None
+    )
+    invalid_payment_dependency_primary = (
+        llm_primary == PAYMENT_DEPENDENCY_REASON
+        and confirmed_payment_dependency_evidence is None
+    )
+    invalid_organizer_cancellation_primary = (
+        llm_primary == ORGANIZER_CANCELLATION_REASON
+        and confirmed_organizer_cancellation_evidence is None
+    )
     if llm_primary not in REASONS or llm_primary in {
         DEADLINE_REASON,
         DELIVERY_DEADLINE_REASON,
@@ -730,9 +990,16 @@ def apply_final_decision(
         HIGH_VOLTAGE_REASON,
         PRICE_REASON,
         ACTUAL_COST_REASON,
+        REMOTE_TERRITORY_REASON,
     } or (
         market_research_suppressed and llm_primary == MARKET_RESEARCH_REASON
-    ) or invalid_supply_work_primary or invalid_repair_kit_primary:
+    ) or (
+        invalid_supply_work_primary
+        or invalid_repair_kit_primary
+        or invalid_consignment_primary
+        or invalid_payment_dependency_primary
+        or invalid_organizer_cancellation_primary
+    ):
         llm_primary = allowed_detected[0].reason if allowed_detected else None
 
     # primaryReason is kept first, followed by the complete detectedReasons list.
@@ -750,6 +1017,7 @@ def apply_final_decision(
                 ASSORTMENT_REASON,
                 INDIVISIBLE_REASON,
                 HIGH_VOLTAGE_REASON,
+                REMOTE_TERRITORY_REASON,
             }
             or (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
             or any(item["reason"] == reason for item in llm_reason_candidates)
@@ -966,6 +1234,7 @@ def build_decision_prompt(
             HIGH_VOLTAGE_REASON,
             PRICE_REASON,
             ACTUAL_COST_REASON,
+            REMOTE_TERRITORY_REASON,
         }
         and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
     ]
@@ -980,6 +1249,7 @@ def build_decision_prompt(
             HIGH_VOLTAGE_REASON,
             PRICE_REASON,
             ACTUAL_COST_REASON,
+            REMOTE_TERRITORY_REASON,
         }
         and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
     ]
@@ -1031,10 +1301,27 @@ def build_decision_prompt(
   монтаж, установку, пусконаладку или ввод в эксплуатацию как часть предмета/стоимости/объёма поставки.
 - Не считать поставкой с работами монтаж/демонтаж товара только для экспертизы, проверки или контроля
   качества, гарантийного случая, рассмотрения претензии, дефекта либо устранения недостатков.
+- Условный шаблон «если монтаж осуществляется поставщиком» и заголовок раздела без прямой обязанности
+  выполнить работы не подтверждают причину «{SUPPLY_WORK_REASON}».
+- Причина «{PAYMENT_DEPENDENCY_REASON}» требует прямого условия, что оплата поставленного товара
+  производится только после получения денег от генподрядчика/госзаказчика. Ограничение размера
+  необязательного аванса суммой, полученной от госзаказчика, не является таким условием.
+- Причина «{ORGANIZER_CANCELLATION_REASON}» требует отмены самой закупки/тендера организатором
+  или заказчиком. Отказ участника от постквалификации, заключения договора или отдельного действия
+  не является отказом организатора от проведения тендера.
+- Причина «{CONSIGNMENT_REASON}» допустима только для прямой консигнации/консигнационного склада
+  либо заранее предусмотренного хранения у покупателя до реализации, использования, выборки или оплаты.
+- Не считать консигнацией ответственное/временное хранение вследствие отказа от приёмки, возврата,
+  замены, дефекта, рекламации, претензии, отсутствия документов, экспертизы или проверки качества.
 - Причина «{REPAIR_KIT_REASON}» допустима только тогда, когда сама извлечённая товарная позиция
-  является ЗИП, ремкомплектом, запасной частью или продукцией, изготавливаемой по чертежу.
+  является ЗИП, ремкомплектом, запасной частью или продукцией, изготавливаемой по чертежу,
+  эскизу или макету заказчика. Для продукции по чертежу/эскизу/макету проверяй также
+  sourceRequirements именно этой товарной позиции.
 - Не считать ЗИП/ремкомплектом основной товар, если ЗИП, сменные наконечники, предохранители
   или запасные части лишь входят в его комплектность/комплект поставки либо прилагаются к нему.
+- Причина «{REMOTE_TERRITORY_REASON}» полностью детерминирована и недоступна LLM.
+  Проверяется только фактическое место/адрес поставки или грузополучатель. Регион регистрации,
+  деятельности или нахождения заказчика/организатора сам по себе не подтверждает место поставки.
 - Удалённые территории: Калининград/Калининградская область, Республика Дагестан и
   Республика Саха (Якутия).
 - Ошибка парсинга не равна отсутствию документации.

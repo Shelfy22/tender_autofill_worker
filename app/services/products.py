@@ -7,6 +7,30 @@ from typing import Any
 from app.models import DocumentPriceSource, TenderPosition, TenderPositionsResponse
 
 
+_ONLY_ROW_NUMBER_PATTERN = re.compile(r"^\s*\d{1,4}\s*[.)-]?\s*$")
+_ONLY_CLASSIFIER_CODE_PATTERN = re.compile(
+    r"^\s*\d{2}(?:[.\s-]\d{1,3}){2,}(?:\s*[.)-]?)?\s*$"
+)
+_SERVICE_POSITION_PATTERN = re.compile(
+    r"^\s*(?:национальн[а-яё]*\s+режим|"
+    r"(?:ограничени[ея]|запрет[а-яё]*)\s+(?:не\s+)?(?:установлен[а-яё]*|предоставля[а-яё]*)|"
+    r"товар\s+(?:не\s+)?(?:отсутствует|включ[её]н)\s+в\s+реестр|"
+    r"код\s+(?:окпд|окпд2|ктру|тн\s+вэд)|"
+    r"единиц[аы]\s+измерени[яй]|количеств[оа]|итого|всего)\b",
+    re.IGNORECASE,
+)
+_TENDER_LEVEL_PRICE_PATTERN = re.compile(
+    r"\b(?:начальн[а-яё]*\s+(?:максимальн[а-яё]*\s+)?цен[аы]|нмцк?|нмц)\b",
+    re.IGNORECASE,
+)
+_POSITION_PRICE_PATTERN = re.compile(
+    r"\b(?:цен[аы]\s+(?:за\s+)?(?:единиц[уы]|1\s*(?:шт|ед))|"
+    r"стоимост[ьи]\s+(?:единиц[уы]|позиц[а-яё]*|строк[а-яё]*)|"
+    r"сумм[аы]\s+(?:строк[а-яё]*|позиц[а-яё]*))\b",
+    re.IGNORECASE,
+)
+
+
 UNITS = r"штука|штук|шт\.?|комплект|компл\.?|набор|ед\.?|метр|м|кг|л|упак\.?"
 
 
@@ -16,6 +40,35 @@ def _clean(value: Any) -> str:
 
 def _missing(value: Any) -> bool:
     return value is None or value == ""
+
+
+def _is_noise_position(position: TenderPosition) -> bool:
+    product = _clean(position.product)
+    return bool(
+        not product
+        or _ONLY_ROW_NUMBER_PATTERN.fullmatch(product)
+        or _ONLY_CLASSIFIER_CODE_PATTERN.fullmatch(product)
+        or _SERVICE_POSITION_PATTERN.search(product)
+    )
+
+
+def _clear_tender_level_price(position: TenderPosition) -> TenderPosition:
+    """Do not treat NMCK/initial tender price as a product-position price."""
+    evidence = _clean(position.documentPriceEvidence or position.evidence)
+    if (
+        position.documentPriceSource is None
+        and _TENDER_LEVEL_PRICE_PATTERN.search(evidence)
+        and not _POSITION_PRICE_PATTERN.search(evidence)
+    ):
+        return position.model_copy(
+            update={
+                "documentUnitPriceRub": None,
+                "documentLineTotalRub": None,
+                "documentCurrency": None,
+                "documentPriceEvidence": "",
+            }
+        )
+    return position
 
 
 def parse_quantity(value: Any) -> float | None:
@@ -404,7 +457,14 @@ def merge_positions(
         )
     result: list[TenderPosition] = []
     seen: dict[tuple[str, float | None, str], int] = {}
-    for position in combined:
+    for raw_position in combined:
+        position = _clear_tender_level_price(raw_position)
+        if _is_noise_position(position):
+            warnings.append(
+                "Пропущена служебная строка, ошибочно извлечённая как товар: "
+                f"{_clean(position.product)[:200]}"
+            )
+            continue
         query = _clean(position.productQuery or position.product)
         name_key = _position_name_key(position)
         seldon_match = seldon_by_name.get(name_key)

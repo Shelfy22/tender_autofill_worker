@@ -327,6 +327,20 @@ class ProductMatchItem(BaseModel):
     documentPriceSource: DocumentPriceSource | None = None
     match: ProductMatch
 
+    @field_validator("documentUnitPriceRub", "documentLineTotalRub", mode="before")
+    @classmethod
+    def normalize_document_money(cls, value: Any) -> float | None:
+        """A malformed diagnostic price must not fail the whole tender job."""
+        return _parse_money_value(value)
+
+    @field_validator("documentCurrency", mode="before")
+    @classmethod
+    def normalize_document_currency(cls, value: Any) -> str | None:
+        text = str(value or "").strip().upper()
+        if not text:
+            return None
+        return "RUB" if text in {"RUR", "РУБ", "РУБ.", "₽"} else text
+
 
 class DecisionReason(BaseModel):
     reason: str
@@ -381,6 +395,8 @@ class ParsedDocument(BaseModel):
     documentIndex: int
     documentUrl: str = ""
     fileName: str
+    originalFileName: str = ""
+    documentKind: str = "document"
     fileExtension: str = ""
     mimeType: str = ""
     fileSize: int = 0

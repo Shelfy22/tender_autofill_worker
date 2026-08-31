@@ -1,10 +1,13 @@
 from app.models import DecisionReason, LlmDecision, NormalizedJob
 from app.services.decision import (
+    CONSIGNMENT_REASON,
     COVERAGE_REASON,
     DELIVERY_DEADLINE_REASON,
     DOCUMENTATION_REASON,
     HIGH_VOLTAGE_REASON,
     MARKET_RESEARCH_REASON,
+    ORGANIZER_CANCELLATION_REASON,
+    PAYMENT_DEPENDENCY_REASON,
     PAYMENT_DELAY_REASON,
     PRICE_REASON,
     REPAIR_KIT_REASON,
@@ -15,6 +18,10 @@ from app.services.decision import (
     build_decision_prompt,
     calculate_hard_reasons,
 )
+
+
+def _reason_names(reasons: list[HardReason]) -> set[str]:
+    return {item.reason for item in reasons}
 
 
 def job(remaining_days: float | None = 5, report_id: int = 1) -> NormalizedJob:
@@ -42,6 +49,74 @@ def product_check(**overrides: object) -> dict[str, object]:
     }
     value.update(overrides)
     return value
+
+
+def test_conditional_mounting_heading_is_not_supply_with_works() -> None:
+    text = (
+        "Требования по сопутствующему монтажу "
+        "(если монтаж осуществляется поставщиком). Дополнительные требования не указаны."
+    )
+
+    reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
+
+    assert SUPPLY_WORK_REASON not in _reason_names(reasons)
+
+
+def test_optional_advance_cap_is_not_payment_dependency() -> None:
+    text = (
+        "Авансирование может быть предусмотрено по соглашению сторон. "
+        "Размер аванса не более суммы, полученной от Госзаказчика."
+    )
+
+    reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
+
+    assert PAYMENT_DEPENDENCY_REASON not in _reason_names(reasons)
+
+
+def test_direct_payment_after_state_customer_is_rejected() -> None:
+    text = (
+        "Оплата поставленного товара производится только после получения денежных "
+        "средств от Госзаказчика."
+    )
+
+    reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
+
+    assert PAYMENT_DEPENDENCY_REASON in _reason_names(reasons)
+
+
+def test_participant_refusal_from_postqualification_is_not_organizer_cancellation() -> None:
+    text = "Участник отказался от проведения постквалификации и дальнейшего участия."
+
+    reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
+
+    assert ORGANIZER_CANCELLATION_REASON not in _reason_names(reasons)
+
+
+def test_explicit_procurement_cancellation_is_detected() -> None:
+    text = "Организатор отказался от проведения закупки."
+
+    reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
+
+    assert ORGANIZER_CANCELLATION_REASON in _reason_names(reasons)
+
+
+def test_substation_voltage_in_housing_module_name_is_not_product_voltage() -> None:
+    check = product_check(
+        details=[
+            {
+                "positionIndex": 1,
+                "sourceProduct": "Жилой модуль для ПС 500/330/220 кВ",
+                "productQuery": "Модульное здание для подстанции 500 кВ",
+                "sourceRequirements": "",
+                "sourceEvidence": "",
+            }
+        ]
+    )
+
+    reasons, checks = calculate_hard_reasons(job(), {}, check, "")
+
+    assert HIGH_VOLTAGE_REASON not in _reason_names(reasons)
+    assert checks["highVoltageCheck"]["triggered"] is False
 
 
 def test_initial_price_missing_or_zero_does_not_reject() -> None:
@@ -154,6 +229,77 @@ def test_direct_supplier_mounting_obligation_is_supply_with_work() -> None:
     assert "Поставщик обязан выполнить монтаж" in matching[0].evidence
 
 
+def test_acceptance_remedy_storage_is_not_consignment() -> None:
+    false_contexts = (
+        "Товар, от которого Покупатель отказался, принимается на ответственное хранение. "
+        "Поставщик обязан вывезти Товар своими силами.",
+        "Возврат или замена товара осуществляется за счет Поставщика. Расходы Покупателя "
+        "на ответственное хранение подлежат возмещению Поставщиком.",
+        "При поступлении Товара без сопроводительных документов Товар принимается на "
+        "ответственное хранение до момента поступления документов.",
+        "На время внешней экспертизы качества товар помещается на временное ответственное "
+        "хранение до получения экспертного заключения.",
+    )
+
+    for text in false_contexts:
+        reasons, checks = calculate_hard_reasons(
+            job(),
+            {"initialPrice": 2_000_000},
+            product_check(total=1),
+            text,
+        )
+        assert CONSIGNMENT_REASON not in [item.reason for item in reasons], text
+        assert checks["consignmentCheck"]["triggered"] is False
+
+
+def test_direct_consignment_storage_triggers_reason() -> None:
+    text = (
+        "Товар передается на консигнацию и размещается на консигнационном складе "
+        "Покупателя за счет Поставщика до реализации."
+    )
+
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(total=1),
+        text,
+    )
+
+    matching = [item for item in reasons if item.reason == CONSIGNMENT_REASON]
+    assert len(matching) == 1
+    assert "консигнационном складе" in matching[0].evidence
+    assert checks["consignmentCheck"]["triggered"] is True
+
+
+def test_llm_cannot_reintroduce_storage_after_missing_documents_as_consignment() -> None:
+    evidence = (
+        "При поступлении товара без документов товар принимается на ответственное "
+        "хранение до момента поступления документов за счет Поставщика."
+    )
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=1),
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=CONSIGNMENT_REASON,
+            detectedReasons=[
+                DecisionReason(
+                    reason=CONSIGNMENT_REASON,
+                    evidence=evidence,
+                    confidence="high",
+                )
+            ],
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert "tenderStatusReason" not in fields
+    assert decision["llmReasonCandidates"] == []
+
+
 def test_zip_in_main_product_completeness_is_not_repair_kit() -> None:
     main_product = "Маркер по металлу электроискровой ЭИМ"
     text = (
@@ -201,6 +347,35 @@ def test_repair_kit_product_position_triggers_reason() -> None:
     matching = [reason for reason in reasons if reason.reason == REPAIR_KIT_REASON]
     assert len(matching) == 1
     assert product_name in matching[0].evidence
+    assert checks["repairKitCheck"]["triggered"] is True
+
+
+def test_product_made_from_customer_layout_in_requirements_triggers_reason() -> None:
+    requirements = (
+        "Световой короб должен изготавливаться в соответствии с макетом (эскизом) "
+        "Заказчика, включая фигурную резку основания корпуса из АКП."
+    )
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(
+            total=1,
+            details=[
+                {
+                    "positionIndex": 1,
+                    "sourceProduct": "короб э/ф 1-стор. логотип 765x630x60 мм",
+                    "productQuery": "короб э/ф 1-стор. логотип 765x630x60 мм",
+                    "sourceRequirements": requirements,
+                }
+            ],
+        ),
+        requirements,
+    )
+
+    matching = [item for item in reasons if item.reason == REPAIR_KIT_REASON]
+    assert len(matching) == 1
+    assert "Позиция 1, требования" in matching[0].evidence
+    assert "макетом (эскизом)" in matching[0].evidence
     assert checks["repairKitCheck"]["triggered"] is True
 
 
@@ -397,11 +572,11 @@ def test_llm_rejection_has_priority_over_counterparty_work() -> None:
         counterparty_lookup={"status": "not_found", "reason": "контрагент отсутствует"},
         llm_decision=LlmDecision(
             decision="reject",
-            primaryReason=REMOTE_TERRITORY_REASON,
+            primaryReason=SUPPLY_WORK_REASON,
             detectedReasons=[
                 DecisionReason(
-                    reason=REMOTE_TERRITORY_REASON,
-                    evidence="Место поставки: Республика Саха (Якутия)",
+                    reason=SUPPLY_WORK_REASON,
+                    evidence="Поставщик обязан выполнить монтаж на объекте заказчика.",
                     confidence="high",
                 )
             ],
@@ -409,7 +584,7 @@ def test_llm_rejection_has_priority_over_counterparty_work() -> None:
     )
 
     assert fields["tenderStatus"] == "Отказано КУ ЦП"
-    assert fields["tenderStatusReason"] == REMOTE_TERRITORY_REASON
+    assert fields["tenderStatusReason"] == SUPPLY_WORK_REASON
     assert "Дополнительная информация по контрагенту: контрагент отсутствует" in fields["tenderStatusNote"]
     assert decision["counterpartyAdvisoryOnly"] is True
 
@@ -547,8 +722,8 @@ def test_non_coverage_hard_reason_has_priority_and_coverage_moves_to_note() -> N
 
 
 def test_llm_reason_overrides_only_coverage_and_all_other_reasons_are_noted() -> None:
-    remote_reason = "Коммерческие условия. Поставка в удаленные территории"
-    works_reason = "Номенклатура. Поставка с работами"
+    works_reason = SUPPLY_WORK_REASON
+    military_reason = "Номенклатура. Военная приемка"
     fields, meta, decision = apply_final_decision(
         fields={},
         meta={},
@@ -561,16 +736,16 @@ def test_llm_reason_overrides_only_coverage_and_all_other_reasons_are_noted() ->
         counterparty_lookup={"status": "matched"},
         llm_decision=LlmDecision(
             decision="reject",
-            primaryReason=remote_reason,
+            primaryReason=works_reason,
             detectedReasons=[
                 DecisionReason(
-                    reason=remote_reason,
-                    evidence="Место поставки: Республика Саха",
+                    reason=works_reason,
+                    evidence="Поставщик обязан выполнить монтаж на объекте заказчика",
                     confidence="high",
                 ),
                 DecisionReason(
-                    reason=works_reason,
-                    evidence="Монтаж выполняет поставщик",
+                    reason=military_reason,
+                    evidence="Приемка продукции проводится военным представительством",
                     confidence="medium",
                 ),
             ],
@@ -578,9 +753,12 @@ def test_llm_reason_overrides_only_coverage_and_all_other_reasons_are_noted() ->
         ),
     )
 
-    assert fields["tenderStatusReason"] == remote_reason
+    assert fields["tenderStatusReason"] == works_reason
     assert f"{COVERAGE_REASON} — Покрытие 33,33%" in fields["tenderStatusNote"]
-    assert f"{works_reason} — Монтаж выполняет поставщик" in fields["tenderStatusNote"]
+    assert (
+        f"{military_reason} — Приемка продукции проводится военным представительством"
+        in fields["tenderStatusNote"]
+    )
     assert decision["reasonOrigin"] == "llm_alternative_over_coverage"
     assert meta["tenderStatusReason"]["source"] == (
         "LLM: альтернативная причина при обязательном отказе по комплектованию лота"
@@ -614,8 +792,11 @@ def test_decision_prompt_distinguishes_supply_work_from_expertise() -> None:
 
     assert "прямой обязанности поставщика" in prompt
     assert "монтаж/демонтаж товара только для экспертизы" in prompt
+    assert "Не считать консигнацией ответственное/временное хранение" in prompt
     assert "сама извлечённая товарная позиция" in prompt
+    assert "sourceRequirements именно этой товарной позиции" in prompt
     assert "лишь входят в его комплектность" in prompt
+    assert "Регион регистрации" in prompt
 
 
 def test_decision_prompt_excludes_actual_cost_reason_from_llm_options() -> None:
@@ -653,6 +834,65 @@ def test_similar_region_name_does_not_trigger_remote_territory_rule() -> None:
     )
 
     assert REMOTE_TERRITORY_REASON not in [item.reason for item in reasons]
+
+
+def test_customer_region_alone_does_not_trigger_remote_territory_rule() -> None:
+    text = (
+        'Организатор: ПАО "Якутскэнерго". '
+        "Регион заказчика/организатора: Республика Саха (Якутия)."
+    )
+
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {},
+        product_check(),
+        text,
+    )
+
+    assert REMOTE_TERRITORY_REASON not in [item.reason for item in reasons]
+    assert checks["remoteTerritoryCheck"]["triggered"] is False
+
+
+def test_structured_delivery_note_triggers_remote_territory_rule() -> None:
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"deliveryNote": "Республика Саха (Якутия), г. Якутск, склад заказчика"},
+        product_check(),
+        "Организатор зарегистрирован в Москве.",
+    )
+
+    matching = [item for item in reasons if item.reason == REMOTE_TERRITORY_REASON]
+    assert len(matching) == 1
+    assert "deliveryNote" in matching[0].evidence
+    assert checks["remoteTerritoryCheck"]["triggered"] is True
+
+
+def test_llm_cannot_reintroduce_remote_reason_from_customer_region() -> None:
+    fields, _, decision = apply_final_decision(
+        fields={"customerRegion": "Республика Саха (Якутия)"},
+        meta={},
+        product_check=product_check(total=1),
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=REMOTE_TERRITORY_REASON,
+            detectedReasons=[
+                DecisionReason(
+                    reason=REMOTE_TERRITORY_REASON,
+                    evidence=(
+                        "Регион деятельности заказчика ПАО Якутскэнерго — "
+                        "Республика Саха (Якутия)."
+                    ),
+                    confidence="high",
+                )
+            ],
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert "tenderStatusReason" not in fields
+    assert decision["llmReasonCandidates"] == []
 
 
 def test_decision_prompt_lists_all_remote_territories() -> None:

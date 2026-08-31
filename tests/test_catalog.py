@@ -259,3 +259,33 @@ def test_catalog_llm_returns_only_point_id_and_python_hydrates_catalog_fields() 
     assert match.name == "Стеллаж Универсал 2500"
     assert match.link == "https://www.etm.ru/cat/nn/476338"
     assert match.median_price == 15707.43
+
+
+def test_catalog_rejects_cable_rack_selected_for_high_voltage_insulator() -> None:
+    llm = SelectionLlm("9575060")
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        catalog_mode="qdrant",
+    )
+    matcher = CatalogMatcher(settings, llm)  # type: ignore[arg-type]
+    try:
+        match = matcher._select_with_llm(
+            TenderPosition(
+                product="С8-1800-II УХЛ1",
+                productQuery="С8-1800-II УХЛ1",
+                evidence="Категория: ОСИ. Класс напряжения 500 кВ.",
+            ),
+            [
+                qdrant_text_candidate(
+                    9575060,
+                    name="Стойка кабельная С1800 УХЛ1",
+                    price="39252.77",
+                )
+            ],
+        )
+    finally:
+        matcher.close()
+
+    assert match.correspondence == "Товар не найден"
+    assert match.qdrant_point_id is None
+    assert "кабельная стойка" in match.rationale

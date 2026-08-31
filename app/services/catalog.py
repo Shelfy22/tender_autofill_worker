@@ -208,6 +208,48 @@ def _selection_candidates_json(candidates: list[dict[str, Any]], limit: int = 15
     return json.dumps(trimmed, ensure_ascii=False, default=str)
 
 
+_INSULATOR_REQUEST_PATTERN = re.compile(
+    r"\b(?:изолятор[а-яё]*|опорн[а-яё]*\s+изолятор[а-яё]*|"
+    r"проходн[а-яё]*\s+изолятор[а-яё]*|оси\b)\b",
+    re.IGNORECASE,
+)
+_CABLE_RACK_CANDIDATE_PATTERN = re.compile(
+    r"\b(?:стойк[а-яё]*\s+кабельн[а-яё]*|кабельн[а-яё]*\s+стойк[а-яё]*)\b",
+    re.IGNORECASE,
+)
+
+
+def _catalog_category_conflict(
+    product: TenderPosition,
+    selected: dict[str, Any],
+) -> str | None:
+    """Reject a small set of certain cross-category false positives."""
+    requested = " ".join(
+        str(value or "")
+        for value in (
+            product.product,
+            product.productQuery,
+            product.requirements,
+            product.evidence,
+        )
+    )
+    candidate = " ".join(
+        str(value or "")
+        for value in (
+            selected.get("name"),
+            selected.get("manufacturer"),
+            selected.get("vendorCode"),
+            json.dumps(selected.get("params") or {}, ensure_ascii=False, default=str),
+        )
+    )
+    if (
+        _INSULATOR_REQUEST_PATTERN.search(requested)
+        and _CABLE_RACK_CANDIDATE_PATTERN.search(candidate)
+    ):
+        return "Запрошен высоковольтный изолятор, но выбран кандидат категории «кабельная стойка»."
+    return None
+
+
 def hydrate_catalog_selection(
     selection: CatalogSelection,
     candidates: list[dict[str, Any]],
@@ -595,6 +637,8 @@ class CatalogMatcher:
 Полное соответствие — все существенные характеристики соблюдены.
 Аналог — допустимая замена. Если подтверждения нет, верни «Товар не найден».
 Выбирай по назначению и существенным техническим характеристикам, а не по цене.
+Совпадение обозначения или цифр недостаточно, если категории товара различаются
+(например, высоковольтный изолятор и кабельная стойка).
 selectedPointId обязан точно совпадать с pointId одного кандидата. Не возвращай цену,
 артикул, ссылку, название или производителя: Python возьмёт их из выбранного payload.
 Если подходящего кандидата нет, верни selectedPointId=null и «Товар не найден».
@@ -611,4 +655,21 @@ normalizedCandidates: {candidates_json}
             operation="catalog_product_selection",
             audit_details=self._position_context,
         )
+        selected = next(
+            (
+                candidate
+                for candidate in normalized_candidates
+                if str(candidate.get("pointId")) == str(selection.selected_point_id)
+            ),
+            None,
+        )
+        if selected is not None:
+            conflict = _catalog_category_conflict(product, selected)
+            if conflict:
+                result = NOT_FOUND.model_copy(deep=True)
+                result.rationale = (
+                    f"Выбор Qdrant pointId={selection.selected_point_id} отклонён кодом: "
+                    f"{conflict} Исходное обоснование LLM: {selection.rationale}"
+                )
+                return result
         return hydrate_catalog_selection(selection, normalized_candidates)

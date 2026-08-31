@@ -25,6 +25,30 @@ from app.services.parsers.common import detect_file_type, parse_file
 logger = logging.getLogger(__name__)
 
 
+_MARKETING_RESEARCH_PATTERN = re.compile(
+    r"маркетингов(?:ое|ого|ые|ых)\s+исследовани[еяй]|"
+    r"исследовани[ея]\s+рынка|мониторинг\s+рынка",
+    re.I,
+)
+_DOCUMENTATION_PLACEHOLDER_PATTERN = re.compile(
+    r"размещени[ея]\s+документации\s+о\s+маркетингов(?:ых|ом)\s+"
+    r"исследовани(?:ях|и)\s+в\s+ЕИС\s+не\s+предусмотрено",
+    re.I,
+)
+
+
+def _classify_document_kind(original_name: str, resolved_name: str, text: str = "") -> str:
+    if _MARKETING_RESEARCH_PATTERN.search(
+        "\n".join((original_name, resolved_name, text[:2000]))
+    ):
+        return "marketing_research"
+    return "document"
+
+
+def _is_documentation_placeholder(document: ParsedDocument) -> bool:
+    return bool(_DOCUMENTATION_PLACEHOLDER_PATTERN.search(document.text or ""))
+
+
 @dataclass(frozen=True)
 class _TransferMetadata:
     content_type: str
@@ -100,6 +124,12 @@ def document_processing_context(
         }
 
     usable = [document for document in documents if document.textQualityOk]
+    placeholder_documents = [
+        document for document in usable if _is_documentation_placeholder(document)
+    ]
+    substantive_usable = [
+        document for document in usable if document not in placeholder_documents
+    ]
     failed = [
         document
         for document in documents
@@ -133,8 +163,20 @@ def document_processing_context(
         if not document.textQualityOk and document not in failed
     ]
 
-    unavailable = not usable
+    unavailable = not substantive_usable
     note_parts: list[str] = []
+    if placeholder_documents:
+        names = ", ".join(
+            dict.fromkeys(
+                document.originalFileName or document.fileName
+                for document in placeholder_documents
+            )
+        )
+        note_parts.append(
+            "Получен информационный файл-заглушка вместо документации: "
+            f"{names}. В тексте прямо указано, что размещение документации "
+            "о маркетинговых исследованиях в ЕИС не предусмотрено."
+        )
     if unavailable:
         note_parts.append(
             f"Seldon выдал ссылки на {len(descriptors)} документ(ов), "
@@ -164,6 +206,19 @@ def document_processing_context(
         "documentsParsed": len(usable),
         "documentationUnavailable": unavailable,
         "documentationNote": " ".join(note_parts)[:3000],
+        "documentationPlaceholderFiles": [
+            {
+                "fileName": document.fileName,
+                "originalFileName": document.originalFileName,
+                "documentKind": document.documentKind,
+            }
+            for document in placeholder_documents
+        ],
+        "marketingResearchFiles": [
+            document.originalFileName or document.fileName
+            for document in documents
+            if document.documentKind == "marketing_research"
+        ],
         "emptyFiles": empty_names,
         "failedFiles": failed_details,
         "filesWithoutUsableText": no_text,
@@ -757,6 +812,9 @@ class DocumentProcessor:
                     **descriptor,
                     "url": downloaded_url,
                     "fileName": resolved_name,
+                    "originalFileName": safe_filename(
+                        str(descriptor.get("fileName") or ""), resolved_name
+                    ),
                 }
                 parsed.extend(self._process_path(path, effective_descriptor, depth=0))
             except Exception as exc:
@@ -768,6 +826,7 @@ class DocumentProcessor:
                         documentIndex=int(descriptor.get("index") or len(parsed) + 1),
                         documentUrl=str(descriptor.get("url") or ""),
                         fileName=name,
+                        originalFileName=name,
                         parserStatus="error",
                         parserWarning=warning,
                         parserError=str(exc),
@@ -834,11 +893,19 @@ class DocumentProcessor:
 
         text, status, warnings = parse_file(path, kind, self.settings, self.llm)
         warning = " ".join(warnings)
+        resolved_name = safe_filename(
+            str(descriptor.get("fileName") or path.name), path.name
+        )
+        original_name = safe_filename(
+            str(descriptor.get("originalFileName") or resolved_name), resolved_name
+        )
         return [
             ParsedDocument(
                 documentIndex=index,
                 documentUrl=str(descriptor.get("url") or ""),
-                fileName=safe_filename(str(descriptor.get("fileName") or path.name), path.name),
+                fileName=resolved_name,
+                originalFileName=original_name,
+                documentKind=_classify_document_kind(original_name, resolved_name, text),
                 fileExtension=kind,
                 mimeType=str(descriptor.get("mimeType") or ""),
                 fileSize=path.stat().st_size,
@@ -881,6 +948,10 @@ def build_combined_text(
                 "",
                 f"--- ДОКУМЕНТ {number} ---",
                 f"fileName: {document.fileName}",
+                f"originalFileName: {document.originalFileName}"
+                if document.originalFileName and document.originalFileName != document.fileName
+                else "",
+                f"documentKind: {document.documentKind}",
                 f"extension: {document.fileExtension}",
                 f"url: {document.documentUrl}",
                 f"parserStatus: {document.parserStatus}",
@@ -892,6 +963,8 @@ def build_combined_text(
             {
                 "index": number,
                 "fileName": document.fileName,
+                "originalFileName": document.originalFileName,
+                "documentKind": document.documentKind,
                 "extension": document.fileExtension,
                 "parserStatus": document.parserStatus,
                 "textQualityOk": document.textQualityOk,

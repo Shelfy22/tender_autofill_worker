@@ -1,4 +1,9 @@
-from app.models import DocumentPriceSource, TenderPosition, TenderPositionsResponse
+from app.models import (
+    DocumentPriceSource,
+    ProductMatchItem,
+    TenderPosition,
+    TenderPositionsResponse,
+)
 from app.services.products import (
     extract_deterministic_positions,
     extract_seldon_positions,
@@ -133,3 +138,55 @@ def test_excel_extraction_method_alias_is_normalized() -> None:
 
     assert position.documentPriceSource is not None
     assert position.documentPriceSource.extractionMethod == "excel_deterministic"
+
+
+def test_product_match_item_discards_non_numeric_diagnostic_price() -> None:
+    item = ProductMatchItem.model_validate(
+        {
+            "positionIndex": 37,
+            "product": "Кабель силовой",
+            "productQuery": "Кабель силовой",
+            "documentLineTotalRub": "Кабель силовой ВВГнг(A) 1х95/25 - 10",
+            "match": {},
+        }
+    )
+
+    assert item.documentLineTotalRub is None
+
+
+def test_merge_filters_row_numbers_classifier_codes_and_service_phrases() -> None:
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(product="1"),
+            TenderPosition(product="28.14.11.121"),
+            TenderPosition(product="Национальный режим не предоставляется – ограничение"),
+            TenderPosition(product="Клапан регулирующий", quantity=2, unit="шт"),
+        ]
+    )
+
+    merged, warnings = merge_positions([], llm)
+
+    assert [item.product for item in merged] == ["Клапан регулирующий"]
+    assert len([item for item in warnings if "служебная строка" in item]) == 3
+
+
+def test_initial_tender_price_is_not_kept_as_position_price() -> None:
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product="Трансформатор",
+                quantity=2,
+                documentLineTotalRub=1_100_000,
+                documentCurrency="RUB",
+                documentPriceEvidence=(
+                    "Начальная максимальная цена договора: 1 100 000 рублей."
+                ),
+            )
+        ]
+    )
+
+    merged, _ = merge_positions([], llm)
+
+    assert merged[0].documentUnitPriceRub is None
+    assert merged[0].documentLineTotalRub is None
+    assert merged[0].documentPriceEvidence == ""

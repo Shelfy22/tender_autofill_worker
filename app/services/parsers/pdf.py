@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING
 
 import fitz
@@ -9,6 +10,13 @@ from app.config import Settings
 
 if TYPE_CHECKING:
     from app.services.llm import LlmClient
+
+
+def _has_meaningful_text(value: str) -> bool:
+    """Accept short native PDF text and reserve OCR for empty/garbled pages."""
+    normalized = " ".join(value.split())
+    words = re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", normalized, re.UNICODE)
+    return len(normalized) >= 30 and len(words) >= 4
 
 
 def extract_pdf_text(
@@ -26,7 +34,7 @@ def extract_pdf_text(
             parts.append(text[:remaining])
             total += min(len(text), remaining)
     result = "\n".join(parts).strip()
-    useful = len(result) >= 500 and any(char.isalnum() for char in result)
+    useful = _has_meaningful_text(result)
     if useful:
         return result, "ok", warnings
     warnings.append("PDF не дал полезный текст; требуется OCR.")
