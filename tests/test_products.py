@@ -170,6 +170,86 @@ def test_merge_filters_row_numbers_classifier_codes_and_service_phrases() -> Non
     assert len([item for item in warnings if "служебная строка" in item]) == 3
 
 
+def test_merge_filters_delivery_address_and_deduplicates_tz_and_specification() -> None:
+    deterministic = [
+        TenderPosition(
+            product=(
+                'производственное предприятие "Предприятие тепловых сетей" филиала '
+                '«Самарский», 443082, г. Самара, ул. 1-й переулок, д. 55'
+            ),
+            quantity=1,
+            unit="шт",
+            evidence="Строка 8, колонка K — адрес поставки",
+            source="excel_table_deterministic",
+        )
+    ]
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product=(
+                    "ВЕНТИЛЯТОР ОСЕВОЙ ВОГД 4.0 (или эквивалент): "
+                    "Назначение: проветривание колодцев. Технические характеристики: "
+                    "гидравлический привод"
+                ),
+                quantity=1,
+                unit="шт",
+                evidence="ТЗ, строка 10",
+            ),
+            TenderPosition(
+                product=(
+                    "СТАНЦИЯ ГИДРАВЛИЧЕСКАЯ для подключения до 4-ех инструментов "
+                    "одновременно с электростартером (или эквивалент): "
+                    "Назначение: питание четырёх гидравлических инструментов"
+                ),
+                quantity=2,
+                unit="шт",
+                evidence="ТЗ, строка 11",
+            ),
+            TenderPosition(
+                product="ВЕНТИЛЯТОР ОСЕВОЙ ВОГД 4.0 (или эквивалент)",
+                quantity=1,
+                unit="шт",
+                evidence="Спецификация, строка 8",
+            ),
+            TenderPosition(
+                product=(
+                    "СТАНЦИЯ ГИДРАВЛИЧЕСКАЯ для подключения до 4-ех инструментов "
+                    "одновременно с электростартером (или эквивалент)"
+                ),
+                quantity=2,
+                unit="шт",
+                evidence="Спецификация, строка 9",
+            ),
+        ]
+    )
+
+    merged, warnings = merge_positions(deterministic, llm)
+
+    assert [item.product for item in merged] == [
+        "ВЕНТИЛЯТОР ОСЕВОЙ ВОГД 4.0 (или эквивалент)",
+        (
+            "СТАНЦИЯ ГИДРАВЛИЧЕСКАЯ для подключения до 4-ех инструментов "
+            "одновременно с электростартером (или эквивалент)"
+        ),
+    ]
+    assert [item.quantity for item in merged] == [1, 2]
+    assert "Назначение: проветривание колодцев" in merged[0].requirements
+    assert "ТЗ, строка 10" in merged[0].evidence
+    assert "Спецификация, строка 8" in merged[0].evidence
+    assert any("адрес" in warning.lower() for warning in warnings)
+    assert len([warning for warning in warnings if "повторно извлечённая" in warning]) == 2
+
+
+def test_address_word_inside_real_product_name_is_not_filtered() -> None:
+    llm = TenderPositionsResponse(
+        products=[TenderPosition(product="Извещатель пожарный адресный", quantity=5, unit="шт")]
+    )
+
+    merged, _ = merge_positions([], llm)
+
+    assert [item.product for item in merged] == ["Извещатель пожарный адресный"]
+
+
 def test_initial_tender_price_is_not_kept_as_position_price() -> None:
     llm = TenderPositionsResponse(
         products=[

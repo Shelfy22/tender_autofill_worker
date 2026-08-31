@@ -19,6 +19,18 @@ _SERVICE_POSITION_PATTERN = re.compile(
     r"единиц[аы]\s+измерени[яй]|количеств[оа]|итого|всего)\b",
     re.IGNORECASE,
 )
+_ADDRESS_OR_RECIPIENT_PATTERN = re.compile(
+    r"(?:\b(?:место|адрес)\s+(?:поставки|доставки)\b|"
+    r"\b(?:грузополучатель|получатель)\b|"
+    r"\b\d{6}\b.{0,160}(?:\bг\.|\bгород\b|\bул\.|\bулица\b|\bд\.|\bдом\b)|"
+    r"\b(?:филиал|предприятие)\b.{0,160}(?:\bг\.|\bгород\b|\bул\.|\bулица\b))",
+    re.IGNORECASE,
+)
+_PRODUCT_DESCRIPTION_SEPARATOR_PATTERN = re.compile(
+    r"^(.{3,300}?):\s*((?:назначение|технические\s+характеристики|"
+    r"характеристики|описание)\s*:?.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
 _TENDER_LEVEL_PRICE_PATTERN = re.compile(
     r"\b(?:начальн[а-яё]*\s+(?:максимальн[а-яё]*\s+)?цен[аы]|нмцк?|нмц)\b",
     re.IGNORECASE,
@@ -49,6 +61,28 @@ def _is_noise_position(position: TenderPosition) -> bool:
         or _ONLY_ROW_NUMBER_PATTERN.fullmatch(product)
         or _ONLY_CLASSIFIER_CODE_PATTERN.fullmatch(product)
         or _SERVICE_POSITION_PATTERN.search(product)
+        or _ADDRESS_OR_RECIPIENT_PATTERN.search(product)
+    )
+
+
+def _normalize_product_description(position: TenderPosition) -> TenderPosition:
+    """Keep the product title as identity and move an inline specification to requirements."""
+    product = _clean(position.product)
+    match = _PRODUCT_DESCRIPTION_SEPARATOR_PATTERN.match(product)
+    if not match:
+        return position
+    title = _clean(match.group(1))
+    description = _clean(match.group(2))
+    if not title or not description:
+        return position
+    requirements = _clean(" ".join(filter(None, (position.requirements, description))))
+    query = _clean(position.productQuery)
+    return position.model_copy(
+        update={
+            "product": title,
+            "productQuery": title if not query or query == product else query,
+            "requirements": requirements,
+        }
     )
 
 
@@ -438,6 +472,9 @@ def extract_seldon_positions(purchase: dict[str, Any]) -> list[TenderPosition]:
 
 def _position_name_key(position: TenderPosition) -> str:
     value = _clean(position.productQuery or position.product).lower().replace("ё", "е")
+    description_match = _PRODUCT_DESCRIPTION_SEPARATOR_PATTERN.match(value)
+    if description_match:
+        value = _clean(description_match.group(1))
     return re.sub(r"[^a-zа-я0-9]+", " ", value).strip()
 
 
@@ -458,12 +495,19 @@ def merge_positions(
     result: list[TenderPosition] = []
     seen: dict[tuple[str, float | None, str], int] = {}
     for raw_position in combined:
-        position = _clear_tender_level_price(raw_position)
+        position = _normalize_product_description(_clear_tender_level_price(raw_position))
         if _is_noise_position(position):
-            warnings.append(
-                "Пропущена служебная строка, ошибочно извлечённая как товар: "
-                f"{_clean(position.product)[:200]}"
-            )
+            product_text = _clean(position.product)
+            if _ADDRESS_OR_RECIPIENT_PATTERN.search(product_text):
+                warnings.append(
+                    "Пропущен адрес/получатель, ошибочно извлечённый как товар: "
+                    f"{product_text[:200]}"
+                )
+            else:
+                warnings.append(
+                    "Пропущена служебная строка, ошибочно извлечённая как товар: "
+                    f"{product_text[:200]}"
+                )
             continue
         query = _clean(position.productQuery or position.product)
         name_key = _position_name_key(position)
@@ -496,6 +540,7 @@ def merge_positions(
             if not existing.unit and unit:
                 updates["unit"] = unit
             for field in (
+                "requirements",
                 "documentUnitPriceRub",
                 "documentLineTotalRub",
                 "documentCurrency",
@@ -506,8 +551,19 @@ def merge_positions(
                 candidate_value = getattr(position, field)
                 if _missing(existing_value) and not _missing(candidate_value):
                     updates[field] = candidate_value
+            candidate_evidence = _clean(position.evidence)
+            existing_evidence = _clean(existing.evidence)
+            if candidate_evidence and candidate_evidence not in existing_evidence:
+                updates["evidence"] = _clean(
+                    " | ".join(filter(None, (existing_evidence, candidate_evidence)))
+                )[:1200]
             if updates:
                 result[existing_index] = existing.model_copy(update=updates)
+            if candidate_evidence or existing_evidence:
+                warnings.append(
+                    "Объединена повторно извлечённая товарная позиция из нескольких документов: "
+                    f"{product[:200]}"
+                )
             continue
         seen[resolved_key] = len(result)
         update = {"productQuery": query or product, "quantity": quantity, "unit": unit}
