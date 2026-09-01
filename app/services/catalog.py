@@ -384,6 +384,7 @@ class CatalogMatcher:
                     documentCurrency=product.documentCurrency,
                     documentPriceEvidence=product.documentPriceEvidence,
                     documentPriceSource=product.documentPriceSource,
+                    sourceReference=product.sourceReference,
                     match=match,
                 )
             )

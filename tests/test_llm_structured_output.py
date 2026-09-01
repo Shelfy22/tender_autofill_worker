@@ -7,6 +7,7 @@ from app.config import Settings
 from app.models import (
     ExtractedFieldsResponse,
     ProductHierarchyResponse,
+    ProductCandidateAuditResponse,
     TenderPosition,
     TenderPositionsResponse,
 )
@@ -134,6 +135,26 @@ def test_product_hierarchy_uses_structured_response() -> None:
     assert captured["schema"] is ProductHierarchyResponse
     assert captured["operation"] == "classify_product_hierarchy"
     assert "parentPositionIndex" in str(captured["prompt"])
+
+
+def test_product_candidate_audit_uses_structured_response_and_source_cells() -> None:
+    client = object.__new__(LlmClient)
+    captured: dict[str, object] = {}
+
+    def fake_json_call(**values: object) -> ProductCandidateAuditResponse:
+        captured.update(values)
+        return ProductCandidateAuditResponse(assignments=[])
+
+    client.json_call = fake_json_call  # type: ignore[method-assign]
+    response = client.audit_product_candidates(
+        [TenderPosition(product="Аналоги рассматриваются", quantity=162)]
+    )
+
+    assert response.assignments == []
+    assert captured["schema"] is ProductCandidateAuditResponse
+    assert captured["operation"] == "audit_product_candidates"
+    assert "duplicateOf" in str(captured["prompt"])
+    assert "sourceReference" in str(captured["prompt"])
 
 
 def test_product_extraction_retries_truncated_full_response_in_chunks() -> None:

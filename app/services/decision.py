@@ -572,7 +572,11 @@ def calculate_hard_reasons(
 
     coverage = product_check.get("coveragePercent")
     coverage_number = float(coverage) if isinstance(coverage, (int, float)) else None
-    if product_check.get("hardReject") is True:
+    validation_requires_review = bool(
+        isinstance(product_check.get("validation"), dict)
+        and product_check["validation"].get("requiresManualReview") is True
+    )
+    if product_check.get("hardReject") is True and not validation_requires_review:
         _add(
             reasons,
             COVERAGE_REASON,
@@ -783,12 +787,31 @@ def calculate_hard_reasons(
             "approved": product_check.get("coverageApproved") is True,
             "triggered": product_check.get("hardReject") is True,
             "quantityAdjustedTotalComplete": product_check.get("priceEvaluationComplete") is True,
+            "decisionEligible": product_check.get("coverageDecisionEligible") is not False,
+        },
+        "productValidationCheck": {
+            "reviewRequested": (
+                (product_check.get("validation") or {}).get("reviewRequested") is True
+                if isinstance(product_check.get("validation"), dict)
+                else False
+            ),
+            "manualReviewRequired": (
+                (product_check.get("validation") or {}).get("requiresManualReview") is True
+                if isinstance(product_check.get("validation"), dict)
+                else False
+            ),
+            "unresolved": (
+                (product_check.get("validation") or {}).get("unresolved", [])
+                if isinstance(product_check.get("validation"), dict)
+                else []
+            ),
         },
         "documentationCheck": {
             **document_context,
             "productsExtracted": not products_not_evaluated,
             "automaticApprovalAllowed": not products_not_evaluated
-            and document_context.get("documentationMissing") is not True,
+            and document_context.get("documentationMissing") is not True
+            and product_check.get("coverageDecisionEligible") is not False,
         },
         "highVoltageCheck": {
             "source": "productCheck.details / structured tender positions",
@@ -857,6 +880,11 @@ def apply_final_decision(
     meta = dict(meta)
     counterparty_requires_work = counterparty_lookup.get("status") != "matched"
     market_research_suppressed = report_id in {1, 2}
+    product_validation = product_check.get("validation")
+    validation_requires_review = bool(
+        isinstance(product_validation, dict)
+        and product_validation.get("requiresManualReview") is True
+    )
     confirmed_repair_kit_evidence = _find_repair_kit_product_evidence(product_check)
     hard = sorted(
         (
@@ -865,6 +893,10 @@ def apply_final_decision(
             if not (
                 market_research_suppressed
                 and item.reason == MARKET_RESEARCH_REASON
+            )
+            and not (
+                validation_requires_review
+                and item.reason == COVERAGE_REASON
             )
         ),
         key=lambda item: item.priority,
@@ -1083,6 +1115,23 @@ def apply_final_decision(
         )
         if documentation_reason and documentation_reason.evidence:
             note_parts.append(documentation_reason.evidence)
+    elif validation_requires_review:
+        status, reason, confidence = "Загружен Seldon", "Прочее", "low"
+        reason_origin = "product_validation"
+        unresolved = product_validation.get("unresolved", [])
+        unresolved_labels = [
+            str(item.get("product") or item.get("reason") or "").strip()
+            for item in unresolved
+            if isinstance(item, dict)
+        ]
+        unresolved_labels = [item for item in unresolved_labels if item]
+        note_parts.append(
+            "Требуется ручная проверка товарных позиций: аудит обнаружил "
+            "неразрешённые строки или конфликтующие дубли. Автоматическое "
+            "согласование и отказ по покрытию не применены."
+        )
+        if unresolved_labels:
+            note_parts.append("Проверить: " + "; ".join(unresolved_labels[:10]) + ".")
     elif llm_decision and llm_decision.decision == "reject" and llm_primary:
         status, reason, confidence = "Отказано КУ ЦП", llm_primary, llm_decision.confidence
         reason_origin = "llm"
@@ -1175,6 +1224,8 @@ def apply_final_decision(
     status_source = (
         "Проверка контрагента/МОПП"
         if reason_origin == "counterparty"
+        else "Аудит товарных позиций"
+        if reason_origin == "product_validation"
         else "Детерминированные правила согласования"
         if reason_origin == "deterministic"
         else "LLM: решение КУ ЦП"
@@ -1192,6 +1243,7 @@ def apply_final_decision(
     if reason:
         reason_source = {
             "counterparty": "Проверка контрагента/МОПП",
+            "product_validation": "Аудит товарных позиций",
             "deterministic": "Детерминированные правила согласования",
             "llm_alternative_over_coverage": (
                 "LLM: альтернативная причина при обязательном отказе по комплектованию лота"
@@ -1223,6 +1275,7 @@ def apply_final_decision(
         "additionalReasons": additional_reasons,
         "llmDecision": llm_decision.model_dump() if llm_decision else None,
         "marketResearchReasonSuppressed": market_research_suppressed,
+        "manualReviewRequired": validation_requires_review,
     }
     return fields, meta, decision
 

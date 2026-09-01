@@ -167,6 +167,35 @@ class DocumentPriceSource(BaseModel):
         return "llm"
 
 
+class ProductSourceReference(BaseModel):
+    """Coordinates of the cells that created a tender product candidate."""
+
+    fileName: str = ""
+    sheet: str = ""
+    row: int | None = Field(default=None, ge=1)
+    productColumn: str = ""
+    quantityColumn: str = ""
+    unitColumn: str = ""
+    productHeader: str = ""
+    quantityHeader: str = ""
+    unitHeader: str = ""
+    extractionMethod: Literal[
+        "excel_deterministic",
+        "seldon_structured",
+        "llm",
+    ] = "llm"
+
+    @field_validator("extractionMethod", mode="before")
+    @classmethod
+    def normalize_extraction_method(cls, value: Any) -> str:
+        text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if text in {"excel", "xls", "xlsx", "spreadsheet", "deterministic"}:
+            return "excel_deterministic"
+        if text in {"seldon", "seldon_api", "structured"}:
+            return "seldon_structured"
+        return text if text in {"excel_deterministic", "seldon_structured", "llm"} else "llm"
+
+
 class TenderPosition(BaseModel):
     product: str
     productQuery: str | None = None
@@ -183,6 +212,7 @@ class TenderPosition(BaseModel):
     documentCurrency: str | None = None
     documentPriceEvidence: str = ""
     documentPriceSource: DocumentPriceSource | None = None
+    sourceReference: ProductSourceReference | None = None
 
     @field_validator("documentPriceSource", mode="before")
     @classmethod
@@ -234,6 +264,33 @@ class ProductHierarchyAssignment(BaseModel):
 
 class ProductHierarchyResponse(BaseModel):
     assignments: list[ProductHierarchyAssignment] = Field(default_factory=list, max_length=100)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ProductCandidateAssignment(BaseModel):
+    positionIndex: int = Field(ge=1)
+    role: Literal[
+        "purchase_item",
+        "component",
+        "characteristic",
+        "address",
+        "service",
+        "header",
+        "duplicate",
+        "ambiguous",
+    ] = "ambiguous"
+    duplicateOf: int | None = Field(default=None, ge=1)
+    parentPositionIndex: int | None = Field(default=None, ge=1)
+    canonicalName: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    rationale: str = ""
+
+
+class ProductCandidateAuditResponse(BaseModel):
+    assignments: list[ProductCandidateAssignment] = Field(
+        default_factory=list,
+        max_length=100,
+    )
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -338,6 +395,7 @@ class ProductMatchItem(BaseModel):
     documentCurrency: str | None = None
     documentPriceEvidence: str = ""
     documentPriceSource: DocumentPriceSource | None = None
+    sourceReference: ProductSourceReference | None = None
     match: ProductMatch
 
     @field_validator("documentUnitPriceRub", "documentLineTotalRub", mode="before")

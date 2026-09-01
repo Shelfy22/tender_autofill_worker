@@ -18,6 +18,7 @@ from app.config import Settings
 from app.models import (
     ExtractedFieldsResponse,
     LlmDecision,
+    ProductCandidateAuditResponse,
     ProductHierarchyResponse,
     TenderPosition,
     TenderPositionsResponse,
@@ -588,6 +589,12 @@ class LlmClient:
 quantity бери только из колонки количества/«Кол-во». Никогда не используй как
 quantity цену единицы, стоимость строки, НМЦ или другое число из удалённой колонки.
 Для Excel сверяй колонку единицы измерения и соседнюю колонку количества.
+Товаром из Excel может стать только значение из колонки наименования товара/продукции.
+Ячейки характеристик, адресов, кодов, цен и условий поставки добавляй в evidence или
+requirements, но не создавай из них отдельные products.
+Для каждой позиции из Excel заполни sourceReference: fileName, sheet, row,
+productColumn, quantityColumn, unitColumn и extractionMethod="llm". Не придумывай
+координаты: если их нет в тексте, оставь соответствующие поля пустыми/null.
 analogsAllowed=false при «без аналогов/эквивалент не допускается»; true при прямом разрешении.
 Для каждой позиции отдельно извлеки documentUnitPriceRub (цена одной единицы) и
 documentLineTotalRub (сумма/стоимость всей строки), только когда соответствующий смысл
@@ -704,6 +711,71 @@ documentLineTotalRub (сумма/стоимость всей строки), то
         return TenderPositionsResponse(
             products=unique_products,
             warnings=list(dict.fromkeys(warnings)),
+        )
+
+    def audit_product_candidates(
+        self,
+        positions: list[TenderPosition],
+    ) -> ProductCandidateAuditResponse:
+        items = [
+            {
+                "positionIndex": index,
+                "product": position.product,
+                "productQuery": position.productQuery,
+                "article": position.article,
+                "quantity": position.quantity,
+                "unit": position.unit,
+                "source": position.source,
+                "sourceReference": (
+                    position.sourceReference.model_dump()
+                    if position.sourceReference is not None
+                    else None
+                ),
+                "requirements": position.requirements[:800],
+                "evidence": position.evidence[:800],
+            }
+            for index, position in enumerate(positions, start=1)
+        ]
+        prompt = f"""
+Проведи финальный аудит кандидатов на товарные позиции до поиска в каталоге.
+Верни назначение ровно для каждого positionIndex и только JSON.
+
+Допустимые роли:
+- purchase_item: самостоятельно закупаемый и поставляемый товар;
+- component: составная часть комплектного изделия, а не отдельный предмет поставки;
+- characteristic: характеристика, значение параметра, код классификатора или отдельная ячейка;
+- address: адрес, получатель, филиал или место поставки;
+- service: условие закупки, служебная фраза, работа или услуга, не являющаяся товаром;
+- header: заголовок или подпись таблицы;
+- duplicate: повтор уже представленной товарной позиции;
+- ambiguous: доказательств недостаточно.
+
+Правила:
+- Не считай названием товара фразы «аналоги рассматриваются», «эквиваленты допускаются»,
+  адреса, номера строк, значения характеристик и коды без товарного наименования.
+- Для duplicate укажи duplicateOf на более раннюю позицию. Повтор одного требования в ТЗ,
+  спецификации и проекте договора не является новой поставкой; quantity не суммируй.
+- Одинаковый товар в разных лотах или явно разных строках поставки не объединяй без доказательств.
+- Разное quantity у похожих позиций — конфликт, а не основание удалить одну из них;
+  используй ambiguous, если источник не разрешает конфликт.
+- Для component обязательно укажи parentPositionIndex. Используй component только когда
+  контекст прямо показывает состав/комплектность родительского изделия.
+- canonicalName заполняй только для безопасной очистки названия, не меняя модель, артикул
+  и технические параметры.
+- sourceReference и evidence являются доказательствами. Отсутствие координат Excel снижает
+  уверенность; не придумывай координаты.
+
+Кандидаты:
+{json.dumps(items, ensure_ascii=False, indent=2)}
+""".strip()
+        return self.json_call(
+            system=(
+                "Ты проверяешь качество извлечения товарных позиций тендера. "
+                "Не ищи товары и не принимай решение по тендеру. Только JSON."
+            ),
+            prompt=prompt,
+            schema=ProductCandidateAuditResponse,
+            operation="audit_product_candidates",
         )
 
     def classify_product_hierarchy(

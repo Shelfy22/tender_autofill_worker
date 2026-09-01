@@ -316,6 +316,39 @@ def test_llm_cannot_reintroduce_storage_after_missing_documents_as_consignment()
     assert decision["llmReasonCandidates"] == []
 
 
+def test_unresolved_product_audit_uses_neutral_manual_review_status() -> None:
+    fields, meta, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(
+            total=2,
+            coveragePercent=50.0,
+            coverageApproved=None,
+            hardReject=False,
+            coverageDecisionEligible=False,
+            validation={
+                "requiresManualReview": True,
+                "unresolved": [
+                    {
+                        "positionIndex": 2,
+                        "product": "Кабель АВБШв-1 4х120",
+                        "reason": "Похожие позиции имеют конфликтующие количества",
+                    }
+                ],
+            },
+        ),
+        hard_reasons=[HardReason(COVERAGE_REASON, "Покрытие 50%", 5)],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(decision="approve", confidence="high"),
+    )
+
+    assert fields["tenderStatus"] == "Загружен Seldon"
+    assert fields["tenderStatusReason"] == "Прочее"
+    assert "Требуется ручная проверка товарных позиций" in fields["tenderStatusNote"]
+    assert meta["tenderStatus"]["source"] == "Аудит товарных позиций"
+    assert decision["manualReviewRequired"] is True
+
+
 def test_zip_in_main_product_completeness_is_not_repair_kit() -> None:
     main_product = "Маркер по металлу электроискровой ЭИМ"
     text = (

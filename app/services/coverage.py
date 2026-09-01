@@ -137,6 +137,11 @@ def summarize_product_coverage(
                 "analogsAllowed": item.analogsAllowed,
                 "sourceEvidence": item.evidence,
                 "sourceRequirements": item.requirements,
+                "sourceReference": (
+                    item.sourceReference.model_dump()
+                    if item.sourceReference is not None
+                    else None
+                ),
                 "supplied": supplied,
                 "fullMatch": full_match,
                 "analogMatch": analog_match,

@@ -4,7 +4,12 @@ import json
 import re
 from typing import Any
 
-from app.models import DocumentPriceSource, TenderPosition, TenderPositionsResponse
+from app.models import (
+    DocumentPriceSource,
+    ProductSourceReference,
+    TenderPosition,
+    TenderPositionsResponse,
+)
 
 
 _ONLY_ROW_NUMBER_PATTERN = re.compile(
@@ -232,6 +237,7 @@ def extract_deterministic_positions(text: str) -> list[TenderPosition]:
         document_line_total: Any = None,
         document_currency: str | None = None,
         document_price_source: DocumentPriceSource | None = None,
+        source_reference: ProductSourceReference | None = None,
     ) -> None:
         name, unit = _clean(name), _clean(unit)
         quantity = parse_quantity(raw_quantity)
@@ -271,6 +277,7 @@ def extract_deterministic_positions(text: str) -> list[TenderPosition]:
                     else ""
                 ),
                 documentPriceSource=document_price_source,
+                sourceReference=source_reference,
             )
         )
 
@@ -352,6 +359,18 @@ def extract_deterministic_positions(text: str) -> list[TenderPosition]:
                 raw_line_total,
             ),
             document_price_source=price_source,
+            source_reference=ProductSourceReference(
+                fileName=current_file,
+                sheet=current_sheet,
+                row=row_number,
+                productColumn=header_columns["product"],
+                quantityColumn=header_columns["quantity"],
+                unitColumn=header_columns["unit"],
+                productHeader=header_labels.get("product", ""),
+                quantityHeader=header_labels.get("quantity", ""),
+                unitHeader=header_labels.get("unit", ""),
+                extractionMethod="excel_deterministic",
+            ),
         )
         if len(result) >= 100:
             return result
@@ -518,6 +537,9 @@ def extract_seldon_positions(purchase: dict[str, Any]) -> list[TenderPosition]:
                     evidence=evidence,
                     requirements=requirements,
                     source="seldon_structured",
+                    sourceReference=ProductSourceReference(
+                        extractionMethod="seldon_structured"
+                    ),
                 )
             )
             if len(result) >= 100:
@@ -630,6 +652,7 @@ def merge_positions(
                 "documentCurrency",
                 "documentPriceEvidence",
                 "documentPriceSource",
+                "sourceReference",
             ):
                 existing_value = getattr(existing, field)
                 candidate_value = getattr(position, field)

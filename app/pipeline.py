@@ -25,7 +25,7 @@ from app.services.documents import (
 )
 from app.services.llm import LlmClient
 from app.services.normalization import deduplicate_strings, normalize_job_payload
-from app.services.product_hierarchy import resolve_product_hierarchy
+from app.services.product_validation import validate_product_candidates
 from app.services.products import (
     extract_deterministic_positions,
     extract_seldon_positions,
@@ -228,11 +228,11 @@ class TenderPipeline:
             )
             self.warnings.extend(position_warnings)
 
-            positions, hierarchy_warnings, hierarchy_debug = self._run_stage(
-                "Resolve Product Hierarchy",
-                lambda: resolve_product_hierarchy(llm, positions),
+            positions, validation_warnings, validation_debug = self._run_stage(
+                "Validate Product Candidates",
+                lambda: validate_product_candidates(llm, positions),
             )
-            self.warnings.extend(hierarchy_warnings)
+            self.warnings.extend(validation_warnings)
 
             match_items, catalog_warnings = self._run_stage(
                 "Поиск товаров в каталоге/Qdrant",
@@ -247,7 +247,18 @@ class TenderPipeline:
                     lot_divisible=fields.get("lotDivisible"),
                 ),
             )
-            product_check["hierarchy"] = hierarchy_debug
+            product_check["validation"] = validation_debug
+            product_check["hierarchy"] = validation_debug.get("hierarchy", {})
+            if validation_debug.get("requiresManualReview") is True:
+                product_check["calculatedCoverageApproved"] = product_check.get(
+                    "coverageApproved"
+                )
+                product_check["calculatedHardReject"] = product_check.get("hardReject")
+                product_check["coverageApproved"] = None
+                product_check["hardReject"] = False
+                product_check["coverageDecisionEligible"] = False
+            else:
+                product_check["coverageDecisionEligible"] = True
 
             hard_reasons, checks = self._run_stage(
                 "Детерминированные правила решения",

@@ -90,3 +90,11 @@ def test_xlsx_prices_are_extracted_by_headers_with_source_coordinates(tmp_path: 
     assert position.documentPriceSource.unitPriceColumn == "E"
     assert position.documentPriceSource.lineTotalColumn == "F"
     assert position.documentPriceSource.extractionMethod == "excel_deterministic"
+    assert position.sourceReference is not None
+    assert position.sourceReference.fileName == "priced_specification.xlsx"
+    assert position.sourceReference.sheet == "Спецификация"
+    assert position.sourceReference.row == 2
+    assert position.sourceReference.productColumn == "B"
+    assert position.sourceReference.unitColumn == "C"
+    assert position.sourceReference.quantityColumn == "D"
+    assert position.sourceReference.extractionMethod == "excel_deterministic"
