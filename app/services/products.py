@@ -7,7 +7,9 @@ from typing import Any
 from app.models import DocumentPriceSource, TenderPosition, TenderPositionsResponse
 
 
-_ONLY_ROW_NUMBER_PATTERN = re.compile(r"^\s*\d{1,4}\s*[.)-]?\s*$")
+_ONLY_ROW_NUMBER_PATTERN = re.compile(
+    r"^\s*[+-]?\d+(?:[.,]\d+)?\s*[.)-]?\s*$"
+)
 _ONLY_CLASSIFIER_CODE_PATTERN = re.compile(
     r"^\s*\d{2}(?:[.\s-]\d{1,3}){2,}(?:\s*[.)-]?)?\s*$"
 )
@@ -528,6 +530,12 @@ def _position_name_key(position: TenderPosition) -> str:
     description_match = _PRODUCT_DESCRIPTION_SEPARATOR_PATTERN.match(value)
     if description_match:
         value = _clean(description_match.group(1))
+    value = re.sub(
+        r"\s*[([]?\s*(?:или\s+)?(?:аналог|эквивалент)\s*[)\]]?\s*$",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
     return re.sub(r"[^a-zа-я0-9]+", " ", value).strip()
 
 
@@ -591,8 +599,24 @@ def merge_positions(
         if not product:
             continue
         resolved_key = (name_key, quantity, unit.lower())
-        if resolved_key in seen:
-            existing_index = seen[resolved_key]
+        existing_index = seen.get(resolved_key)
+        if existing_index is None:
+            for existing_key, candidate_index in list(seen.items()):
+                same_name = existing_key[0] == name_key
+                compatible_quantity = (
+                    existing_key[1] is None
+                    or quantity is None
+                    or existing_key[1] == quantity
+                )
+                compatible_unit = (
+                    not existing_key[2]
+                    or not unit
+                    or existing_key[2] == unit.lower()
+                )
+                if same_name and compatible_quantity and compatible_unit:
+                    existing_index = candidate_index
+                    break
+        if existing_index is not None:
             existing = result[existing_index]
             updates: dict[str, Any] = {}
             if existing.quantity is None and quantity is not None:
@@ -619,6 +643,7 @@ def merge_positions(
                 )[:1200]
             if updates:
                 result[existing_index] = existing.model_copy(update=updates)
+            seen[resolved_key] = existing_index
             if candidate_evidence or existing_evidence:
                 warnings.append(
                     "Объединена повторно извлечённая товарная позиция из нескольких документов: "

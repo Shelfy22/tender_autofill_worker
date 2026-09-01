@@ -25,6 +25,7 @@ from app.services.documents import (
 )
 from app.services.llm import LlmClient
 from app.services.normalization import deduplicate_strings, normalize_job_payload
+from app.services.product_hierarchy import resolve_product_hierarchy
 from app.services.products import (
     extract_deterministic_positions,
     extract_seldon_positions,
@@ -227,6 +228,12 @@ class TenderPipeline:
             )
             self.warnings.extend(position_warnings)
 
+            positions, hierarchy_warnings, hierarchy_debug = self._run_stage(
+                "Resolve Product Hierarchy",
+                lambda: resolve_product_hierarchy(llm, positions),
+            )
+            self.warnings.extend(hierarchy_warnings)
+
             match_items, catalog_warnings = self._run_stage(
                 "Поиск товаров в каталоге/Qdrant",
                 lambda: catalog.match_all(positions),
@@ -240,6 +247,7 @@ class TenderPipeline:
                     lot_divisible=fields.get("lotDivisible"),
                 ),
             )
+            product_check["hierarchy"] = hierarchy_debug
 
             hard_reasons, checks = self._run_stage(
                 "Детерминированные правила решения",

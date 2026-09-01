@@ -224,6 +224,19 @@ class TenderPositionsResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ProductHierarchyAssignment(BaseModel):
+    positionIndex: int = Field(ge=1)
+    role: Literal["purchase_item", "component", "ambiguous"] = "ambiguous"
+    parentPositionIndex: int | None = Field(default=None, ge=1)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    rationale: str = ""
+
+
+class ProductHierarchyResponse(BaseModel):
+    assignments: list[ProductHierarchyAssignment] = Field(default_factory=list, max_length=100)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ProductMatch(BaseModel):
     article: str | None = Field(default=None, alias="Артикул")
     link: str | None = Field(default=None, alias="Ссылка")

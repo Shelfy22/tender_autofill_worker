@@ -4,7 +4,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import Settings
-from app.models import ExtractedFieldsResponse, TenderPosition, TenderPositionsResponse
+from app.models import (
+    ExtractedFieldsResponse,
+    ProductHierarchyResponse,
+    TenderPosition,
+    TenderPositionsResponse,
+)
 from app.services.llm import (
     LlmClient,
     LlmResponseTruncatedError,
@@ -106,6 +111,29 @@ def test_json_call_normalizes_top_level_product_list() -> None:
 
     assert parsed.products == []
     assert parsed.warnings == []
+
+
+def test_product_hierarchy_uses_structured_response() -> None:
+    client = object.__new__(LlmClient)
+    captured: dict[str, object] = {}
+
+    def fake_json_call(**values: object) -> ProductHierarchyResponse:
+        captured.update(values)
+        return ProductHierarchyResponse(assignments=[])
+
+    client.json_call = fake_json_call  # type: ignore[method-assign]
+
+    response = client.classify_product_hierarchy(
+        [
+            TenderPosition(product="КТП-1000", quantity=1, unit="шт"),
+            TenderPosition(product="Трансформатор", quantity=1, unit="шт"),
+        ]
+    )
+
+    assert response.assignments == []
+    assert captured["schema"] is ProductHierarchyResponse
+    assert captured["operation"] == "classify_product_hierarchy"
+    assert "parentPositionIndex" in str(captured["prompt"])
 
 
 def test_product_extraction_retries_truncated_full_response_in_chunks() -> None:

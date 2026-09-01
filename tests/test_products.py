@@ -18,6 +18,34 @@ def test_quantity_parsing() -> None:
     assert parse_quantity(None) is None
 
 
+def test_numeric_decimal_row_is_not_a_product() -> None:
+    response = TenderPositionsResponse(
+        products=[
+            TenderPosition(product="10.0", quantity=1, unit="шт"),
+            TenderPosition(product="Кабель", quantity=1, unit="шт"),
+        ]
+    )
+
+    merged, warnings = merge_positions([], response)
+
+    assert [item.product for item in merged] == ["Кабель"]
+    assert any("служебная строка" in warning for warning in warnings)
+
+
+def test_equivalent_suffix_and_missing_quantity_are_merged() -> None:
+    response = TenderPositionsResponse(
+        products=[
+            TenderPosition(product="Кабель или аналог", quantity=None, unit="шт"),
+            TenderPosition(product="Кабель", quantity=12, unit="шт"),
+        ]
+    )
+
+    merged, _ = merge_positions([], response)
+
+    assert len(merged) == 1
+    assert merged[0].quantity == 12
+
+
 def test_excel_like_position_extraction_preserves_quantity() -> None:
     positions = extract_deterministic_positions(
         "№ п/п Наименование товара Ед. изм. Кол-во 1 Моноблок штука 16 тип моноблок"

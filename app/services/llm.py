@@ -15,7 +15,13 @@ from openai import OpenAI
 from pydantic import BaseModel
 
 from app.config import Settings
-from app.models import ExtractedFieldsResponse, LlmDecision, TenderPositionsResponse
+from app.models import (
+    ExtractedFieldsResponse,
+    LlmDecision,
+    ProductHierarchyResponse,
+    TenderPosition,
+    TenderPositionsResponse,
+)
 
 if TYPE_CHECKING:
     from app.observability import RunObserver
@@ -698,6 +704,56 @@ documentLineTotalRub (сумма/стоимость всей строки), то
         return TenderPositionsResponse(
             products=unique_products,
             warnings=list(dict.fromkeys(warnings)),
+        )
+
+    def classify_product_hierarchy(
+        self,
+        positions: list[TenderPosition],
+    ) -> ProductHierarchyResponse:
+        items = [
+            {
+                "positionIndex": index,
+                "product": position.product,
+                "quantity": position.quantity,
+                "unit": position.unit,
+                "source": position.source,
+                "requirements": position.requirements[:600],
+                "evidence": position.evidence[:600],
+            }
+            for index, position in enumerate(positions, start=1)
+        ]
+        prompt = f"""
+Classify the extracted tender rows into purchase items and components.
+Return one assignment for every input positionIndex and JSON only.
+
+Rules:
+- purchase_item is an independently purchased/delivered product that must be
+  searched in the catalog and counted in coverage;
+- component is included inside another listed purchase item (BOM,
+  completeness, package contents) and must reference parentPositionIndex;
+- ambiguous is used whenever the evidence is insufficient;
+- never mark a separately requested good as a component only because it could
+  technically be used inside another product;
+- quantity, unit price, or a separate table row is not by itself proof that a
+  row is an independent purchase item or a component;
+- for KTP/complete transformer substations, transformers, switchgear,
+  disconnectors, cabinets, relays and similar BOM rows can be components when
+  the text shows that they form the listed KTP;
+- be conservative: a mistaken component classification removes a row from
+  catalog search, so use component only with direct contextual evidence;
+- confidence must be between 0 and 1; include a concise rationale.
+
+Input positions:
+{json.dumps(items, ensure_ascii=False, indent=2)}
+""".strip()
+        return self.json_call(
+            system=(
+                "You classify parent purchase items and their included "
+                "components in tender specifications. JSON only."
+            ),
+            prompt=prompt,
+            schema=ProductHierarchyResponse,
+            operation="classify_product_hierarchy",
         )
 
     def decide(self, prompt: str) -> LlmDecision:
