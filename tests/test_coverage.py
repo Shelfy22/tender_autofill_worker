@@ -51,7 +51,7 @@ def test_supplied_is_full_match_or_allowed_analog() -> None:
     assert result["coveragePercent"] == 50.0
     assert result["hardReject"] is True
     assert result["hardRejectReason"] == (
-        "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры"
+        "Номенклатура. Лот неделимый. Покрытие номенклатуры менее 80%"
     )
 
 

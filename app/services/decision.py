@@ -18,7 +18,7 @@ REASONS = [
     "Коммерческие условия. Отсрочка платежа 90 дней и более",
     "Коммерческие условия. Поставка в удаленные территории",
     "Коммерческие условия. Консигнация / Хранение у Покупателя за счет Поставщика",
-    "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры",
+    "Номенклатура. Лот неделимый. Покрытие номенклатуры менее 80%",
     "Номенклатура. Оборудование 35 кВ и выше",
     "Номенклатура. Частотный привод 6–10 кВ",
     "Номенклатура. Ремкомплект / ЗИП / Продукция по чертежу",
@@ -40,7 +40,7 @@ REASONS = [
 DEADLINE_REASON = "Оргвопросы. На момент согласования менее 3 рабочих дней до подачи заявки"
 DELIVERY_DEADLINE_REASON = "Коммерческие условия. Не проходим по сроку поставки"
 ASSORTMENT_REASON = "Непоставляемый ассортимент"
-INDIVISIBLE_REASON = "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры"
+INDIVISIBLE_REASON = "Номенклатура. Лот неделимый. Покрытие номенклатуры менее 80%"
 COVERAGE_REASON = INDIVISIBLE_REASON
 PRICE_REASON = "Коммерческие условия. НМЦК менее 1 млн руб."
 ACTUAL_COST_REASON = "Коммерческие условия. НМЦК менее фактической стоимости"
@@ -149,11 +149,11 @@ _SUPPLY_WORK_PATTERNS = (
     re.compile(
         rf"{_SUPPLY_WORK_TERM}[\s\S]{{0,140}}?"
         r"(?:входит|включен[а-яё]*)\s+в\s+"
-        r"(?:предмет|стоимость|объ[её]м|комплект)\s+поставк[а-яё]*",
+        r"(?:предмет|объ[её]м|комплект)\s+поставк[а-яё]*",
         re.IGNORECASE,
     ),
     re.compile(
-        r"(?:предмет|стоимость|объ[её]м|комплект)\s+поставк[а-яё]*"
+        r"(?:предмет|объ[её]м|комплект)\s+поставк[а-яё]*"
         r"[\s\S]{0,140}?(?:включает|содержит|предусматривает)[\s\S]{0,80}?"
         rf"{_SUPPLY_WORK_TERM}",
         re.IGNORECASE,
@@ -218,6 +218,10 @@ _VOLTAGE_COMPONENT_PATTERN = re.compile(_VOLTAGE_COMPONENT)
 _VOLTAGE_CONTEXT_PATTERN = re.compile(
     r"\b(?:напряжени[еяю]|"
     r"класс(?:а|у|ом)?\s+напряжения|вн|нн)\b",
+    re.IGNORECASE,
+)
+_NON_VOLTAGE_KV_CONTEXT_PATTERN = re.compile(
+    r"(?:коэффициент[а-яё\s]{0,80}|пропускн[а-яё]*\s+способност[а-яё]*\s*)$",
     re.IGNORECASE,
 )
 _TRANSFORMER_MODEL_PREFIX_PATTERN = re.compile(
@@ -449,6 +453,9 @@ def _extract_voltage_mentions(text: str) -> list[dict[str, Any]]:
     mentions: list[dict[str, Any]] = []
     compound_spans: list[tuple[int, int]] = []
     for match in _COMPOUND_VOLTAGE_PATTERN.finditer(text):
+        prefix = text[max(0, match.start() - 140): match.start()]
+        if _NON_VOLTAGE_KV_CONTEXT_PATTERN.search(prefix):
+            continue
         compound_spans.append(match.span())
         components = _VOLTAGE_COMPONENT_PATTERN.findall(match.group("values"))
         prefix = text[max(0, match.start() - 80): match.start()]
@@ -468,6 +475,9 @@ def _extract_voltage_mentions(text: str) -> list[dict[str, Any]]:
 
     for match in _SINGLE_VOLTAGE_PATTERN.finditer(text):
         if any(start <= match.start() and match.end() <= end for start, end in compound_spans):
+            continue
+        prefix = text[max(0, match.start() - 140): match.start()]
+        if _NON_VOLTAGE_KV_CONTEXT_PATTERN.search(prefix):
             continue
         mentions.append(
             {
@@ -1301,6 +1311,9 @@ def build_decision_prompt(
   монтаж, установку, пусконаладку или ввод в эксплуатацию как часть предмета/стоимости/объёма поставки.
 - Не считать поставкой с работами монтаж/демонтаж товара только для экспертизы, проверки или контроля
   качества, гарантийного случая, рассмотрения претензии, дефекта либо устранения недостатков.
+- Упоминание документации, руководства или инструкции по монтажу не означает выполнение монтажа
+  поставщиком. Включение расходов на монтаж/установку в цену или НМЦ без прямой обязанности выполнить
+  эти работы также не подтверждает причину «{SUPPLY_WORK_REASON}».
 - Условный шаблон «если монтаж осуществляется поставщиком» и заголовок раздела без прямой обязанности
   выполнить работы не подтверждают причину «{SUPPLY_WORK_REASON}».
 - Причина «{PAYMENT_DEPENDENCY_REASON}» требует прямого условия, что оплата поставленного товара

@@ -170,6 +170,43 @@ def test_merge_filters_row_numbers_classifier_codes_and_service_phrases() -> Non
     assert len([item for item in warnings if "служебная строка" in item]) == 3
 
 
+def test_merge_filters_auxiliary_ol_codes_and_example_rows() -> None:
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(product="ОЛ-5"),
+            TenderPosition(product="OL-7"),
+            TenderPosition(product="Пример"),
+            TenderPosition(product="Клапан регулирующий", quantity=1, unit="шт"),
+        ]
+    )
+
+    merged, warnings = merge_positions([], llm)
+
+    assert [item.product for item in merged] == ["Клапан регулирующий"]
+    assert len([item for item in warnings if "служебная строка" in item]) == 3
+
+
+def test_excel_adjacent_quantity_overrides_price_copied_by_llm() -> None:
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product="Клапан регулирующий",
+                quantity=33636.4004,
+                unit="шт",
+                evidence=(
+                    "Строка 12: A: 1 | B: Клапан регулирующий | "
+                    "D: шт | E: 1 | O: 33636.4004"
+                ),
+            )
+        ]
+    )
+
+    merged, warnings = merge_positions([], llm)
+
+    assert merged[0].quantity == 1
+    assert any("исправлено по соседним ячейкам Excel" in item for item in warnings)
+
+
 def test_merge_filters_delivery_address_and_deduplicates_tz_and_specification() -> None:
     deterministic = [
         TenderPosition(

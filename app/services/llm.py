@@ -4,6 +4,7 @@ import base64
 import copy
 import hashlib
 import json
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -30,6 +31,35 @@ class JsonExtractionResult:
     source: str
     repaired: bool = False
     initial_error: json.JSONDecodeError | None = None
+
+
+class LlmResponseTruncatedError(RuntimeError):
+    """The provider stopped before returning a complete structured response."""
+
+
+def _split_product_text(text: str, parts: int = 4) -> list[str]:
+    source = str(text or "").strip()
+    if not source:
+        return []
+    requested_parts = max(2, min(parts, 8))
+    target = max(1, math.ceil(len(source) / requested_parts))
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in source.splitlines(keepends=True):
+        if current and current_length + len(line) > target:
+            chunks.append("".join(current).strip())
+            current = []
+            current_length = 0
+        current.append(line)
+        current_length += len(line)
+    if current:
+        chunks.append("".join(current).strip())
+    chunks = [chunk for chunk in chunks if chunk]
+    if len(chunks) >= 2:
+        return chunks
+    midpoint = max(1, len(source) // 2)
+    return [chunk for chunk in (source[:midpoint].strip(), source[midpoint:].strip()) if chunk]
 
 
 def _json_candidates(source: str) -> list[tuple[str, str]]:
@@ -455,11 +485,16 @@ class LlmClient:
         fields_shape_normalized = False
         try:
             finish_reason = self._response_details(response).get("finishReason")
+            normalized_finish_reason = str(finish_reason or "").strip().lower()
+            if normalized_finish_reason in {"length", "max_tokens", "max_output_tokens"}:
+                raise LlmResponseTruncatedError(
+                    f"LLM-ответ обрезан провайдером: finish_reason={finish_reason}"
+                )
             extraction = extract_json_result(
                 content,
                 # Repairing a response explicitly marked as truncated could turn an
                 # incomplete business decision into an apparently valid one.
-                allow_repair=finish_reason not in {"length", "max_tokens"},
+                allow_repair=True,
             )
             fields_shape_normalized = bool(
                 schema is ExtractedFieldsResponse
@@ -501,14 +536,25 @@ class LlmClient:
         )
 
     def extract_products(self, text: str, deterministic: list[dict[str, Any]]) -> TenderPositionsResponse:
-        prompt = f"""
+        source_text = text[: self.settings.max_product_text_chars]
+
+        def build_prompt(
+            text_part: str,
+            deterministic_part: list[dict[str, Any]],
+        ) -> str:
+            return f"""
 Извлеки товарные позиции из тендерной документации. Верни только JSON.
 Используй ТЗ, спецификацию, ведомость и таблицы. Каждая строка после колонок
 «№ п/п / Наименование / Ед. изм. / Кол-во» — товар. Не пропускай quantity.
 Не превращай заголовки, реквизиты, услуги площадки и обеспечения в товары.
 Не превращай в товары адреса поставки, почтовые адреса, названия заказчиков,
 получателей, грузополучателей, филиалов и производственных площадок.
+Не превращай в товары служебные значения отдельных ячеек: «ОЛ-5», «ОЛ-6»,
+«ОЛ-7», «Пример», номера строк, коды классификаторов и подписи образца заполнения.
 Сохрани полное наименование, характеристики, brand/article, quantity и unit.
+quantity бери только из колонки количества/«Кол-во». Никогда не используй как
+quantity цену единицы, стоимость строки, НМЦ или другое число из удалённой колонки.
+Для Excel сверяй колонку единицы измерения и соседнюю колонку количества.
 analogsAllowed=false при «без аналогов/эквивалент не допускается»; true при прямом разрешении.
 Для каждой позиции отдельно извлеки documentUnitPriceRub (цена одной единицы) и
 documentLineTotalRub (сумма/стоимость всей строки), только когда соответствующий смысл
@@ -532,17 +578,94 @@ documentLineTotalRub (сумма/стоимость всей строки), то
 Максимум 100 уникальных позиций после этой проверки.
 
 Детерминированные Excel-позиции — обязательная основа:
-{json.dumps(deterministic, ensure_ascii=False, indent=2)}
+{json.dumps(deterministic_part, ensure_ascii=False, indent=2)}
 
 Текст:
-{text[: self.settings.max_product_text_chars]}
+{text_part}
 """.strip()
-        return self.json_call(
-            system="Ты извлекаешь товарные позиции. Только валидный JSON.",
-            prompt=prompt,
-            schema=TenderPositionsResponse,
-            operation="extract_tender_products",
-        )
+
+        try:
+            return self.json_call(
+                system="Ты извлекаешь товарные позиции. Только валидный JSON.",
+                prompt=build_prompt(source_text, deterministic),
+                schema=TenderPositionsResponse,
+                operation="extract_tender_products",
+            )
+        except LlmResponseTruncatedError:
+            # A syntactically valid prefix must never be accepted as the complete
+            # assortment. Re-run smaller independent parts and merge them.
+            work: list[tuple[str, list[dict[str, Any]], int]] = [
+                (chunk, [], 0) for chunk in _split_product_text(source_text)
+            ]
+            work.extend(
+                ("", deterministic[index:index + 25], 0)
+                for index in range(0, len(deterministic), 25)
+            )
+            if not work:
+                raise
+
+            products = []
+            warnings = [
+                "Полный ответ LLM по товарным позициям был обрезан; "
+                "извлечение автоматически повторено частями."
+            ]
+            call_number = 0
+            while work:
+                text_part, deterministic_part, depth = work.pop(0)
+                call_number += 1
+                try:
+                    response = self.json_call(
+                        system="Ты извлекаешь товарные позиции. Только валидный JSON.",
+                        prompt=build_prompt(text_part, deterministic_part),
+                        schema=TenderPositionsResponse,
+                        operation=f"extract_tender_products_chunk_{call_number}",
+                    )
+                except LlmResponseTruncatedError:
+                    if depth >= 3:
+                        raise
+                    if len(deterministic_part) > 1:
+                        middle = max(1, len(deterministic_part) // 2)
+                        work[0:0] = [
+                            ("", deterministic_part[:middle], depth + 1),
+                            ("", deterministic_part[middle:], depth + 1),
+                        ]
+                        continue
+                    text_chunks = _split_product_text(text_part, parts=2)
+                    if len(text_chunks) < 2:
+                        raise
+                    work[0:0] = [
+                        (chunk, deterministic_part, depth + 1)
+                        for chunk in text_chunks
+                    ]
+                    continue
+                products.extend(response.products)
+                warnings.extend(response.warnings)
+
+            unique_products = []
+            seen: set[tuple[str, float | None, str]] = set()
+            for product in products:
+                key = (
+                    re.sub(
+                        r"[^a-zа-яё0-9]+",
+                        " ",
+                        str(product.productQuery or product.product).casefold(),
+                    ).strip(),
+                    product.quantity,
+                    product.unit.casefold(),
+                )
+                if not key[0] or key in seen:
+                    continue
+                seen.add(key)
+                unique_products.append(product)
+                if len(unique_products) >= 100:
+                    warnings.append(
+                        "После частичного извлечения достигнут лимит 100 уникальных позиций."
+                    )
+                    break
+            return TenderPositionsResponse(
+                products=unique_products,
+                warnings=list(dict.fromkeys(warnings)),
+            )
 
     def decide(self, prompt: str) -> LlmDecision:
         return self.json_call(

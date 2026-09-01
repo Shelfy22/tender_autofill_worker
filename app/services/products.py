@@ -11,6 +11,14 @@ _ONLY_ROW_NUMBER_PATTERN = re.compile(r"^\s*\d{1,4}\s*[.)-]?\s*$")
 _ONLY_CLASSIFIER_CODE_PATTERN = re.compile(
     r"^\s*\d{2}(?:[.\s-]\d{1,3}){2,}(?:\s*[.)-]?)?\s*$"
 )
+_ONLY_AUXILIARY_CODE_PATTERN = re.compile(
+    r"^\s*(?:ол|ol)\s*[-–—]?\s*\d{1,4}\s*$",
+    re.IGNORECASE,
+)
+_EXAMPLE_POSITION_PATTERN = re.compile(
+    r"^\s*(?:пример(?:\s+заполнения)?|example)\s*[.:;–—-]?\s*$",
+    re.IGNORECASE,
+)
 _SERVICE_POSITION_PATTERN = re.compile(
     r"^\s*(?:национальн[а-яё]*\s+режим|"
     r"(?:ограничени[ея]|запрет[а-яё]*)\s+(?:не\s+)?(?:установлен[а-яё]*|предоставля[а-яё]*)|"
@@ -60,6 +68,8 @@ def _is_noise_position(position: TenderPosition) -> bool:
         not product
         or _ONLY_ROW_NUMBER_PATTERN.fullmatch(product)
         or _ONLY_CLASSIFIER_CODE_PATTERN.fullmatch(product)
+        or _ONLY_AUXILIARY_CODE_PATTERN.fullmatch(product)
+        or _EXAMPLE_POSITION_PATTERN.fullmatch(product)
         or _SERVICE_POSITION_PATTERN.search(product)
         or _ADDRESS_OR_RECIPIENT_PATTERN.search(product)
     )
@@ -143,6 +153,49 @@ def _parse_structured_cells(value: str) -> dict[str, str]:
         if match and match.group(2):
             cells[match.group(1)] = match.group(2)
     return cells
+
+
+def _excel_column_number(value: str) -> int:
+    number = 0
+    for character in value.upper():
+        if not "A" <= character <= "Z":
+            return 0
+        number = number * 26 + ord(character) - ord("A") + 1
+    return number
+
+
+def _plain_number(value: Any) -> float | None:
+    text = str(value or "").strip().replace("\xa0", "").replace(" ", "")
+    if not re.fullmatch(r"\d+(?:[,.]\d+)?", text):
+        return None
+    return float(text.replace(",", "."))
+
+
+def _quantity_from_structured_evidence(position: TenderPosition) -> float | None:
+    """Recover quantity from the spreadsheet cell immediately after the unit cell."""
+    expected_unit = _clean(position.unit).casefold().replace("ё", "е")
+    for evidence in (position.evidence, position.documentPriceEvidence):
+        for row in str(evidence or "").splitlines():
+            row_match = re.search(r"(?:^|\b)Строка\s+\d+\s*:\s*(.+)$", row, re.IGNORECASE)
+            if not row_match:
+                continue
+            cells = _parse_structured_cells(row_match.group(1))
+            ordered = sorted(cells.items(), key=lambda item: _excel_column_number(item[0]))
+            for index, (_, cell_value) in enumerate(ordered):
+                normalized_cell = _clean(cell_value).casefold().replace("ё", "е")
+                is_unit = bool(re.fullmatch(UNITS, cell_value, re.IGNORECASE))
+                if expected_unit and normalized_cell == expected_unit:
+                    is_unit = True
+                if not is_unit or index + 1 >= len(ordered):
+                    continue
+                current_column = _excel_column_number(ordered[index][0])
+                next_column = _excel_column_number(ordered[index + 1][0])
+                if next_column != current_column + 1:
+                    continue
+                quantity = _plain_number(ordered[index + 1][1])
+                if quantity is not None:
+                    return quantity
+    return None
 
 
 def _currency_from_price_cells(*values: Any) -> str | None:
@@ -509,6 +562,13 @@ def merge_positions(
                     f"{product_text[:200]}"
                 )
             continue
+        structured_quantity = _quantity_from_structured_evidence(position)
+        if structured_quantity is not None and position.quantity != structured_quantity:
+            warnings.append(
+                "Количество позиции исправлено по соседним ячейкам Excel: "
+                f"{_clean(position.product)[:200]} — {structured_quantity:g}."
+            )
+            position = position.model_copy(update={"quantity": structured_quantity})
         query = _clean(position.productQuery or position.product)
         name_key = _position_name_key(position)
         seldon_match = seldon_by_name.get(name_key)

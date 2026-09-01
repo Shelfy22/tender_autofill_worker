@@ -229,6 +229,22 @@ def test_direct_supplier_mounting_obligation_is_supply_with_work() -> None:
     assert "Поставщик обязан выполнить монтаж" in matching[0].evidence
 
 
+def test_mounting_cost_or_documentation_is_not_supply_with_work() -> None:
+    false_contexts = (
+        "Начальная цена включает расходы на монтаж и установку оборудования.",
+        "Поставщик передает заказчику руководство и документацию по монтажу оборудования.",
+    )
+
+    for text in false_contexts:
+        reasons, _ = calculate_hard_reasons(
+            job(),
+            {"initialPrice": 2_000_000},
+            product_check(total=1),
+            text,
+        )
+        assert SUPPLY_WORK_REASON not in [reason.reason for reason in reasons]
+
+
 def test_acceptance_remedy_storage_is_not_consignment() -> None:
     false_contexts = (
         "Товар, от которого Покупатель отказался, принимается на ответственное хранение. "
@@ -1102,6 +1118,19 @@ def test_power_units_are_never_treated_as_voltage() -> None:
             value,
         )
         assert HIGH_VOLTAGE_REASON not in [item.reason for item in reasons], value
+
+
+def test_flow_coefficient_kv_is_not_treated_as_voltage() -> None:
+    text = "Клапан регулирующий, коэффициент пропускной способности 55 Kv."
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {},
+        _voltage_product_check(text),
+        text,
+    )
+
+    assert HIGH_VOLTAGE_REASON not in [item.reason for item in reasons]
+    assert checks["highVoltageCheck"]["triggered"] is False
 
 
 def test_compound_35_10_kv_in_product_position_triggers_reason() -> None:
