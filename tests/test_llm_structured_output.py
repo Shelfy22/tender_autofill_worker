@@ -73,6 +73,41 @@ def test_json_call_rejects_even_valid_json_when_provider_marks_it_truncated() ->
         )
 
 
+def test_json_call_normalizes_top_level_product_list() -> None:
+    client = LlmClient(
+        Settings(
+            postgres_dsn="postgresql://user:pass@localhost/db",
+            llm_api_key="test",
+            llm_model_attempt_1="model-a",
+        ),
+        attempt=1,
+    )
+    response = SimpleNamespace(
+        model="model-a",
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content="[]"),
+            )
+        ],
+        usage=None,
+    )
+    client.client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **_: response)
+        )
+    )
+
+    parsed = client.json_call(
+        system="test",
+        prompt="test",
+        schema=TenderPositionsResponse,
+    )
+
+    assert parsed.products == []
+    assert parsed.warnings == []
+
+
 def test_product_extraction_retries_truncated_full_response_in_chunks() -> None:
     client = object.__new__(LlmClient)
     client.settings = SimpleNamespace(max_product_text_chars=100_000)
@@ -108,6 +143,36 @@ def test_product_extraction_retries_truncated_full_response_in_chunks() -> None:
         operation.startswith("extract_tender_products_chunk_")
         for operation in calls[1:]
     )
+
+
+def test_large_product_text_skips_wasteful_full_llm_call() -> None:
+    client = object.__new__(LlmClient)
+    client.settings = SimpleNamespace(max_product_text_chars=100_000)
+    calls: list[str] = []
+
+    def fake_json_call(**values: object) -> TenderPositionsResponse:
+        operation = str(values["operation"])
+        calls.append(operation)
+        return TenderPositionsResponse(products=[])
+
+    client.json_call = fake_json_call  # type: ignore[method-assign]
+
+    response = client.extract_products(
+        "\n".join(
+            f"Строка {index}: A: {index} | B: Товар {index} | D: шт | E: 1"
+            for index in range(1, 1_001)
+        ),
+        [],
+    )
+
+    assert response.products == []
+    assert len(calls) > 1
+    assert "extract_tender_products" not in calls
+    assert all(
+        operation.startswith("extract_tender_products_chunk_")
+        for operation in calls
+    )
+    assert any("сразу выполнено небольшими частями" in item for item in response.warnings)
 
 
 def test_markdown_wrapped_json_remains_supported() -> None:
