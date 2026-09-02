@@ -233,6 +233,9 @@ def test_mounting_cost_or_documentation_is_not_supply_with_work() -> None:
     false_contexts = (
         "Начальная цена включает расходы на монтаж и установку оборудования.",
         "Поставщик передает заказчику руководство и документацию по монтажу оборудования.",
+        "Поставщик обязан предоставить инструкцию по монтажу оборудования.",
+        "Поставщик должен предоставить документацию по наладке и пуску оборудования.",
+        "В комплект поставки входит руководство по монтажу и пусконаладке.",
     )
 
     for text in false_contexts:
@@ -243,6 +246,22 @@ def test_mounting_cost_or_documentation_is_not_supply_with_work() -> None:
             text,
         )
         assert SUPPLY_WORK_REASON not in [reason.reason for reason in reasons]
+
+
+def test_documentation_does_not_hide_separate_direct_work_obligation() -> None:
+    text = (
+        "Поставщик обязан выполнить шефмонтаж и пусконаладочные работы на объекте. "
+        "После выполнения работ поставщик передает руководство по монтажу."
+    )
+
+    reasons, _ = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(total=1),
+        text,
+    )
+
+    assert SUPPLY_WORK_REASON in [reason.reason for reason in reasons]
 
 
 def test_acceptance_remedy_storage_is_not_consignment() -> None:
@@ -316,7 +335,7 @@ def test_llm_cannot_reintroduce_storage_after_missing_documents_as_consignment()
     assert decision["llmReasonCandidates"] == []
 
 
-def test_unresolved_product_audit_uses_neutral_manual_review_status() -> None:
+def test_unresolved_product_audit_does_not_suppress_coverage_rejection() -> None:
     fields, meta, decision = apply_final_decision(
         fields={},
         meta={},
@@ -342,10 +361,143 @@ def test_unresolved_product_audit_uses_neutral_manual_review_status() -> None:
         llm_decision=LlmDecision(decision="approve", confidence="high"),
     )
 
+    assert fields["tenderStatus"] == "Отказано КУ ЦП"
+    assert fields["tenderStatusReason"] == COVERAGE_REASON
+    assert "Товарный аудит обнаружил" in fields["tenderStatusNote"]
+    assert "не блокирует расчёт покрытия" in fields["tenderStatusNote"]
+    assert meta["tenderStatus"]["source"] == "Детерминированные правила согласования"
+    assert decision["manualReviewRequired"] is True
+
+
+def test_hard_reason_calculation_keeps_coverage_rejection_with_product_review() -> None:
+    reasons, _ = calculate_hard_reasons(
+        job(),
+        {},
+        product_check(
+            total=2,
+            coveragePercent=50.0,
+            coverageApproved=False,
+            hardReject=True,
+            validation={
+                "requiresManualReview": True,
+                "unresolved": [
+                    {
+                        "positionIndex": 2,
+                        "product": "Кабель",
+                        "reason": "Конфликтующий дубль",
+                    }
+                ],
+            },
+        ),
+        "",
+    )
+
+    assert COVERAGE_REASON in _reason_names(reasons)
+
+
+def test_missing_ipro_remains_only_reason_for_loaded_seldon_with_product_review() -> None:
+    fields, meta, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(
+            total=2,
+            coverageDecisionEligible=False,
+            validation={
+                "requiresManualReview": True,
+                "unresolved": [
+                    {
+                        "positionIndex": 1,
+                        "product": "Выключатель",
+                        "reason": "Роль позиции неоднозначна",
+                    }
+                ],
+            },
+        ),
+        hard_reasons=[],
+        counterparty_lookup={
+            "status": "not_found",
+            "reason": "Организация с указанным ИНН в IPro не найдена.",
+        },
+        llm_decision=LlmDecision(decision="approve", confidence="high"),
+    )
+
     assert fields["tenderStatus"] == "Загружен Seldon"
     assert fields["tenderStatusReason"] == "Прочее"
-    assert "Требуется ручная проверка товарных позиций" in fields["tenderStatusNote"]
-    assert meta["tenderStatus"]["source"] == "Аудит товарных позиций"
+    assert "Товарный аудит обнаружил" in fields["tenderStatusNote"]
+    assert "Выключатель —" in fields["tenderStatusNote"]
+    assert "IPro не найдена" in fields["tenderStatusNote"]
+    assert meta["tenderStatus"]["source"] == "Проверка контрагента/МОПП"
+    assert decision["counterpartyRequiresWork"] is True
+    assert decision["manualReviewRequired"] is True
+
+
+def test_product_review_is_advisory_when_tender_is_approved() -> None:
+    fields, meta, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(
+            total=1,
+            coveragePercent=100.0,
+            coverageApproved=True,
+            hardReject=False,
+            coverageDecisionEligible=True,
+            validation={
+                "requiresManualReview": True,
+                "unresolved": [
+                    {
+                        "positionIndex": 1,
+                        "product": "Анализатор FPL1014",
+                        "reason": "Низкая уверенность LLM-аудита",
+                    }
+                ],
+            },
+        ),
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(decision="approve", confidence="high"),
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert "tenderStatusReason" not in fields
+    assert "Анализатор FPL1014 — Низкая уверенность" in fields["tenderStatusNote"]
+    assert meta["tenderStatus"]["source"] == "LLM: решение КУ ЦП"
+    assert decision["manualReviewRequired"] is True
+
+
+def test_supply_work_rejection_has_priority_over_ipro_and_product_review() -> None:
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(
+            total=2,
+            coverageDecisionEligible=False,
+            validation={
+                "requiresManualReview": True,
+                "unresolved": [{"positionIndex": 1, "product": "Выключатель"}],
+            },
+        ),
+        hard_reasons=[],
+        counterparty_lookup={
+            "status": "not_found",
+            "reason": "Организация с указанным ИНН в IPro не найдена.",
+        },
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=SUPPLY_WORK_REASON,
+            detectedReasons=[
+                DecisionReason(
+                    reason=SUPPLY_WORK_REASON,
+                    evidence="Поставщик обязан выполнить монтаж оборудования.",
+                    confidence="high",
+                )
+            ],
+            confidence="high",
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Отказано КУ ЦП"
+    assert fields["tenderStatusReason"] == SUPPLY_WORK_REASON
+    assert decision["counterpartyAdvisoryOnly"] is True
     assert decision["manualReviewRequired"] is True
 
 
@@ -596,7 +748,7 @@ def test_hard_rejection_has_priority_over_counterparty_work() -> None:
     assert fields["tenderStatusReason"] == PRICE_REASON
 
 
-def test_counterparty_work_is_used_when_tender_would_otherwise_be_approved() -> None:
+def test_missing_ipro_keeps_loaded_seldon_when_tender_would_otherwise_be_approved() -> None:
     fields, _, decision = apply_final_decision(
         fields={},
         meta={},
@@ -606,8 +758,9 @@ def test_counterparty_work_is_used_when_tender_would_otherwise_be_approved() -> 
         llm_decision=LlmDecision(decision="approve"),
     )
 
-    assert fields["tenderStatus"] == "Проработка контрагента"
+    assert fields["tenderStatus"] == "Загружен Seldon"
     assert fields["tenderStatusReason"] == "Прочее"
+    assert "ИНН/КПП не найдены в IPro" in fields["tenderStatusNote"]
     assert decision["counterpartyRequiresWork"] is True
     assert decision["counterpartyAdvisoryOnly"] is False
 
@@ -841,6 +994,8 @@ def test_decision_prompt_distinguishes_supply_work_from_expertise() -> None:
 
     assert "прямой обязанности поставщика" in prompt
     assert "монтаж/демонтаж товара только для экспертизы" in prompt
+    assert "предоставить документацию" in prompt
+    assert "отрицательным evidence" in prompt
     assert "Не считать консигнацией ответственное/временное хранение" in prompt
     assert "сама извлечённая товарная позиция" in prompt
     assert "sourceRequirements именно этой товарной позиции" in prompt

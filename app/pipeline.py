@@ -249,16 +249,10 @@ class TenderPipeline:
             )
             product_check["validation"] = validation_debug
             product_check["hierarchy"] = validation_debug.get("hierarchy", {})
-            if validation_debug.get("requiresManualReview") is True:
-                product_check["calculatedCoverageApproved"] = product_check.get(
-                    "coverageApproved"
-                )
-                product_check["calculatedHardReject"] = product_check.get("hardReject")
-                product_check["coverageApproved"] = None
-                product_check["hardReject"] = False
-                product_check["coverageDecisionEligible"] = False
-            else:
-                product_check["coverageDecisionEligible"] = True
+            product_check["validationAdvisoryOnly"] = (
+                validation_debug.get("requiresManualReview") is True
+            )
+            product_check["coverageDecisionEligible"] = True
 
             hard_reasons, checks = self._run_stage(
                 "Детерминированные правила решения",

@@ -155,7 +155,16 @@ class IProClient:
             data = response.json()
         except Exception as exc:
             reason = f"IPro API не выполнил проверку по ИНН {inn}: {exc}"
-            return updated_fields, updated_meta, {"status": "lookup_error", "reason": reason, "inn": inn, "kpp": kpp}, [reason]
+            http_status = getattr(getattr(exc, "response", None), "status_code", None)
+            return updated_fields, updated_meta, {
+                "status": "lookup_error",
+                "reason": reason,
+                "requestedInn": inn,
+                "requestedKpp": kpp,
+                "inn": inn,
+                "kpp": kpp,
+                "httpStatus": http_status,
+            }, [reason]
         if isinstance(data, dict) and isinstance(data.get("body"), dict):
             data = data["body"]
         api_code_raw = None
@@ -174,7 +183,17 @@ class IProClient:
                 or "нет описания"
             )
             reason = f"IPro API не выполнил проверку по ИНН {inn}. Код: {api_code}. Сообщение: {message}."
-            return updated_fields, updated_meta, {"status": "lookup_error", "reason": reason, "inn": inn, "kpp": kpp}, [reason]
+            return updated_fields, updated_meta, {
+                "status": "lookup_error",
+                "reason": reason,
+                "requestedInn": inn,
+                "requestedKpp": kpp,
+                "inn": inn,
+                "kpp": kpp,
+                "httpStatus": response.status_code,
+                "apiCode": api_code,
+                "apiMessage": message,
+            }, [reason]
         rows: Any = []
         if isinstance(data, dict):
             rows = (
@@ -204,6 +223,15 @@ class IProClient:
             }
 
         candidates = [normalized(row) for row in rows if isinstance(row, dict)]
+        candidate_summaries = [
+            {
+                "inn": row["inn"],
+                "kpp": row["kpp"],
+                "fullName": row["fullName"],
+                "shortName": row["shortName"],
+            }
+            for row in candidates[:20]
+        ]
         by_inn = [row for row in candidates if row["inn"] == inn]
         # Business approval is based on INN only. Prefer the row with the same
         # KPP for display data when it exists, but a KPP mismatch never sends the
@@ -215,7 +243,20 @@ class IProClient:
         if not match:
             reason = f"Организация с ИНН {inn} в IPro не найдена."
             match_kind = "none"
-            lookup = {"status": "not_found", "matchType": match_kind, "reason": reason, "inn": inn, "kpp": kpp, "byInnCount": len(by_inn)}
+            lookup = {
+                "status": "not_found",
+                "matchType": match_kind,
+                "reason": reason,
+                "requestedInn": inn,
+                "requestedKpp": kpp,
+                "inn": inn,
+                "kpp": kpp,
+                "httpStatus": response.status_code,
+                "apiCode": api_code,
+                "apiRowsCount": len(candidates),
+                "byInnCount": len(by_inn),
+                "candidateRows": candidate_summaries,
+            }
             return updated_fields, updated_meta, lookup, [reason]
         name = match["fullName"] or match["shortName"] or fields.get("counterpartyName")
         if name:
@@ -239,6 +280,8 @@ class IProClient:
             "inn": match["inn"] or inn, "kpp": match["kpp"] or kpp,
             "innOrg": match["inn"], "kppOrg": match["kpp"],
             "fullNameOrg": match["fullName"], "shortNameOrg": match["shortName"],
+            "httpStatus": response.status_code, "apiCode": api_code,
             "apiRowsCount": len(candidates), "byInnCount": len(by_inn),
+            "candidateRows": candidate_summaries,
         }
         return updated_fields, updated_meta, lookup, warnings

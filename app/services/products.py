@@ -136,6 +136,16 @@ def _header_role(value: Any) -> str | None:
     header = _normalize_header(value)
     if not header:
         return None
+    characteristic_only = bool(
+        re.search(r"показател|параметр|характеристик", header)
+        and not re.search(r"товар|продукц|оборудован|материал|издели|мтр", header)
+        and not re.fullmatch(
+            r"наименование\s+и\s+(?:технические\s+)?характеристики",
+            header,
+        )
+    )
+    if characteristic_only:
+        return None
     if re.search(r"(?:общая\s+)?стоимость(?:\s+позиции)?|сумма|итого|всего", header):
         return "line_total"
     if re.search(
@@ -144,11 +154,18 @@ def _header_role(value: Any) -> str | None:
         header,
     ):
         return "unit_price"
-    if re.search(r"количество|кол во|кол\b", header):
+    if re.fullmatch(
+        r"(?:общее\s+)?(?:количество|кол\s+во|кол)"
+        r"(?:\s+(?:товара|продукции|изделий|единиц))?",
+        header,
+    ):
         return "quantity"
     if re.search(r"единица\s+измерения|ед\s+изм", header):
         return "unit"
-    if re.search(r"наименование|название\s+(?:товара|продукции)|^товар$|предмет\s+закупки", header):
+    if re.search(
+        r"^(?:наименование|название)(?:\s|$)|^товар$|^предмет\s+закупки$",
+        header,
+    ):
         return "product"
     return None
 
@@ -314,7 +331,15 @@ def extract_deterministic_positions(text: str) -> list[TenderPosition]:
             for column, value in cells.items()
             if (role := _header_role(value)) is not None
         }
-        if detected_headers:
+        core_header_roles = set(detected_headers) & {
+            "product",
+            "unit",
+            "quantity",
+            "unit_price",
+            "line_total",
+        }
+        is_header_row = "product" in detected_headers or len(core_header_roles) >= 2
+        if is_header_row:
             for role, (column, label) in detected_headers.items():
                 header_columns[role] = column
                 header_labels[role] = label

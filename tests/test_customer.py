@@ -128,3 +128,53 @@ def test_ipro_multiple_rows_with_same_inn_still_passes(tmp_path: Path) -> None:
     assert lookup["status"] == "matched"
     assert lookup["matchType"] == "inn"
     assert not warnings
+
+
+def test_ipro_not_found_keeps_response_summary_for_diagnostics(tmp_path: Path) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": {"code": 200},
+                "data": {
+                    "rows": [
+                        {
+                            "innOrg": "7700000000",
+                            "kppOrg": "770001001",
+                            "fullNameOrg": "ООО Другая организация",
+                        }
+                    ]
+                },
+            },
+        )
+
+    client = IProClient(
+        Settings(
+            postgres_dsn="postgresql://user:pass@localhost/db",
+            temp_root=tmp_path,
+            ipro_base_url="https://example.test/api/ipro/user/registration_ipro",
+        )
+    )
+    client.client.close()
+    client.client = httpx.Client(
+        base_url="https://example.test/api/ipro/user/registration_ipro/",
+        transport=httpx.MockTransport(handler),
+    )
+    _, _, lookup, warnings = client.lookup({"counterpartyInn": "1234567890"}, {})
+    client.close()
+
+    assert lookup["status"] == "not_found"
+    assert lookup["requestedInn"] == "1234567890"
+    assert lookup["httpStatus"] == 200
+    assert lookup["apiCode"] == 200
+    assert lookup["apiRowsCount"] == 1
+    assert lookup["byInnCount"] == 0
+    assert lookup["candidateRows"] == [
+        {
+            "inn": "7700000000",
+            "kpp": "770001001",
+            "fullName": "ООО Другая организация",
+            "shortName": None,
+        }
+    ]
+    assert warnings

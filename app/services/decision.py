@@ -18,7 +18,7 @@ REASONS = [
     "Коммерческие условия. Отсрочка платежа 90 дней и более",
     "Коммерческие условия. Поставка в удаленные территории",
     "Коммерческие условия. Консигнация / Хранение у Покупателя за счет Поставщика",
-    "Номенклатура. Лот неделимый. Покрытие номенклатуры менее 80%",
+    "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры",
     "Номенклатура. Оборудование 35 кВ и выше",
     "Номенклатура. Частотный привод 6–10 кВ",
     "Номенклатура. Ремкомплект / ЗИП / Продукция по чертежу",
@@ -40,7 +40,9 @@ REASONS = [
 DEADLINE_REASON = "Оргвопросы. На момент согласования менее 3 рабочих дней до подачи заявки"
 DELIVERY_DEADLINE_REASON = "Коммерческие условия. Не проходим по сроку поставки"
 ASSORTMENT_REASON = "Непоставляемый ассортимент"
-INDIVISIBLE_REASON = "Номенклатура. Лот неделимый. Покрытие номенклатуры менее 80%"
+INDIVISIBLE_REASON = (
+    "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры"
+)
 COVERAGE_REASON = INDIVISIBLE_REASON
 PRICE_REASON = "Коммерческие условия. НМЦК менее 1 млн руб."
 ACTUAL_COST_REASON = "Коммерческие условия. НМЦК менее фактической стоимости"
@@ -124,14 +126,20 @@ _CONSIGNMENT_NEGATION_PATTERN = re.compile(
 )
 
 _SUPPLY_WORK_TERM = (
-    r"(?:монтаж[а-яё]*|установк[а-яё]*|пусконаладк[а-яё]*|"
-    r"пуско-наладк[а-яё]*|ввод\s+в\s+эксплуатацию)"
+    r"(?:шеф[-\s]?монтаж[а-яё]*|монтаж[а-яё]*|установк[а-яё]*|"
+    r"пусконаладк[а-яё]*|пуско-наладк[а-яё]*|наладк[а-яё]*|"
+    r"пуск(?:а|у|ом)?|ввод\s+в\s+эксплуатацию)"
 )
 _SUPPLIER_TERM = r"(?:поставщик[а-яё]*|подрядчик[а-яё]*|исполнител[а-яё]*)"
+_SUPPLY_WORK_EXECUTION_VERB = (
+    r"(?:выполн(?:ить|яет|яют)|осуществ(?:ить|ляет|ляют)|произвест(?:и|ёт|ут)|"
+    r"провест(?:и|ёт|ут)|обеспеч(?:ить|ивает|ивают)\s+(?:выполнени[ея]|проведени[ея]))"
+)
 _SUPPLY_WORK_PATTERNS = (
     re.compile(
-        rf"{_SUPPLIER_TERM}\s+(?:обязан[а-яё]*|должен|должна|должно|должны|"
-        rf"выполняет|осуществляет|производит|обеспечивает)[\s\S]{{0,180}}?{_SUPPLY_WORK_TERM}",
+        rf"{_SUPPLIER_TERM}\s+(?:(?:обязан[а-яё]*|должен|должна|должно|должны)"
+        rf"[\s\S]{{0,100}}?)?{_SUPPLY_WORK_EXECUTION_VERB}"
+        rf"[\s\S]{{0,100}}?{_SUPPLY_WORK_TERM}",
         re.IGNORECASE,
     ),
     re.compile(
@@ -158,6 +166,22 @@ _SUPPLY_WORK_PATTERNS = (
         rf"{_SUPPLY_WORK_TERM}",
         re.IGNORECASE,
     ),
+)
+_SUPPLY_WORK_DOCUMENTATION_PATTERN = re.compile(
+    rf"(?:инструкц[а-яё]*|руководств[а-яё]*|документац[а-яё]*|паспорт[а-яё]*|"
+    rf"регламент[а-яё]*|схем[а-яё]*)[\s\S]{{0,120}}?{_SUPPLY_WORK_TERM}|"
+    rf"{_SUPPLY_WORK_TERM}[\s\S]{{0,120}}?"
+    r"(?:инструкц[а-яё]*|руководств[а-яё]*|документац[а-яё]*|паспорт[а-яё]*|"
+    r"регламент[а-яё]*|схем[а-яё]*)",
+    re.IGNORECASE,
+)
+_SUPPLY_WORK_EXPLICIT_EXECUTION_PATTERN = re.compile(
+    rf"{_SUPPLIER_TERM}[\s\S]{{0,120}}?{_SUPPLY_WORK_EXECUTION_VERB}"
+    rf"[\s\S]{{0,100}}?{_SUPPLY_WORK_TERM}|"
+    rf"{_SUPPLY_WORK_TERM}[\s\S]{{0,120}}?"
+    r"(?:выполняется|осуществляется|производится|проводится)\s+"
+    rf"{_SUPPLIER_TERM}",
+    re.IGNORECASE,
 )
 _SUPPLY_WORK_EXCLUSION_PATTERN = re.compile(
     r"(?:эксперт[а-яё]*|экспертиз[а-яё]*|"
@@ -341,6 +365,11 @@ def _find_supply_work_evidence(text: str) -> str | None:
             if _SUPPLY_WORK_NEGATION_PATTERN.search(context):
                 continue
             if _SUPPLY_WORK_CONDITIONAL_PATTERN.search(context):
+                continue
+            if (
+                _SUPPLY_WORK_DOCUMENTATION_PATTERN.search(context)
+                and not _SUPPLY_WORK_EXPLICIT_EXECUTION_PATTERN.search(context)
+            ):
                 continue
             return context
     return None
@@ -572,11 +601,7 @@ def calculate_hard_reasons(
 
     coverage = product_check.get("coveragePercent")
     coverage_number = float(coverage) if isinstance(coverage, (int, float)) else None
-    validation_requires_review = bool(
-        isinstance(product_check.get("validation"), dict)
-        and product_check["validation"].get("requiresManualReview") is True
-    )
-    if product_check.get("hardReject") is True and not validation_requires_review:
+    if product_check.get("hardReject") is True:
         _add(
             reasons,
             COVERAGE_REASON,
@@ -894,10 +919,6 @@ def apply_final_decision(
                 market_research_suppressed
                 and item.reason == MARKET_RESEARCH_REASON
             )
-            and not (
-                validation_requires_review
-                and item.reason == COVERAGE_REASON
-            )
         ),
         key=lambda item: item.priority,
     )
@@ -1093,6 +1114,18 @@ def apply_final_decision(
     if summary:
         note_parts.append(summary)
     reason_origin = "none"
+    unresolved_labels: list[str] = []
+    if validation_requires_review:
+        unresolved = product_validation.get("unresolved", [])
+        for item in unresolved:
+            if not isinstance(item, dict):
+                continue
+            product_label = str(item.get("product") or "").strip()
+            review_reason = str(item.get("reason") or "").strip()
+            if product_label and review_reason:
+                unresolved_labels.append(f"{product_label} — {review_reason}")
+            elif product_label or review_reason:
+                unresolved_labels.append(product_label or review_reason)
 
     if hard:
         status = "Отказано КУ ЦП"
@@ -1115,32 +1148,16 @@ def apply_final_decision(
         )
         if documentation_reason and documentation_reason.evidence:
             note_parts.append(documentation_reason.evidence)
-    elif validation_requires_review:
-        status, reason, confidence = "Загружен Seldon", "Прочее", "low"
-        reason_origin = "product_validation"
-        unresolved = product_validation.get("unresolved", [])
-        unresolved_labels = [
-            str(item.get("product") or item.get("reason") or "").strip()
-            for item in unresolved
-            if isinstance(item, dict)
-        ]
-        unresolved_labels = [item for item in unresolved_labels if item]
-        note_parts.append(
-            "Требуется ручная проверка товарных позиций: аудит обнаружил "
-            "неразрешённые строки или конфликтующие дубли. Автоматическое "
-            "согласование и отказ по покрытию не применены."
-        )
-        if unresolved_labels:
-            note_parts.append("Проверить: " + "; ".join(unresolved_labels[:10]) + ".")
     elif llm_decision and llm_decision.decision == "reject" and llm_primary:
         status, reason, confidence = "Отказано КУ ЦП", llm_primary, llm_decision.confidence
         reason_origin = "llm"
         note_parts.append(llm_decision.note or f"Подтверждён критерий отказа: {llm_primary}.")
     elif counterparty_requires_work:
-        status, reason, confidence = "Проработка контрагента", "Прочее", "medium"
+        status, reason, confidence = "Загружен Seldon", "Прочее", "medium"
         reason_origin = "counterparty"
         note_parts.append(
-            counterparty_lookup.get("reason") or "Контрагент с указанным ИНН не найден в IPro."
+            counterparty_lookup.get("reason")
+            or "Контрагент с указанным ИНН не найден в IPro; требуется ручная проверка."
         )
     elif llm_decision and llm_decision.decision == "reject":
         status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
@@ -1155,6 +1172,15 @@ def apply_final_decision(
         reason_origin = "fallback"
         note_parts.append("LLM решения по статусу не вернул валидный JSON; обязательные критерии не сработали.")
 
+    if validation_requires_review:
+        note_parts.append(
+            "Товарный аудит обнаружил неразрешённые строки или конфликтующие дубли. "
+            "Информация сохранена для проверки и не блокирует расчёт покрытия "
+            "или итоговое решение по причинам статуса."
+        )
+        if unresolved_labels:
+            note_parts.append("Проверить: " + "; ".join(unresolved_labels[:10]) + ".")
+
     counterparty_advisory_only = (
         status == "Отказано КУ ЦП" and counterparty_requires_work
     )
@@ -1165,7 +1191,7 @@ def apply_final_decision(
         )
         note_parts.append(
             "Дополнительная информация по контрагенту: "
-            f"{counterparty_evidence} Статус «Проработка контрагента» не применяется, "
+            f"{counterparty_evidence} Ручная проверка контрагента не меняет статус, "
             "поскольку тендер уже имеет подтверждённую причину отказа."
         )
 
@@ -1364,8 +1390,10 @@ def build_decision_prompt(
   монтаж, установку, пусконаладку или ввод в эксплуатацию как часть предмета/стоимости/объёма поставки.
 - Не считать поставкой с работами монтаж/демонтаж товара только для экспертизы, проверки или контроля
   качества, гарантийного случая, рассмотрения претензии, дефекта либо устранения недостатков.
-- Упоминание документации, руководства или инструкции по монтажу не означает выполнение монтажа
-  поставщиком. Включение расходов на монтаж/установку в цену или НМЦ без прямой обязанности выполнить
+- Формулировки «предоставить инструкцию/руководство по монтажу» и «предоставить документацию
+  по наладке и пуску» являются отрицательным evidence для причины «{SUPPLY_WORK_REASON}»:
+  они подтверждают передачу документа, а не обязанность поставщика выполнить работы.
+- Включение расходов на монтаж/установку в цену или НМЦ без прямой обязанности поставщика выполнить
   эти работы также не подтверждает причину «{SUPPLY_WORK_REASON}».
 - Условный шаблон «если монтаж осуществляется поставщиком» и заголовок раздела без прямой обязанности
   выполнить работы не подтверждают причину «{SUPPLY_WORK_REASON}».

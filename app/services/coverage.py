@@ -7,7 +7,7 @@ from app.services.normalization import parse_number
 
 
 COVERAGE_REJECTION_REASON = (
-    "Номенклатура. Лот неделимый. Покрытие номенклатуры менее 80%"
+    "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры"
 )
 
 

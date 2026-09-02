@@ -56,6 +56,23 @@ def test_excel_like_position_extraction_preserves_quantity() -> None:
     assert positions[0].unit.lower() == "штука"
 
 
+def test_characteristic_labels_do_not_replace_excel_header_columns() -> None:
+    positions = extract_deterministic_positions(
+        "\n".join(
+            (
+                "Лист: Спецификация",
+                "Строка 1: A: Наименование товара | B: Ед. изм. | C: Количество",
+                "Строка 2: A: Выключатель автоматический | B: шт | C: 10 | "
+                "D: Количество полюсов | E: Наименование показателя",
+            )
+        )
+    )
+
+    assert [(item.product, item.quantity, item.unit) for item in positions] == [
+        ("Выключатель автоматический", 10.0, "шт")
+    ]
+
+
 def test_merge_preserves_deterministic_document_price_on_llm_position() -> None:
     deterministic = [
         TenderPosition(

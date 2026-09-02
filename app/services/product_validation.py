@@ -26,9 +26,35 @@ _STANDALONE_SERVICE_PATTERN = re.compile(
     r"аналог\s+допуска(?:ется|ются)|без\s+аналогов)\s*[.!;:]?\s*$",
     re.IGNORECASE,
 )
+_STANDALONE_HEADER_PATTERN = re.compile(
+    r"^\s*(?:наименование(?:\s+(?:товара|продукции|изделия|показателя))?|"
+    r"технические\s+характеристики|характеристики|описание|требования|"
+    r"значение(?:\s+показателя)?|наименование\s+показателя|параметр|показатель|"
+    r"комплектность|компоненты|состав\s+комплекта|преимущество)\s*[.!;:]?\s*$",
+    re.IGNORECASE,
+)
+_STANDALONE_CHARACTERISTIC_PATTERN = re.compile(
+    r"^\s*(?:(?:количество|число)\s+(?:полюсов|фаз|контактов|входов|выходов|"
+    r"жил|модулей|секций|каналов)|(?:тип|вид|класс|категория|степень|"
+    r"напряжение|ток|мощность|частота|габариты|материал|цвет|исполнение|"
+    r"условное\s+обозначение)(?:\s+\S+){0,5})\s*[.!;:]?\s*$",
+    re.IGNORECASE,
+)
+_NATIONAL_REGIME_CELL_PATTERN = re.compile(
+    r"^\s*(?=.*\b(?:преимущество|ограничение|запрет)\b)"
+    r"(?=.*\b(?:установлен[а-яё]*|не\s+установлен[а-яё]*|предоставля[а-яё]*|"
+    r"не\s+предоставля[а-яё]*)\b).{3,500}$",
+    re.IGNORECASE,
+)
 _MODEL_TOKEN_PATTERN = re.compile(
     r"\b(?=[a-zа-яё0-9./-]*[a-zа-яё])(?=[a-zа-яё0-9./-]*\d)"
     r"[a-zа-яё0-9]+(?:[-./][a-zа-яё0-9]+)+\b",
+    re.IGNORECASE,
+)
+
+
+_COMPACT_MODEL_TOKEN_PATTERN = re.compile(
+    r"(?<![a-zа-яё0-9])[a-zа-яё0-9]{5,}(?![a-zа-яё0-9])",
     re.IGNORECASE,
 )
 
@@ -39,6 +65,19 @@ def _clean(value: Any) -> str:
 
 def _missing(value: Any) -> bool:
     return value is None or value == ""
+
+
+def _deterministic_non_product_role(value: Any) -> str | None:
+    text = _clean(value)
+    if _STANDALONE_SERVICE_PATTERN.fullmatch(text):
+        return "service"
+    if _STANDALONE_HEADER_PATTERN.fullmatch(text):
+        return "header"
+    if _STANDALONE_CHARACTERISTIC_PATTERN.fullmatch(text):
+        return "characteristic"
+    if _NATIONAL_REGIME_CELL_PATTERN.fullmatch(text):
+        return "service"
+    return None
 
 
 def _identity(value: Any) -> str:
@@ -53,7 +92,18 @@ def _identity(value: Any) -> str:
 
 def _model_tokens(position: TenderPosition) -> set[str]:
     text = " ".join((position.product, position.productQuery or "", position.article))
-    return {match.group(0).casefold() for match in _MODEL_TOKEN_PATTERN.finditer(text)}
+    tokens = {
+        match.group(0).casefold()
+        for match in _MODEL_TOKEN_PATTERN.finditer(text)
+    }
+    tokens.update(
+        token
+        for match in _COMPACT_MODEL_TOKEN_PATTERN.finditer(text)
+        if (token := match.group(0).casefold())
+        and sum(character.isalpha() for character in token) >= 2
+        and sum(character.isdigit() for character in token) >= 2
+    )
+    return tokens
 
 
 def _quantity_compatible(left: TenderPosition, right: TenderPosition) -> bool:
@@ -322,11 +372,10 @@ def apply_product_candidate_audit(
         if index not in removed_indexes
     ]
     if not validated:
-        validated = positions
-        removed_indexes.clear()
-        require_review(1, "Аудит исключил все позиции; исходный список восстановлен")
+        require_review(1, "Аудит исключил все позиции; требуется проверить извлечение товаров")
         warnings.append(
-            "Аудит товарных кандидатов исключил все позиции; исходный список сохранён для проверки."
+            "Аудит товарных кандидатов исключил все позиции; ложные строки не переданы "
+            "в поиск по каталогу и расчёт покрытия."
         )
 
     debug.update(
@@ -342,7 +391,7 @@ def apply_product_candidate_audit(
     if unresolved:
         warnings.append(
             "Аудит товарных позиций оставил неразрешённые случаи; "
-            "автоматическое решение по покрытию заблокировано."
+            "они сохранены в диагностике, расчёт покрытия продолжен."
         )
     return validated, list(dict.fromkeys(warnings)), debug
 
@@ -358,14 +407,18 @@ def validate_product_candidates(
     retained: list[TenderPosition] = []
     deterministic_rejections: list[dict[str, Any]] = []
     for index, position in enumerate(positions, start=1):
-        if _STANDALONE_SERVICE_PATTERN.fullmatch(position.product):
+        rejected_role = _deterministic_non_product_role(position.product)
+        if rejected_role:
             deterministic_rejections.append(
                 {
                     "positionIndex": index,
                     "product": position.product,
-                    "role": "service",
+                    "role": rejected_role,
                     "confidence": 1.0,
-                    "rationale": "Самостоятельная служебная фраза, а не наименование товара",
+                    "rationale": (
+                        "Заголовок, характеристика или служебная ячейка, "
+                        "а не наименование товара"
+                    ),
                 }
             )
         else:
@@ -380,7 +433,9 @@ def validate_product_candidates(
             {
                 "applied": bool(deterministic_rejections),
                 "requiresManualReview": True,
+                "validatedPositionCount": 0,
                 "rejectedPositions": deterministic_rejections,
+                "rejectedPositionCount": len(deterministic_rejections),
                 "unresolved": [
                     {
                         "positionIndex": 1,
@@ -390,7 +445,11 @@ def validate_product_candidates(
                 ],
             }
         )
-        return positions, warnings, debug
+        warnings.append(
+            "После детерминированной проверки не осталось товарных позиций; "
+            "ложные строки не переданы в поиск по каталогу и расчёт покрытия."
+        )
+        return [], warnings, debug
 
     try:
         response = llm.audit_product_candidates(retained)
@@ -410,7 +469,8 @@ def validate_product_candidates(
         )
         warnings.append(
             "Обязательный аудит товарных кандидатов не выполнен; "
-            f"автоматическое решение заблокировано: {type(exc).__name__}: {exc}"
+            "исходные позиции сохранены, расчёт покрытия продолжен: "
+            f"{type(exc).__name__}: {exc}"
         )
         return retained, warnings, debug
 

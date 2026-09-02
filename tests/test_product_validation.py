@@ -85,6 +85,40 @@ def test_contacts_repeated_with_and_without_quantity_are_merged() -> None:
     assert debug["requiresManualReview"] is False
 
 
+def test_compact_model_code_confirms_short_and_long_name_duplicate() -> None:
+    positions = [
+        _position("Портативный анализатор спектра FPL1014", quantity=None),
+        _position(
+            "Анализатор спектра Rohde & Schwarz FPL1014 для испытаний ЭМС",
+            quantity=2,
+        ),
+    ]
+    response = ProductCandidateAuditResponse(
+        assignments=[
+            ProductCandidateAssignment(
+                positionIndex=1,
+                role="purchase_item",
+                confidence=0.98,
+            ),
+            ProductCandidateAssignment(
+                positionIndex=2,
+                role="duplicate",
+                duplicateOf=1,
+                confidence=0.98,
+                rationale="Одна модель FPL1014 приведена коротким и полным названием",
+            ),
+        ]
+    )
+
+    validated, _, debug = apply_product_candidate_audit(positions, response)
+
+    assert len(validated) == 1
+    assert validated[0].product == "Портативный анализатор спектра FPL1014"
+    assert validated[0].quantity == 2
+    assert debug["duplicateCount"] == 1
+    assert debug["requiresManualReview"] is False
+
+
 def test_conflicting_duplicate_quantities_require_manual_review() -> None:
     positions = [
         _position("Кабель АВБШв-1 4х120", quantity=1642, unit="м"),
@@ -111,7 +145,7 @@ def test_conflicting_duplicate_quantities_require_manual_review() -> None:
     assert len(validated) == 2
     assert debug["requiresManualReview"] is True
     assert "конфликтующие количества" in debug["unresolved"][0]["reason"]
-    assert any("решение по покрытию заблокировано" in item for item in warnings)
+    assert any("расчёт покрытия продолжен" in item for item in warnings)
 
 
 def test_ktp_component_is_removed_only_with_parent_context() -> None:
@@ -252,6 +286,90 @@ def test_standalone_analogs_phrase_is_removed_before_llm_audit() -> None:
     assert any("служебная строка" in item for item in warnings)
 
 
+def test_headers_characteristics_and_preference_cells_are_removed_before_audit() -> None:
+    class AuditLlm:
+        seen: list[TenderPosition] = []
+
+        def audit_product_candidates(
+            self,
+            positions: list[TenderPosition],
+        ) -> ProductCandidateAuditResponse:
+            self.seen = positions
+            return ProductCandidateAuditResponse(
+                assignments=[
+                    ProductCandidateAssignment(
+                        positionIndex=1,
+                        role="purchase_item",
+                        confidence=0.99,
+                    )
+                ]
+            )
+
+    llm = AuditLlm()
+    validated, _, debug = validate_product_candidates(
+        llm,  # type: ignore[arg-type]
+        [
+            _position("Технические характеристики"),
+            _position("Количество полюсов", quantity=3),
+            _position("Преимущество"),
+            _position("Ограничение установлено; преимущество не установлено"),
+            _position("Выключатель автоматический", quantity=10),
+        ],
+    )
+
+    assert [item.product for item in llm.seen] == ["Выключатель автоматический"]
+    assert [item.product for item in validated] == ["Выключатель автоматический"]
+    assert debug["rejectedPositionCount"] == 4
+
+
+def test_only_non_product_cells_do_not_return_to_coverage_denominator() -> None:
+    class AuditMustNotRun:
+        def audit_product_candidates(
+            self,
+            positions: list[TenderPosition],
+        ) -> ProductCandidateAuditResponse:
+            raise AssertionError("LLM-аудит не должен запускаться без товарных кандидатов")
+
+    validated, warnings, debug = validate_product_candidates(
+        AuditMustNotRun(),  # type: ignore[arg-type]
+        [
+            _position("Технические характеристики"),
+            _position("Количество полюсов"),
+            _position("Преимущество"),
+        ],
+    )
+
+    assert validated == []
+    assert debug["requiresManualReview"] is True
+    assert debug["rejectedPositionCount"] == 3
+    assert any("не переданы" in item for item in warnings)
+
+
+def test_llm_removing_every_position_does_not_restore_false_products() -> None:
+    positions = [_position("Адрес поставки"), _position("Компонент комплекта")]
+    response = ProductCandidateAuditResponse(
+        assignments=[
+            ProductCandidateAssignment(
+                positionIndex=1,
+                role="address",
+                confidence=0.99,
+            ),
+            ProductCandidateAssignment(
+                positionIndex=2,
+                role="header",
+                confidence=0.99,
+            ),
+        ]
+    )
+
+    validated, warnings, debug = apply_product_candidate_audit(positions, response)
+
+    assert validated == []
+    assert debug["requiresManualReview"] is True
+    assert debug["rejectedPositionCount"] == 2
+    assert any("не переданы" in item for item in warnings)
+
+
 def test_llm_audit_failure_blocks_automatic_decision_without_dropping_positions() -> None:
     class BrokenLlm:
         def audit_product_candidates(
@@ -268,4 +386,4 @@ def test_llm_audit_failure_blocks_automatic_decision_without_dropping_positions(
 
     assert validated == positions
     assert debug["requiresManualReview"] is True
-    assert any("автоматическое решение заблокировано" in item for item in warnings)
+    assert any("расчёт покрытия продолжен" in item for item in warnings)
