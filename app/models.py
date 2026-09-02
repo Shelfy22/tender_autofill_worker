@@ -213,6 +213,12 @@ class TenderPosition(BaseModel):
     documentPriceEvidence: str = ""
     documentPriceSource: DocumentPriceSource | None = None
     sourceReference: ProductSourceReference | None = None
+    sourceCells: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("sourceCells", mode="before")
+    @classmethod
+    def normalize_source_cells(cls, value: Any) -> dict[str, str]:
+        return SpreadsheetRow(row=1, cells=value).cells
 
     @field_validator("documentPriceSource", mode="before")
     @classmethod
@@ -396,6 +402,7 @@ class ProductMatchItem(BaseModel):
     documentPriceEvidence: str = ""
     documentPriceSource: DocumentPriceSource | None = None
     sourceReference: ProductSourceReference | None = None
+    sourceCells: dict[str, str] = Field(default_factory=dict)
     match: ProductMatch
 
     @field_validator("documentUnitPriceRub", "documentLineTotalRub", mode="before")
@@ -462,6 +469,41 @@ class NormalizedJob(BaseModel):
     attempt: int = 1
 
 
+class SpreadsheetRow(BaseModel):
+    row: int = Field(ge=1)
+    cells: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("cells", mode="before")
+    @classmethod
+    def normalize_cells(cls, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, str] = {}
+        for raw_column, raw_value in value.items():
+            column = str(raw_column or "").strip().upper()
+            if not column or len(column) > 3 or not column.isalpha():
+                continue
+            text = (
+                str(raw_value or "")
+                .replace(chr(13), " ")
+                .replace(chr(10), " ")
+                .strip()
+            )
+            if text:
+                normalized[column] = text[:4000]
+        return normalized
+
+
+class SpreadsheetTable(BaseModel):
+    fileName: str = ""
+    sheet: str
+    headerRows: list[int] = Field(default_factory=list)
+    headerMap: dict[str, str] = Field(default_factory=dict)
+    headerLabels: dict[str, str] = Field(default_factory=dict)
+    rows: list[SpreadsheetRow] = Field(default_factory=list)
+    parserWarnings: list[str] = Field(default_factory=list)
+
+
 class ParsedDocument(BaseModel):
     documentIndex: int
     documentUrl: str = ""
@@ -481,6 +523,7 @@ class ParsedDocument(BaseModel):
     parserStatus: str = "not_parsed"
     parserWarning: str = ""
     parserError: str = ""
+    spreadsheetTables: list[SpreadsheetTable] = Field(default_factory=list)
 
 
 class TenderResult(BaseModel):

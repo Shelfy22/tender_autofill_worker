@@ -75,6 +75,51 @@ _DRAWING_PRODUCT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_REQUIRED_ZIP_TERM = (
+    r"(?:зип\b|ремкомплект[а-яё]*\b|ремонтн[а-яё]*\s+комплект[а-яё]*\b|"
+    r"комплект[а-яё]*\s+запасн[а-яё]*\s+част[а-яё]*\b|"
+    r"запасн[а-яё]*\s+част[а-яё]*\b)"
+)
+_REQUIRED_ZIP_SUPPLY_PATTERNS = (
+    re.compile(
+        rf"(?:комплектност[а-яё]*|комплект\s+поставк[а-яё]*|состав\s+поставк[а-яё]*|"
+        rf"комплекту[ею]тс[яь])[\s\S]{{0,500}}?{_REQUIRED_ZIP_TERM}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_REQUIRED_ZIP_TERM}[\s\S]{{0,260}}?"
+        r"(?:входит|включает|содержит|включен[а-яё]*|предусмотрен[а-яё]*|поставля[ею]тс[яь]|"
+        r"комплекту[ею]тс[яь]|количеств[а-яё]*|\d+\s*(?:шт|комплект[а-яё]*))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:должен|должна|должно|должны|обязан[а-яё]*|требуется)"
+        r"[\s\S]{0,300}?(?:поставить|предоставить|передать|включать|содержать|"
+        rf"комплектовать)[\s\S]{{0,220}}?{_REQUIRED_ZIP_TERM}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{_REQUIRED_ZIP_TERM}\s*[:\-–—][\s\S]{{0,260}}?"
+        r"(?:\d+\s*(?:шт|комплект[а-яё]*)|предохранител[а-яё]*|"
+        r"наконечник[а-яё]*|фильтр[а-яё]*|ремн[а-яё]*|детал[а-яё]*)",
+        re.IGNORECASE,
+    ),
+)
+_ZIP_NON_MANDATORY_PATTERN = re.compile(
+    r"(?:при\s+необходимости|по\s+запросу|по\s+согласованию|опциональн[а-яё]*|"
+    r"по\s+отдельн[а-яё]*\s+заказ[а-яё]*|за\s+отдельн[а-яё]*\s+плат[а-яё]*|"
+    r"не\s+(?:входит|включен[а-яё]*|требуется|поставля[ею]тс[яь])|"
+    r"может\s+(?:быть\s+)?(?:поставлен[а-яё]*|включен[а-яё]*|"
+    r"скомплектован[а-яё]*))",
+    re.IGNORECASE,
+)
+_ZIP_DOCUMENTATION_ONLY_PATTERN = re.compile(
+    rf"(?:инструкц[а-яё]*|руководств[а-яё]*|документац[а-яё]*|паспорт[а-яё]*)"
+    rf"[\s\S]{{0,140}}?{_REQUIRED_ZIP_TERM}|"
+    rf"{_REQUIRED_ZIP_TERM}[\s\S]{{0,140}}?"
+    r"(?:инструкц[а-яё]*|руководств[а-яё]*|документац[а-яё]*|паспорт[а-яё]*)",
+    re.IGNORECASE,
+)
 _REMOTE_TERRITORY_PATTERN = re.compile(
     r"\b(?:республик[а-яё]*\s+саха(?:\s*\(якутия\))?|якут(?:ия|ск[а-яё]*)|"
     r"дагестан(?:ск[а-яё]*)?|калининград(?:ск[а-яё]*)?)\b",
@@ -173,6 +218,18 @@ _SUPPLY_WORK_DOCUMENTATION_PATTERN = re.compile(
     rf"{_SUPPLY_WORK_TERM}[\s\S]{{0,120}}?"
     r"(?:инструкц[а-яё]*|руководств[а-яё]*|документац[а-яё]*|паспорт[а-яё]*|"
     r"регламент[а-яё]*|схем[а-яё]*)",
+    re.IGNORECASE,
+)
+_SUPPLY_WORK_DOCUMENT_TRANSFER_PATTERN = re.compile(
+    rf"{_SUPPLIER_TERM}[\s\S]{{0,100}}?"
+    r"(?:предоставить|предоставляет|передать|передает|приложить|прилагает)"
+    r"[\s\S]{0,160}?(?:инструкц[а-яё]*|руководств[а-яё]*|документац[а-яё]*|"
+    r"паспорт[а-яё]*|регламент[а-яё]*|схем[а-яё]*)"
+    rf"[\s\S]{{0,220}}?{_SUPPLY_WORK_TERM}|"
+    r"(?:инструкц[а-яё]*|руководств[а-яё]*|документац[а-яё]*|"
+    r"паспорт[а-яё]*|регламент[а-яё]*|схем[а-яё]*)"
+    rf"[\s\S]{{0,180}}?{_SUPPLY_WORK_TERM}[\s\S]{{0,120}}?"
+    r"(?:предоставить|предоставляет|передать|передает|приложить|прилагает)",
     re.IGNORECASE,
 )
 _SUPPLY_WORK_EXPLICIT_EXECUTION_PATTERN = re.compile(
@@ -366,9 +423,17 @@ def _find_supply_work_evidence(text: str) -> str | None:
                 continue
             if _SUPPLY_WORK_CONDITIONAL_PATTERN.search(context):
                 continue
+            explicit_execution = _SUPPLY_WORK_EXPLICIT_EXECUTION_PATTERN.search(
+                context
+            )
+            if (
+                _SUPPLY_WORK_DOCUMENT_TRANSFER_PATTERN.search(context)
+                and not explicit_execution
+            ):
+                continue
             if (
                 _SUPPLY_WORK_DOCUMENTATION_PATTERN.search(context)
-                and not _SUPPLY_WORK_EXPLICIT_EXECUTION_PATTERN.search(context)
+                and not explicit_execution
             ):
                 continue
             return context
@@ -430,6 +495,23 @@ def _find_remote_delivery_evidence(
     return None
 
 
+def _find_required_zip_supply_evidence(text: str) -> str | None:
+    """Return mandatory physical ZIP included in the supply, not optional/document-only mentions."""
+    source = text or ""
+    for pattern in _REQUIRED_ZIP_SUPPLY_PATTERNS:
+        for match in pattern.finditer(source):
+            context = _work_context(source, match, maximum_length=1400)
+            if _ZIP_NON_MANDATORY_PATTERN.search(context):
+                continue
+            if (
+                _ZIP_DOCUMENTATION_ONLY_PATTERN.search(context)
+                and not _REQUIRED_ZIP_SUPPLY_PATTERNS[3].search(context)
+            ):
+                continue
+            return context[:1200]
+    return None
+
+
 def _find_repair_kit_product_evidence(product_check: dict[str, Any]) -> str | None:
     details = product_check.get("details")
     if not isinstance(details, list):
@@ -467,6 +549,13 @@ def _find_repair_kit_product_evidence(product_check: dict[str, Any]) -> str | No
             " ",
             str(detail.get("sourceRequirements") or ""),
         ).strip()
+        required_zip_evidence = _find_required_zip_supply_evidence(requirements)
+        if required_zip_evidence:
+            return (
+                f"Позиция {position_index}, обязательный комплект поставки: "
+                f"{required_zip_evidence[:900]}"
+            )
+
         drawing_match = _DRAWING_PRODUCT_PATTERN.search(requirements)
         if drawing_match:
             evidence = _snippet(requirements, drawing_match, radius=260)
@@ -713,7 +802,10 @@ def calculate_hard_reasons(
     if consignment_evidence:
         _add(reasons, CONSIGNMENT_REASON, consignment_evidence, 45)
 
-    repair_kit_evidence = _find_repair_kit_product_evidence(product_check)
+    repair_kit_evidence = (
+        _find_repair_kit_product_evidence(product_check)
+        or _find_required_zip_supply_evidence(all_text)
+    )
     if repair_kit_evidence:
         _add(reasons, REPAIR_KIT_REASON, repair_kit_evidence, 65)
 
@@ -846,11 +938,12 @@ def calculate_hard_reasons(
         },
         "repairKitCheck": {
             "source": (
-                "productCheck.details.sourceProduct/productQuery/sourceRequirements"
+                "productCheck.details.sourceProduct/productQuery/sourceRequirements "
+                "/ mandatory ZIP evidence in combined document text"
             ),
             "scope": (
-                "ZIP/repair kit in product subject; drawing/sketch/layout "
-                "in product subject or requirements"
+                "ZIP/repair kit as product or mandatory physical supply component; "
+                "drawing/sketch/layout in product subject or requirements"
             ),
             "evidence": repair_kit_evidence,
             "triggered": repair_kit_evidence is not None,
@@ -910,7 +1003,6 @@ def apply_final_decision(
         isinstance(product_validation, dict)
         and product_validation.get("requiresManualReview") is True
     )
-    confirmed_repair_kit_evidence = _find_repair_kit_product_evidence(product_check)
     hard = sorted(
         (
             item
@@ -922,6 +1014,25 @@ def apply_final_decision(
         ),
         key=lambda item: item.priority,
     )
+    confirmed_repair_kit_evidence = _find_repair_kit_product_evidence(product_check)
+    if confirmed_repair_kit_evidence is None:
+        confirmed_repair_kit_evidence = next(
+            (
+                item.evidence
+                for item in hard
+                if item.reason == REPAIR_KIT_REASON
+            ),
+            None,
+        )
+    if confirmed_repair_kit_evidence is None and llm_decision:
+        for detected_reason in llm_decision.detectedReasons:
+            if detected_reason.reason != REPAIR_KIT_REASON:
+                continue
+            confirmed_repair_kit_evidence = _find_required_zip_supply_evidence(
+                detected_reason.evidence
+            )
+            if confirmed_repair_kit_evidence:
+                break
     confirmed_consignment_evidence = next(
         (
             item.evidence
@@ -1407,12 +1518,13 @@ def build_decision_prompt(
   либо заранее предусмотренного хранения у покупателя до реализации, использования, выборки или оплаты.
 - Не считать консигнацией ответственное/временное хранение вследствие отказа от приёмки, возврата,
   замены, дефекта, рекламации, претензии, отсутствия документов, экспертизы или проверки качества.
-- Причина «{REPAIR_KIT_REASON}» допустима только тогда, когда сама извлечённая товарная позиция
-  является ЗИП, ремкомплектом, запасной частью или продукцией, изготавливаемой по чертежу,
-  эскизу или макету заказчика. Для продукции по чертежу/эскизу/макету проверяй также
-  sourceRequirements именно этой товарной позиции.
-- Не считать ЗИП/ремкомплектом основной товар, если ЗИП, сменные наконечники, предохранители
-  или запасные части лишь входят в его комплектность/комплект поставки либо прилагаются к нему.
+- Причина «{REPAIR_KIT_REASON}» допустима, когда сама товарная позиция является ЗИП,
+  ремкомплектом или запасной частью, а также когда обязательный физический ЗИП/ремкомплект/
+  запасные части входят в комплектность, комплект или состав поставки основного оборудования.
+  Для продукции по чертежу/эскизу/макету проверяй также sourceRequirements позиции.
+- Не считать обязательным ЗИП необязательные/опциональные комплекты «по запросу»,
+  «при необходимости», «по отдельному заказу», а также только документацию, инструкцию,
+  паспорт или руководство по ЗИП без обязанности поставить сам физический комплект.
 - Причина «{REMOTE_TERRITORY_REASON}» полностью детерминирована и недоступна LLM.
   Проверяется только фактическое место/адрес поставки или грузополучатель. Регион регистрации,
   деятельности или нахождения заказчика/организатора сам по себе не подтверждает место поставки.

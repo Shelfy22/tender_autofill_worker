@@ -174,6 +174,7 @@ def _merge_duplicate(target: TenderPosition, duplicate: TenderPosition) -> Tende
         "documentPriceEvidence",
         "documentPriceSource",
         "sourceReference",
+        "sourceCells",
     ):
         if _missing(getattr(target, field)) and not _missing(getattr(duplicate, field)):
             updates[field] = getattr(duplicate, field)

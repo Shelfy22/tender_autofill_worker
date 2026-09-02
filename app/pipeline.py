@@ -208,9 +208,17 @@ class TenderPipeline:
                 "Детерминированное извлечение товарных позиций из Seldon purchase",
                 lambda: extract_seldon_positions(job.seldon_purchase),
             )
+            spreadsheet_tables = [
+                table
+                for document in parsed_documents
+                for table in document.spreadsheetTables
+            ]
             deterministic_positions = self._run_stage(
                 "Детерминированное извлечение товарных позиций из Excel",
-                lambda: extract_deterministic_positions(combined_text),
+                lambda: extract_deterministic_positions(
+                    combined_text,
+                    spreadsheet_tables,
+                ),
             )
             llm_positions = self._run_stage(
                 "AI Agent - Extract Tender Positions",

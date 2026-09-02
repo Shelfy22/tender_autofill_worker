@@ -1215,7 +1215,7 @@
                   },
                   {
                       "parameters":  {
-                                         "jsCode":  "\nconst items = $input.all();\nconst out = [];\n\nfor (let index = 0; index \u003c items.length; index++) {\n  const item = items[index];\n  const j = item.json || {};\n  let normalize = {};\n  try { normalize = $(\u0027Normalize Input2\u0027).first().json || {}; } catch {}\n\n  const logs = [...(j.logs || [])];\n  const warnings = [...(j.warnings || [])];\n  const fileName = j.documentFileName || j.fileName || `document_${index + 1}.pdf`;\n  const model = j.openRouterOcrModel || normalize.openRouterOcrModel || \u0027google/gemini-2.5-flash\u0027;\n  const pdfEngine = j.openRouterPdfEngine || normalize.openRouterPdfEngine || \u0027mistral-ocr\u0027;\n\n  let base64Pdf = \u0027\u0027;\n  let binaryReadError = \u0027\u0027;\n\n  try {\n    const buffer = await this.helpers.getBinaryDataBuffer(index, \u0027data\u0027);\n    base64Pdf = buffer.toString(\u0027base64\u0027);\n  } catch (error) {\n    binaryReadError = error.message || String(error);\n    base64Pdf = item.binary?.data?.data || \u0027\u0027;\n  }\n\n  if (!base64Pdf) {\n    warnings.push(`${fileName}: PDF не дал текст. Возможно, это скан — нужен OCR, но не удалось прочитать binary PDF для отправки в OpenRouter.`);\n  }\n\n  const pdfDataUrl = base64Pdf ? `data:application/pdf;base64,${base64Pdf}` : \u0027\u0027;\n\n  const openRouterOcrBody = {\n    model,\n    messages: [\n      {\n        role: \u0027system\u0027,\n        content: \u0027Ты OCR-модуль для тендерных документов. Извлеки весь текст из PDF. Верни только распознанный текст без markdown, без пояснений и без JSON. Сохраняй таблицы построчно, насколько возможно.\u0027\n      },\n      {\n        role: \u0027user\u0027,\n        content: [\n          {\n            type: \u0027text\u0027,\n            text: \u0027Распознай весь текст из этого PDF-документа. Если это скан или таблицы, сохрани строки, заголовки и числовые значения. Верни только текст документа.\u0027\n          },\n          {\n            type: \u0027file\u0027,\n            file: {\n              filename: fileName,\n              file_data: pdfDataUrl\n            }\n          }\n        ]\n      }\n    ],\n    plugins: [\n      {\n        id: \u0027file-parser\u0027,\n        pdf: {\n          engine: pdfEngine\n        }\n      }\n    ],\n    temperature: 0\n  };\n\n  logs.push({\n    time: new Date().toISOString(),\n    step: \u0027Подготовка OpenRouter OCR\u0027,\n    status: base64Pdf ? \u0027ok\u0027 : \u0027warning\u0027,\n    details: base64Pdf\n      ? `${fileName}: PDF не дал текст, отправляем в OpenRouter OCR (${model}, engine=${pdfEngine})`\n      : `${fileName}: binary PDF не прочитан для OpenRouter OCR. ${binaryReadError}`\n  });\n\n  out.push({\n    json: {\n      ...j,\n      openRouterOcrModel: model,\n      openRouterPdfEngine: pdfEngine,\n      openRouterOcrBody,\n      openRouterPdfBase64Length: base64Pdf.length,\n      openRouterOcrBinaryReadError: binaryReadError,\n      logs,\n      warnings\n    },\n    binary: item.binary\n  });\n}\n\nreturn out;\n"
+                                         "jsCode":  "\nconst items = $input.all();\nconst out = [];\n\nfor (let index = 0; index \u003c items.length; index++) {\n  const item = items[index];\n  const j = item.json || {};\n  let normalize = {};\n  try { normalize = $(\u0027Normalize Input2\u0027).first().json || {}; } catch {}\n\n  const logs = [...(j.logs || [])];\n  const warnings = [...(j.warnings || [])];\n  const fileName = j.documentFileName || j.fileName || `document_${index + 1}.pdf`;\n  const model = j.openRouterOcrModel || normalize.openRouterOcrModel || \u0027deepseek/deepseek-v4-flash-0731\u0027;\n  const pdfEngine = j.openRouterPdfEngine || normalize.openRouterPdfEngine || \u0027mistral-ocr\u0027;\n\n  let base64Pdf = \u0027\u0027;\n  let binaryReadError = \u0027\u0027;\n\n  try {\n    const buffer = await this.helpers.getBinaryDataBuffer(index, \u0027data\u0027);\n    base64Pdf = buffer.toString(\u0027base64\u0027);\n  } catch (error) {\n    binaryReadError = error.message || String(error);\n    base64Pdf = item.binary?.data?.data || \u0027\u0027;\n  }\n\n  if (!base64Pdf) {\n    warnings.push(`${fileName}: PDF не дал текст. Возможно, это скан — нужен OCR, но не удалось прочитать binary PDF для отправки в OpenRouter.`);\n  }\n\n  const pdfDataUrl = base64Pdf ? `data:application/pdf;base64,${base64Pdf}` : \u0027\u0027;\n\n  const openRouterOcrBody = {\n    model,\n    messages: [\n      {\n        role: \u0027system\u0027,\n        content: \u0027Ты OCR-модуль для тендерных документов. Извлеки весь текст из PDF. Верни только распознанный текст без markdown, без пояснений и без JSON. Сохраняй таблицы построчно, насколько возможно.\u0027\n      },\n      {\n        role: \u0027user\u0027,\n        content: [\n          {\n            type: \u0027text\u0027,\n            text: \u0027Распознай весь текст из этого PDF-документа. Если это скан или таблицы, сохрани строки, заголовки и числовые значения. Верни только текст документа.\u0027\n          },\n          {\n            type: \u0027file\u0027,\n            file: {\n              filename: fileName,\n              file_data: pdfDataUrl\n            }\n          }\n        ]\n      }\n    ],\n    plugins: [\n      {\n        id: \u0027file-parser\u0027,\n        pdf: {\n          engine: pdfEngine\n        }\n      }\n    ],\n    temperature: 0\n  };\n\n  logs.push({\n    time: new Date().toISOString(),\n    step: \u0027Подготовка OpenRouter OCR\u0027,\n    status: base64Pdf ? \u0027ok\u0027 : \u0027warning\u0027,\n    details: base64Pdf\n      ? `${fileName}: PDF не дал текст, отправляем в OpenRouter OCR (${model}, engine=${pdfEngine})`\n      : `${fileName}: binary PDF не прочитан для OpenRouter OCR. ${binaryReadError}`\n  });\n\n  out.push({\n    json: {\n      ...j,\n      openRouterOcrModel: model,\n      openRouterPdfEngine: pdfEngine,\n      openRouterOcrBody,\n      openRouterPdfBase64Length: base64Pdf.length,\n      openRouterOcrBinaryReadError: binaryReadError,\n      logs,\n      warnings\n    },\n    binary: item.binary\n  });\n}\n\nreturn out;\n"
                                      },
                       "id":  "509aee24-2ec6-4506-95d0-63afd6411281",
                       "name":  "Prepare PDF OCR Request9",
@@ -1226,11 +1226,11 @@
                                        -2128
                                    ],
                       "continueOnFail":  true,
-                      "notes":  "Готовит base64 PDF и JSON-body для OpenRouter Chat Completions с file input. Использует google/gemini-2.5-flash и file-parser pdf engine mistral-ocr по умолчанию."
+                      "notes":  "Готовит base64 PDF и JSON-body для OpenRouter Chat Completions с file input. Использует deepseek/deepseek-v4-flash-0731 и file-parser pdf engine mistral-ocr по умолчанию."
                   },
                   {
                       "parameters":  {
-                                         "jsCode":  "\nfunction extractAnnotationText(annotations) {\n  const parts = [];\n  if (!Array.isArray(annotations)) return \u0027\u0027;\n\n  for (const ann of annotations) {\n    const content = ann?.file?.content;\n    if (!Array.isArray(content)) continue;\n    for (const part of content) {\n      if (part?.type === \u0027text\u0027 \u0026\u0026 part.text) parts.push(String(part.text));\n    }\n  }\n\n  return parts.join(\u0027\\n\u0027).trim();\n}\n\nreturn $input.all().map((item, index) =\u003e {\n  let original = {};\n  try { original = $(\u0027Prepare PDF OCR Request9\u0027).all()[index]?.json || {}; } catch {}\n  const j = item.json || {};\n\n  const message = j.choices?.[0]?.message || j.body?.choices?.[0]?.message || {};\n  const messageContent = typeof message.content === \u0027string\u0027 ? message.content : \u0027\u0027;\n  const annotationText = extractAnnotationText(message.annotations || j.error?.metadata?.file_annotations || []);\n\n  const text = String(\n    messageContent ||\n    annotationText ||\n    j.text ||\n    j.extractedText ||\n    j.parsedText ||\n    j.result ||\n    j.content ||\n    j.output ||\n    j.data?.text ||\n    j.data?.extractedText ||\n    \u0027\u0027\n  ).trim();\n\n  const qualityOk = text.length \u003e= 300 \u0026\u0026 /[а-яёa-z0-9]/i.test(text);\n  const logs = [...(original.logs || [])];\n  const warnings = [...(original.warnings || [])];\n\n  logs.push({\n    time: new Date().toISOString(),\n    step: \u0027OpenRouter OCR\u0027,\n    status: qualityOk ? \u0027ok\u0027 : \u0027warning\u0027,\n    details: qualityOk\n      ? `OCR получил текст: ${text.length} символов`\n      : `OpenRouter OCR не дал полезный текст. Длина: ${text.length}`\n  });\n\n  if (!qualityOk) {\n    warnings.push(`${original.documentFileName || original.fileName || \u0027PDF\u0027}: OpenRouter OCR не дал полезный текст. Проверьте PDF, модель, credential OpenRouter и лимиты.`);\n  }\n\n  return {\n    json: {\n      ...original,\n      ocrProvider: \u0027openrouter\u0027,\n      ocrModel: original.openRouterOcrModel || \u0027google/gemini-2.5-flash\u0027,\n      ocrEngine: original.openRouterPdfEngine || \u0027mistral-ocr\u0027,\n      ocrRawResponsePreview: JSON.stringify(j).slice(0, 1500),\n      parsedText: qualityOk ? text : \u0027\u0027,\n      rawTextPreview: text.slice(0, 500),\n      rawTextLength: text.length,\n      textQualityOk: qualityOk,\n      parserStatus: qualityOk ? \u0027ok_ocr_openrouter\u0027 : \u0027ocr_openrouter_failed_or_empty\u0027,\n      parserError: j.error?.message || j.error || j.message || original.parserError || \u0027\u0027,\n      parserWarning: qualityOk\n        ? \u0027Текст PDF получен через OpenRouter OCR.\u0027\n        : \u0027PDF не дал текст. Возможно, это скан — OpenRouter OCR выполнен, но полезный текст не получен.\u0027,\n      logs,\n      warnings\n    },\n    binary: item.binary || {}\n  };\n});\n"
+                                         "jsCode":  "\nfunction extractAnnotationText(annotations) {\n  const parts = [];\n  if (!Array.isArray(annotations)) return \u0027\u0027;\n\n  for (const ann of annotations) {\n    const content = ann?.file?.content;\n    if (!Array.isArray(content)) continue;\n    for (const part of content) {\n      if (part?.type === \u0027text\u0027 \u0026\u0026 part.text) parts.push(String(part.text));\n    }\n  }\n\n  return parts.join(\u0027\\n\u0027).trim();\n}\n\nreturn $input.all().map((item, index) =\u003e {\n  let original = {};\n  try { original = $(\u0027Prepare PDF OCR Request9\u0027).all()[index]?.json || {}; } catch {}\n  const j = item.json || {};\n\n  const message = j.choices?.[0]?.message || j.body?.choices?.[0]?.message || {};\n  const messageContent = typeof message.content === \u0027string\u0027 ? message.content : \u0027\u0027;\n  const annotationText = extractAnnotationText(message.annotations || j.error?.metadata?.file_annotations || []);\n\n  const text = String(\n    messageContent ||\n    annotationText ||\n    j.text ||\n    j.extractedText ||\n    j.parsedText ||\n    j.result ||\n    j.content ||\n    j.output ||\n    j.data?.text ||\n    j.data?.extractedText ||\n    \u0027\u0027\n  ).trim();\n\n  const qualityOk = text.length \u003e= 300 \u0026\u0026 /[а-яёa-z0-9]/i.test(text);\n  const logs = [...(original.logs || [])];\n  const warnings = [...(original.warnings || [])];\n\n  logs.push({\n    time: new Date().toISOString(),\n    step: \u0027OpenRouter OCR\u0027,\n    status: qualityOk ? \u0027ok\u0027 : \u0027warning\u0027,\n    details: qualityOk\n      ? `OCR получил текст: ${text.length} символов`\n      : `OpenRouter OCR не дал полезный текст. Длина: ${text.length}`\n  });\n\n  if (!qualityOk) {\n    warnings.push(`${original.documentFileName || original.fileName || \u0027PDF\u0027}: OpenRouter OCR не дал полезный текст. Проверьте PDF, модель, credential OpenRouter и лимиты.`);\n  }\n\n  return {\n    json: {\n      ...original,\n      ocrProvider: \u0027openrouter\u0027,\n      ocrModel: original.openRouterOcrModel || \u0027deepseek/deepseek-v4-flash-0731\u0027,\n      ocrEngine: original.openRouterPdfEngine || \u0027mistral-ocr\u0027,\n      ocrRawResponsePreview: JSON.stringify(j).slice(0, 1500),\n      parsedText: qualityOk ? text : \u0027\u0027,\n      rawTextPreview: text.slice(0, 500),\n      rawTextLength: text.length,\n      textQualityOk: qualityOk,\n      parserStatus: qualityOk ? \u0027ok_ocr_openrouter\u0027 : \u0027ocr_openrouter_failed_or_empty\u0027,\n      parserError: j.error?.message || j.error || j.message || original.parserError || \u0027\u0027,\n      parserWarning: qualityOk\n        ? \u0027Текст PDF получен через OpenRouter OCR.\u0027\n        : \u0027PDF не дал текст. Возможно, это скан — OpenRouter OCR выполнен, но полезный текст не получен.\u0027,\n      logs,\n      warnings\n    },\n    binary: item.binary || {}\n  };\n});\n"
                                      },
                       "id":  "58652267-9ca7-4135-85df-b7a0644c8fbf",
                       "name":  "Normalize OCR Text9",
@@ -2467,11 +2467,11 @@
                                    ],
                       "id":  "943c00b0-9682-4d46-9d1f-a2b691eec418",
                       "name":  "Model Selector — AI Agent - Extract Tender Fields2",
-                      "notes":  "Выбор модели по номеру попытки job: 1 — gpt-5, 2 — gpt-5-mini, 3 — gpt-4.1. Используется прямое подключение OpenAI, не OpenRouter."
+                      "notes":  "Выбор модели по номеру попытки job: 1 — DeepSeek V4 Flash 0731, 2 — Qwen3.7 Flash, 3 — Qwen3.5-Flash. Используется OpenRouter."
                   },
                   {
                       "parameters":  {
-                                         "content":  "## OpenAI: 3 модели для каждого агента\n\nМодели выбираются по попытке job:\n\n1. `gpt-5`\n2. `gpt-5-mini`\n3. `gpt-4.1`\n\nПосле технической ошибки Worker становится `failed`. Finalizer возвращает его в очередь до трёх попыток, а следующий запуск использует следующую модель.\n\nПосле импорта выберите credential **OpenAI API** в добавленных OpenAI Chat Model нодах. OpenRouter credential не используется.",
+                                         "content":  "## OpenRouter: 3 модели для каждого агента\n\nМодели выбираются по попытке job:\n\n1. `DeepSeek V4 Flash 0731`\n2. `Qwen3.7 Flash`\n3. `Qwen3.5-Flash`\n\nПосле технической ошибки Worker становится `failed`. Finalizer возвращает его в очередь до трёх попыток, а следующий запуск использует следующую модель.\n\nПосле импорта выберите credential **OpenRouter прокси** в добавленных OpenAI Chat Model нодах. Используется credential OpenRouter.",
                                          "height":  420,
                                          "width":  640,
                                          "color":  5
@@ -2505,9 +2505,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "google/gemini-3.5-flash",
+                                                       "value":  "deepseek/deepseek-v4-flash-0731",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "google/gemini-3.5-flash"
+                                                       "cachedResultName":  "deepseek/deepseek-v4-flash-0731"
                                                    },
                                          "builtInTools":  {
 
@@ -2523,7 +2523,7 @@
                                        -1456
                                    ],
                       "id":  "ec4985c2-f18c-471c-a283-688ec3030132",
-                      "name":  "gemini 3.5",
+                      "name":  "DeepSeek V4 Flash 0731",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -2536,9 +2536,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "google/gemini-2.5-pro",
+                                                       "value":  "qwen/qwen3.7-flash",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "google/gemini-2.5-pro"
+                                                       "cachedResultName":  "qwen/qwen3.7-flash"
                                                    },
                                          "builtInTools":  {
 
@@ -2554,7 +2554,7 @@
                                        -1456
                                    ],
                       "id":  "11867eb1-fef9-46e7-9926-e97c444b4c0f",
-                      "name":  "gemini 2.5",
+                      "name":  "Qwen3.7 Flash",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -2567,9 +2567,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "openai/gpt-5.5",
+                                                       "value":  "qwen/qwen3.5-flash-02-23",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "openai/gpt-5.5"
+                                                       "cachedResultName":  "qwen/qwen3.5-flash-02-23"
                                                    },
                                          "builtInTools":  {
 
@@ -2585,7 +2585,7 @@
                                        -1456
                                    ],
                       "id":  "072f8629-b55f-41fa-8e6e-117c7d227a46",
-                      "name":  "gpt 5.5",
+                      "name":  "Qwen3.5-Flash",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -2681,15 +2681,15 @@
                                    ],
                       "id":  "601e6438-9df6-46e7-a557-310c5ac0bb71",
                       "name":  "Model Selector — AI Agent - Extract Tender Fields",
-                      "notes":  "Выбор модели по номеру попытки job: 1 — gpt-5, 2 — gpt-5-mini, 3 — gpt-4.1. Используется прямое подключение OpenAI, не OpenRouter."
+                      "notes":  "Выбор модели по номеру попытки job: 1 — DeepSeek V4 Flash 0731, 2 — Qwen3.7 Flash, 3 — Qwen3.5-Flash. Используется OpenRouter."
                   },
                   {
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "google/gemini-3.5-flash",
+                                                       "value":  "deepseek/deepseek-v4-flash-0731",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "google/gemini-3.5-flash"
+                                                       "cachedResultName":  "deepseek/deepseek-v4-flash-0731"
                                                    },
                                          "builtInTools":  {
 
@@ -2705,7 +2705,7 @@
                                        -2016
                                    ],
                       "id":  "11467c73-55bb-4ed4-bf9e-f307efc3ffbe",
-                      "name":  "gemini 3.51",
+                      "name":  "DeepSeek V4 Flash 0731 1",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -2718,9 +2718,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "google/gemini-2.5-pro",
+                                                       "value":  "qwen/qwen3.7-flash",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "google/gemini-2.5-pro"
+                                                       "cachedResultName":  "qwen/qwen3.7-flash"
                                                    },
                                          "builtInTools":  {
 
@@ -2736,7 +2736,7 @@
                                        -2016
                                    ],
                       "id":  "6b813455-f033-4ff5-8554-526117d1400e",
-                      "name":  "gemini 2.51",
+                      "name":  "Qwen3.7 Flash 1",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -2749,9 +2749,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "openai/gpt-5.5",
+                                                       "value":  "qwen/qwen3.5-flash-02-23",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "openai/gpt-5.5"
+                                                       "cachedResultName":  "qwen/qwen3.5-flash-02-23"
                                                    },
                                          "builtInTools":  {
 
@@ -2767,7 +2767,7 @@
                                        -2016
                                    ],
                       "id":  "bf14ac10-0afa-49c3-9305-3bdda8b4cec5",
-                      "name":  "gpt 5.51",
+                      "name":  "Qwen3.5-Flash 1",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -2863,15 +2863,15 @@
                                    ],
                       "id":  "7bbb4cc2-b3a2-40ee-8bbd-7378a93ee9d4",
                       "name":  "Model Selector — AI Agent - Extract Tender Fields3",
-                      "notes":  "Выбор модели по номеру попытки job: 1 — gpt-5, 2 — gpt-5-mini, 3 — gpt-4.1. Используется прямое подключение OpenAI, не OpenRouter."
+                      "notes":  "Выбор модели по номеру попытки job: 1 — DeepSeek V4 Flash 0731, 2 — Qwen3.7 Flash, 3 — Qwen3.5-Flash. Используется OpenRouter."
                   },
                   {
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "google/gemini-2.5-pro",
+                                                       "value":  "qwen/qwen3.7-flash",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "google/gemini-2.5-pro"
+                                                       "cachedResultName":  "qwen/qwen3.7-flash"
                                                    },
                                          "builtInTools":  {
 
@@ -2887,7 +2887,7 @@
                                        -1392
                                    ],
                       "id":  "82c9ea89-bc4a-4066-ba52-8930c5432e25",
-                      "name":  "gemini 2.52",
+                      "name":  "Qwen3.7 Flash 2",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -2900,9 +2900,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "openai/gpt-5.5",
+                                                       "value":  "qwen/qwen3.5-flash-02-23",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "openai/gpt-5.5"
+                                                       "cachedResultName":  "qwen/qwen3.5-flash-02-23"
                                                    },
                                          "builtInTools":  {
 
@@ -2918,7 +2918,7 @@
                                        -1392
                                    ],
                       "id":  "56c36ba8-a71e-4d1c-9f6a-312d5ebb7df1",
-                      "name":  "gpt 5.52",
+                      "name":  "Qwen3.5-Flash 2",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -3014,15 +3014,15 @@
                                    ],
                       "id":  "197aae7f-9875-46bd-8198-f1a03cb30c7a",
                       "name":  "Model Selector — AI Agent - Extract Tender Fields4",
-                      "notes":  "Выбор модели по номеру попытки job: 1 — gpt-5, 2 — gpt-5-mini, 3 — gpt-4.1. Используется прямое подключение OpenAI, не OpenRouter."
+                      "notes":  "Выбор модели по номеру попытки job: 1 — DeepSeek V4 Flash 0731, 2 — Qwen3.7 Flash, 3 — Qwen3.5-Flash. Используется OpenRouter."
                   },
                   {
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "google/gemini-3.5-flash",
+                                                       "value":  "deepseek/deepseek-v4-flash-0731",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "google/gemini-3.5-flash"
+                                                       "cachedResultName":  "deepseek/deepseek-v4-flash-0731"
                                                    },
                                          "builtInTools":  {
 
@@ -3038,7 +3038,7 @@
                                        -1360
                                    ],
                       "id":  "c4076a8e-4478-4abb-a6d6-fc7945fdbbe5",
-                      "name":  "gemini 3.52",
+                      "name":  "DeepSeek V4 Flash 0731 2",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -3051,9 +3051,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "google/gemini-2.5-pro",
+                                                       "value":  "qwen/qwen3.7-flash",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "google/gemini-2.5-pro"
+                                                       "cachedResultName":  "qwen/qwen3.7-flash"
                                                    },
                                          "builtInTools":  {
 
@@ -3069,7 +3069,7 @@
                                        -1360
                                    ],
                       "id":  "606902b4-a448-498d-ba21-93a9311c19dc",
-                      "name":  "gemini 2.53",
+                      "name":  "Qwen3.7 Flash 3",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -3082,9 +3082,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "openai/gpt-5.5",
+                                                       "value":  "qwen/qwen3.5-flash-02-23",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "openai/gpt-5.5"
+                                                       "cachedResultName":  "qwen/qwen3.5-flash-02-23"
                                                    },
                                          "builtInTools":  {
 
@@ -3100,7 +3100,7 @@
                                        -1360
                                    ],
                       "id":  "91e879f6-5057-4335-b151-81e2abaf7050",
-                      "name":  "gpt 5.53",
+                      "name":  "Qwen3.5-Flash 3",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -3196,15 +3196,15 @@
                                    ],
                       "id":  "0a8c44f8-e7db-42f9-8150-12da17ec5f9f",
                       "name":  "Model Selector — AI Agent - Extract Tender Fields5",
-                      "notes":  "Выбор модели по номеру попытки job: 1 — gpt-5, 2 — gpt-5-mini, 3 — gpt-4.1. Используется прямое подключение OpenAI, не OpenRouter."
+                      "notes":  "Выбор модели по номеру попытки job: 1 — DeepSeek V4 Flash 0731, 2 — Qwen3.7 Flash, 3 — Qwen3.5-Flash. Используется OpenRouter."
                   },
                   {
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "google/gemini-3.5-flash",
+                                                       "value":  "deepseek/deepseek-v4-flash-0731",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "google/gemini-3.5-flash"
+                                                       "cachedResultName":  "deepseek/deepseek-v4-flash-0731"
                                                    },
                                          "builtInTools":  {
 
@@ -3220,7 +3220,7 @@
                                        -1408
                                    ],
                       "id":  "b54cc75b-76c4-43e7-96ac-0194a6f2039d",
-                      "name":  "gemini 3.53",
+                      "name":  "DeepSeek V4 Flash 0731 3",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -3233,9 +3233,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "google/gemini-2.5-pro",
+                                                       "value":  "qwen/qwen3.7-flash",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "google/gemini-2.5-pro"
+                                                       "cachedResultName":  "qwen/qwen3.7-flash"
                                                    },
                                          "builtInTools":  {
 
@@ -3251,7 +3251,7 @@
                                        -1408
                                    ],
                       "id":  "1e96d711-8426-440f-a7a3-ed2e55f96f51",
-                      "name":  "gemini 2.54",
+                      "name":  "Qwen3.7 Flash 4",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -3264,9 +3264,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "openai/gpt-5.5",
+                                                       "value":  "qwen/qwen3.5-flash-02-23",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "openai/gpt-5.5"
+                                                       "cachedResultName":  "qwen/qwen3.5-flash-02-23"
                                                    },
                                          "builtInTools":  {
 
@@ -3282,7 +3282,7 @@
                                        -1408
                                    ],
                       "id":  "6ff35d15-5d9a-4b6f-93b6-14ebb94d8969",
-                      "name":  "gpt 5.54",
+                      "name":  "Qwen3.5-Flash 4",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -3295,9 +3295,9 @@
                       "parameters":  {
                                          "model":  {
                                                        "__rl":  true,
-                                                       "value":  "google/gemini-3.5-flash",
+                                                       "value":  "deepseek/deepseek-v4-flash-0731",
                                                        "mode":  "list",
-                                                       "cachedResultName":  "google/gemini-3.5-flash"
+                                                       "cachedResultName":  "deepseek/deepseek-v4-flash-0731"
                                                    },
                                          "builtInTools":  {
 
@@ -3313,7 +3313,7 @@
                                        -1392
                                    ],
                       "id":  "d3a4659a-a891-4307-8da9-5f7cf70afa95",
-                      "name":  "gemini 3.521",
+                      "name":  "DeepSeek V4 Flash 0731 21",
                       "credentials":  {
                                           "openAiApi":  {
                                                             "id":  "BJ6WpkyYLwrjOZhM",
@@ -4487,7 +4487,7 @@
                                                                                                             ]
                                                                                                         ]
                                                                                },
-                        "gemini 3.5":  {
+                        "DeepSeek V4 Flash 0731":  {
                                            "ai_languageModel":  [
                                                                     [
                                                                         {
@@ -4498,7 +4498,7 @@
                                                                     ]
                                                                 ]
                                        },
-                        "gemini 2.5":  {
+                        "Qwen3.7 Flash":  {
                                            "ai_languageModel":  [
                                                                     [
                                                                         {
@@ -4509,7 +4509,7 @@
                                                                     ]
                                                                 ]
                                        },
-                        "gpt 5.5":  {
+                        "Qwen3.5-Flash":  {
                                         "ai_languageModel":  [
                                                                  [
                                                                      {
@@ -4520,7 +4520,7 @@
                                                                  ]
                                                              ]
                                     },
-                        "gemini 3.51":  {
+                        "DeepSeek V4 Flash 0731 1":  {
                                             "ai_languageModel":  [
                                                                      [
                                                                          {
@@ -4531,7 +4531,7 @@
                                                                      ]
                                                                  ]
                                         },
-                        "gemini 2.51":  {
+                        "Qwen3.7 Flash 1":  {
                                             "ai_languageModel":  [
                                                                      [
                                                                          {
@@ -4542,7 +4542,7 @@
                                                                      ]
                                                                  ]
                                         },
-                        "gpt 5.51":  {
+                        "Qwen3.5-Flash 1":  {
                                          "ai_languageModel":  [
                                                                   [
                                                                       {
@@ -4564,7 +4564,7 @@
                                                                                                            ]
                                                                                                        ]
                                                                               },
-                        "gemini 2.52":  {
+                        "Qwen3.7 Flash 2":  {
                                             "ai_languageModel":  [
                                                                      [
                                                                          {
@@ -4575,7 +4575,7 @@
                                                                      ]
                                                                  ]
                                         },
-                        "gpt 5.52":  {
+                        "Qwen3.5-Flash 2":  {
                                          "ai_languageModel":  [
                                                                   [
                                                                       {
@@ -4597,7 +4597,7 @@
                                                                                                             ]
                                                                                                         ]
                                                                                },
-                        "gemini 3.52":  {
+                        "DeepSeek V4 Flash 0731 2":  {
                                             "ai_languageModel":  [
                                                                      [
                                                                          {
@@ -4608,7 +4608,7 @@
                                                                      ]
                                                                  ]
                                         },
-                        "gemini 2.53":  {
+                        "Qwen3.7 Flash 3":  {
                                             "ai_languageModel":  [
                                                                      [
                                                                          {
@@ -4619,7 +4619,7 @@
                                                                      ]
                                                                  ]
                                         },
-                        "gpt 5.53":  {
+                        "Qwen3.5-Flash 3":  {
                                          "ai_languageModel":  [
                                                                   [
                                                                       {
@@ -4641,7 +4641,7 @@
                                                                                                             ]
                                                                                                         ]
                                                                                },
-                        "gemini 3.53":  {
+                        "DeepSeek V4 Flash 0731 3":  {
                                             "ai_languageModel":  [
                                                                      [
                                                                          {
@@ -4652,7 +4652,7 @@
                                                                      ]
                                                                  ]
                                         },
-                        "gemini 2.54":  {
+                        "Qwen3.7 Flash 4":  {
                                             "ai_languageModel":  [
                                                                      [
                                                                          {
@@ -4663,7 +4663,7 @@
                                                                      ]
                                                                  ]
                                         },
-                        "gpt 5.54":  {
+                        "Qwen3.5-Flash 4":  {
                                          "ai_languageModel":  [
                                                                   [
                                                                       {
@@ -4685,7 +4685,7 @@
                                                                                                             ]
                                                                                                         ]
                                                                                },
-                        "gemini 3.521":  {
+                        "DeepSeek V4 Flash 0731 21":  {
                                              "ai_languageModel":  [
                                                                       [
                                                                           {

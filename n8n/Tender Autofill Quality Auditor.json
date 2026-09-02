@@ -1,0 +1,752 @@
+{
+  "name": "Tender Autofill Quality Auditor",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Аудит результатов Tender Autofill",
+        "formDescription": "Загрузите один или несколько CSV-файлов, сформированных Finalizer.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "CSV-файлы Finalizer",
+              "fieldName": "auditFiles",
+              "fieldType": "file",
+              "acceptFileTypes": ".csv,text/csv",
+              "requiredField": true,
+              "multipleFiles": true
+            }
+          ]
+        },
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121001",
+      "name": "Загрузить CSV для аудита",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -1120,
+        160
+      ],
+      "webhookId": "tender-autofill-quality-auditor"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const output = [];\nfor (const item of $input.all()) {\n  const binaries = item.binary || {};\n  for (const [propertyName, binary] of Object.entries(binaries)) {\n    const fileName = String(binary.fileName || propertyName);\n    if (!fileName.toLowerCase().endsWith('.csv')) continue;\n    output.push({ json: { sourceFile: fileName }, binary: { data: binary } });\n  }\n}\nif (!output.length) throw new Error('Не найдено ни одного загруженного CSV-файла.');\nreturn output;"
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121002",
+      "name": "Разделить загруженные CSV",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        160
+      ],
+      "notesInFlow": true,
+      "notes": "Каждый binary-файл становится отдельным item. Binary не отправляется в PostgreSQL или LLM."
+    },
+    {
+      "parameters": {
+        "operation": "csv",
+        "binaryPropertyName": "data",
+        "options": {
+          "delimiter": ";",
+          "headerRow": true,
+          "encoding": "utf8"
+        }
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121003",
+      "name": "Извлечь строки CSV",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        -640,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function normalizedKey(value) {\n  return String(value || '').replace(/^\\uFEFF/, '').toLowerCase()\n    .replace(/ё/g, 'е').replace(/[^a-zа-я0-9]+/g, '');\n}\nfunction firstByAliases(row, aliases) {\n  const index = new Map(Object.entries(row || {})\n    .map(([key, value]) => [normalizedKey(key), value]));\n  for (const alias of aliases) {\n    const value = index.get(normalizedKey(alias));\n    if (value !== undefined && value !== null && String(value).trim() !== '') return value;\n  }\n  return '';\n}\nconst requests = [];\nconst seen = new Set();\nfor (const item of $input.all()) {\n  const rows = Array.isArray(item.json) ? item.json : [item.json || {}];\n  for (const row of rows) {\n    const seldonId = String(firstByAliases(row, [\n      'ID', 'SeldonID', 'seldon_id', 'seldonId', 'ИД', 'Идентификатор'\n    ])).trim();\n    if (!/^\\d+$/.test(seldonId) || seen.has(seldonId)) continue;\n    seen.add(seldonId);\n    requests.push({\n      seldonId,\n      sourceStatus: String(firstByAliases(row, ['Статус тендера', 'Статус', 'tenderStatus'])).trim(),\n      sourceReason: String(firstByAliases(row, ['Причина статуса', 'tenderStatusReason'])).trim(),\n      sourceNote: String(firstByAliases(row, ['Примечание к статусу', 'tenderStatusNote'])).trim().slice(0, 4000),\n      sourceFile: String(row.sourceFile || '').trim(),\n    });\n  }\n}\nif (!requests.length) throw new Error('В CSV не найдена колонка ID/SeldonID с числовыми идентификаторами.');\nreturn [{ json: { requests, requestedCount: requests.length } }];"
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121004",
+      "name": "Собрать Seldon ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        160
+      ],
+      "notesInFlow": true,
+      "notes": "Удаляет дубли ID и сохраняет исходные статус/причину/примечание из CSV."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH requested AS (\n  SELECT\n    value->>'seldonId' AS seldon_id,\n    value->>'sourceStatus' AS source_status,\n    value->>'sourceReason' AS source_reason,\n    value->>'sourceNote' AS source_note,\n    value->>'sourceFile' AS source_file\n  FROM jsonb_array_elements($1::jsonb) AS value\n)\nSELECT\n  r.seldon_id AS \"requestedSeldonId\",\n  r.source_status AS \"sourceStatus\",\n  r.source_reason AS \"sourceReason\",\n  r.source_note AS \"sourceNote\",\n  r.source_file AS \"sourceFile\",\n  j.record_key AS \"recordKey\",\n  j.batch_id AS \"batchId\",\n  j.report_id AS \"reportId\",\n  j.status AS \"jobStatus\",\n  j.attempt,\n  j.error_message AS \"errorMessage\",\n  j.updated_at AS \"updatedAt\",\n  (j.result_json IS NOT NULL) AS \"hasResult\",\n  COALESCE(j.result_json #>> '{fields,tenderStatus}', j.result_json #>> '{reportFields,tenderStatus}', '') AS \"tenderStatus\",\n  COALESCE(j.result_json #>> '{fields,tenderStatusReason}', j.result_json #>> '{reportFields,tenderStatusReason}', '') AS \"tenderReason\",\n  COALESCE(j.result_json #>> '{fields,tenderStatusNote}', j.result_json #>> '{reportFields,tenderStatusNote}', '') AS \"tenderNote\",\n  COALESCE(j.result_json #>> '{fields,initialPrice,value}', j.result_json #>> '{fields,initialPrice}', j.report_fields->>'Начальная цена', '') AS \"initialPrice\",\n  NULLIF(j.result_json #>> '{productCheck,total}', '')::numeric AS \"productsTotal\",\n  NULLIF(j.result_json #>> '{productCheck,suppliedCount}', '')::numeric AS \"suppliedCount\",\n  NULLIF(j.result_json #>> '{productCheck,coveragePercent}', '')::numeric AS \"coveragePercent\",\n  (j.result_json #>> '{productCheck,coverageApproved}')::boolean AS \"coverageApproved\",\n  (j.result_json #>> '{productCheck,hardReject}')::boolean AS \"coverageHardReject\",\n  (j.result_json #>> '{productCheck,lotDivisible}')::boolean AS \"lotDivisible\",\n  j.result_json #>> '{productCheck,coverageRule}' AS \"coverageRule\",\n  NULLIF(j.result_json #>> '{productCheck,supplyTotalPriceRub}', '')::numeric AS \"supplyTotalPriceRub\",\n  (j.result_json #>> '{productCheck,priceEvaluationComplete}')::boolean AS \"priceEvaluationComplete\",\n  (j.result_json #>> '{productCheck,supplyValueThresholdApplicable}')::boolean AS \"supplyValueThresholdApplicable\",\n  (j.result_json #>> '{productCheck,supplyValueHardReject}')::boolean AS \"supplyValueHardReject\",\n  NULLIF(j.result_json #>> '{debug,documentCount}', '')::integer AS \"documentCount\",\n  NULLIF(j.result_json #>> '{debug,parsedDocumentCount}', '')::integer AS \"parsedDocumentCount\",\n  (j.result_json #>> '{debug,seldonDocumentsStatus,documentationMissing}')::boolean AS \"documentationMissing\",\n  (j.result_json #>> '{debug,seldonDocumentsStatus,documentationUnavailable}')::boolean AS \"documentationUnavailable\",\n  j.result_json #>> '{debug,seldonDocumentsStatus,processingStatus}' AS \"documentProcessingStatus\",\n  COALESCE(jsonb_array_length(COALESCE(j.result_json #> '{decision,hardReasons}', '[]'::jsonb)), 0) AS \"hardReasonCount\",\n  COALESCE(jsonb_array_length(COALESCE(j.result_json #> '{decision,llmReasonCandidates}', '[]'::jsonb)), 0) AS \"llmReasonCount\",\n  j.result_json #>> '{debug,counterpartyLookup,status}' AS \"counterpartyStatus\",\n  COALESCE((\n    SELECT jsonb_agg(jsonb_build_object(\n      'positionIndex', p.value->'positionIndex',\n      'sourceProduct', left(COALESCE(p.value->>'sourceProduct', ''), 350),\n      'quantity', p.value->'quantity',\n      'sourceFile', p.value #>> '{documentPriceSource,fileName}'\n    ) ORDER BY p.ordinality)\n    FROM jsonb_array_elements(COALESCE(j.result_json #> '{productCheck,details}', '[]'::jsonb))\n      WITH ORDINALITY AS p(value, ordinality)\n    WHERE p.ordinality <= 100\n  ), '[]'::jsonb) AS \"productPreview\"\nFROM requested AS r\nLEFT JOIN LATERAL (\n  SELECT job.*\n  FROM tender_autofill_jobs AS job\n  WHERE job.seldon_id = r.seldon_id\n  ORDER BY job.updated_at DESC\n  LIMIT 1\n) AS j ON TRUE\nORDER BY r.seldon_id;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json.requests)] }}"
+        }
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121005",
+      "name": "Postgres — лёгкая сводка",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -160,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Один SQL по всем ID возвращает только компактные поля. Полный result_json здесь не выбирается."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function number(value) {\n  const parsed = Number(String(value ?? '').replace(/\\s/g, '').replace(',', '.'));\n  return Number.isFinite(parsed) ? parsed : null;\n}\nfunction money(value) {\n  const text = String(value ?? '').toLowerCase().replace(/\\u00A0/g, ' ');\n  let multiplier = 1;\n  if (/\\bмлрд/.test(text)) multiplier = 1000000000;\n  else if (/\\bмлн/.test(text)) multiplier = 1000000;\n  let cleaned = text.replace(/\\s/g, '').replace(/[^0-9,.-]/g, '');\n  const comma = cleaned.lastIndexOf(',');\n  const dot = cleaned.lastIndexOf('.');\n  if (comma >= 0 && dot >= 0) {\n    const decimal = comma > dot ? ',' : '.';\n    cleaned = cleaned.replace(decimal === ',' ? /\\./g : /,/g, '').replace(decimal, '.');\n  } else if (comma >= 0) cleaned = cleaned.replace(',', '.');\n  const parsed = Number(cleaned);\n  return Number.isFinite(parsed) ? parsed * multiplier : null;\n}\nconst DOC_REASON = 'Оргвопросы. Отсутствует ТЗ / Нет документации / Некорректная ссылка';\nconst PRICE_REASON = 'Коммерческие условия. НМЦК менее 1 млн руб.';\nconst semanticReasons = [\n  'Номенклатура. Поставка с работами',\n  'Коммерческие условия. Консигнация / Хранение у Покупателя за счет Поставщика',\n  'Номенклатура. Ремкомплект / ЗИП / Продукция по чертежу',\n  'Коммерческие условия. Поставка в удаленные территории',\n  'Номенклатура. Оборудование 35 кВ и выше',\n  'Коммерческие условия. Оплата Покупателем после оплаты Генподрядчиком / Госзаказчиком',\n  'Оргвопросы. Отказ организатора от проведения тендера',\n];\nconst assessed = [];\nfor (const item of $input.all()) {\n  const row = item.json || {};\n  const issues = [];\n  const add = (code, severity, message) => issues.push({ code, severity, message });\n  if (!row.recordKey) add('JOB_NOT_FOUND', 'high', 'Seldon ID из CSV не найден в tender_autofill_jobs.');\n  if (row.jobStatus === 'failed') add('JOB_FAILED', 'high', row.errorMessage || 'Job завершилась failed.');\n  if (row.jobStatus === 'completed' && !row.hasResult) add('COMPLETED_WITHOUT_RESULT', 'high', 'Job completed, но result_json отсутствует.');\n  if (row.sourceStatus && row.tenderStatus && row.sourceStatus !== row.tenderStatus) add('CSV_DB_STATUS_MISMATCH', 'medium', 'Статус в CSV отличается от последнего result_json.');\n  if (row.sourceReason && row.tenderReason && row.sourceReason !== row.tenderReason) add('CSV_DB_REASON_MISMATCH', 'medium', 'Причина в CSV отличается от последнего result_json.');\n  const total = number(row.productsTotal);\n  const supplied = number(row.suppliedCount);\n  const coverage = number(row.coveragePercent);\n  if (total !== null && supplied !== null && total > 0 && coverage !== null) {\n    const expected = Math.round((supplied / total) * 10000) / 100;\n    if (Math.abs(expected - coverage) > 0.011) add('COVERAGE_ARITHMETIC_MISMATCH', 'high', 'coveragePercent не равен suppliedCount / productsTotal × 100.');\n  }\n  if (row.lotDivisible === true && total > 0) {\n    const expectedApproved = supplied >= 1;\n    if (Boolean(row.coverageApproved) !== expectedApproved) add('DIVISIBLE_LOT_RULE_MISMATCH', 'high', 'Для делимого лота достаточно одной поставляемой позиции.');\n  }\n  if (row.lotDivisible !== true && coverage !== null) {\n    const expectedApproved = coverage >= 80;\n    if (Boolean(row.coverageApproved) !== expectedApproved) add('INDIVISIBLE_LOT_RULE_MISMATCH', 'high', 'Для неделимого/неопределённого лота применяется coverage >= 80%.');\n  }\n  if ([row.sourceReason, row.tenderReason].includes(DOC_REASON)) {\n    if (number(row.parsedDocumentCount) > 0 && row.documentationMissing !== true) {\n      add('FALSE_DOCUMENTATION_REASON', 'high', 'Документы разобраны, но выбрана причина об их отсутствии.');\n    } else {\n      add('DOCUMENTATION_REJECTION_REVIEW', 'medium', 'Проверить отказ по документам по Seldon, скачиванию и парсингу.');\n    }\n  }\n  if (row.tenderReason === PRICE_REASON && [1, 2].includes(number(row.reportId))) {\n    const initial = money(row.initialPrice);\n    if (initial !== null && initial >= 1000000) add('FALSE_REGULATED_PRICE_REASON', 'high', 'Для 223/44-ФЗ начальная цена не меньше 1 млн руб.');\n  }\n  if (row.tenderReason === PRICE_REASON && number(row.reportId) === 3) {\n    if (row.priceEvaluationComplete !== true || row.supplyValueThresholdApplicable !== true || row.supplyValueHardReject !== true) {\n      add('FALSE_COMMERCIAL_PRICE_REASON', 'high', 'Для коммерции причина цены требует полного расчёта Qdrant-цена × количество.');\n    }\n  }\n  if (row.tenderStatus === 'Согласовано КУ ЦП' && number(row.hardReasonCount) > 0) add('APPROVED_WITH_HARD_REASONS', 'high', 'Тендер согласован при наличии детерминированных hardReasons.');\n  if (row.tenderStatus === 'Отказано КУ ЦП' && !String(row.tenderReason || '').trim()) add('REJECTED_WITHOUT_REASON', 'high', 'Отказанный тендер не имеет причины статуса.');\n  if (semanticReasons.includes(String(row.tenderReason || ''))) add('SEMANTIC_EVIDENCE_REVIEW', 'medium', 'Причина требует смысловой проверки evidence отдельным судьёй.');\n  assessed.push({ json: {\n    ...row,\n    deterministicIssues: issues,\n    deterministicCandidate: issues.length > 0,\n    needsScout: true\n  } });\n}\nreturn assessed;"
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121006",
+      "name": "Детерминированная предварительная проверка",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        160
+      ],
+      "notesInFlow": true,
+      "notes": "Не отбрасывает тендеры. Добавляет deterministicIssues и передаёт все строки в первичный LLM-цикл."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7b6d10b1-7ec3-4f33-b825-3b501c129001",
+              "leftValue": "={{ $json.needsLlm }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121007",
+      "name": "Есть подозрения?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1520,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH target AS (\n  SELECT j.* FROM tender_autofill_jobs AS j WHERE j.record_key = $1 LIMIT 1\n),\nlatest_run AS (\n  SELECT r.* FROM tender_autofill_job_runs AS r\n  JOIN target AS j ON j.record_key = r.record_key\n  ORDER BY r.attempt DESC, r.started_at DESC LIMIT 1\n),\ncompact_products AS (\n  SELECT COALESCE(jsonb_agg(\n    jsonb_build_object(\n      'positionIndex', p.value->'positionIndex',\n      'sourceProduct', p.value->'sourceProduct',\n      'sourceQuantity', p.value->'sourceQuantity',\n      'quantity', p.value->'quantity',\n      'supplied', p.value->'supplied',\n      'fullMatch', p.value->'fullMatch',\n      'analogAccepted', p.value->'analogAccepted',\n      'sourceEvidence', p.value->'sourceEvidence',\n      'sourceRequirements', p.value->'sourceRequirements',\n      'selectedProduct', p.value #> '{result,Наименование}',\n      'correspondence', p.value #> '{result,Соответствие}',\n      'rationale', p.value #> '{result,Обоснование}',\n      'selectedPointId', p.value->'selectedPointId',\n      'medianUnitPriceRub', p.value->'medianUnitPriceRub',\n      'positionTotalPriceRub', p.value->'positionTotalPriceRub',\n      'documentUnitPriceRub', p.value->'documentUnitPriceRub',\n      'documentLineTotalRub', p.value->'documentLineTotalRub'\n    ) ORDER BY p.ordinality\n  ), '[]'::jsonb) AS items\n  FROM target AS j\n  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(j.result_json #> '{productCheck,details}', '[]'::jsonb))\n    WITH ORDINALITY AS p(value, ordinality)\n  WHERE p.ordinality <= 100\n),\ntimeline AS (\n  SELECT COALESCE(jsonb_agg(event_row.payload ORDER BY event_row.event_time), '[]'::jsonb) AS items\n  FROM (\n    SELECT e.event_time,\n      jsonb_build_object(\n        'eventTime', e.event_time, 'eventType', e.event_type, 'stage', e.stage,\n        'status', e.status, 'service', e.service, 'operation', e.operation,\n        'model', e.model, 'httpStatus', e.http_status,\n        'durationSeconds', e.duration_seconds, 'resultCount', e.result_count,\n        'byteCount', e.byte_count, 'errorType', e.error_type,\n        'errorMessage', e.error_message, 'details', e.details\n      ) AS payload\n    FROM tender_autofill_job_events AS e\n    JOIN latest_run AS r ON r.run_id = e.run_id\n    ORDER BY e.event_time DESC, e.event_id DESC LIMIT 100\n  ) AS event_row\n)\nSELECT\n  $2::jsonb AS \"auditSeed\",\n  jsonb_build_object(\n    'recordKey', j.record_key, 'seldonId', j.seldon_id, 'reportId', j.report_id,\n    'jobStatus', j.status, 'attempt', j.attempt, 'errorMessage', j.error_message,\n    'fields', jsonb_build_object(\n      'tenderStatus', j.result_json #> '{fields,tenderStatus}',\n      'tenderStatusReason', j.result_json #> '{fields,tenderStatusReason}',\n      'tenderStatusNote', j.result_json #> '{fields,tenderStatusNote}',\n      'initialPrice', j.result_json #> '{fields,initialPrice}',\n      'lotDivisible', j.result_json #> '{fields,lotDivisible}',\n      'deliveryNote', j.result_json #> '{fields,deliveryNote}'\n    ),\n    'productCheck', (COALESCE(j.result_json->'productCheck', '{}'::jsonb) - 'details')\n      || jsonb_build_object('details', COALESCE(cp.items, '[]'::jsonb)),\n    'decision', j.result_json->'decision',\n    'documents', jsonb_build_object(\n      'documentCount', j.result_json #> '{debug,documentCount}',\n      'parsedDocumentCount', j.result_json #> '{debug,parsedDocumentCount}',\n      'status', j.result_json #> '{debug,seldonDocumentsStatus}',\n      'documentTextLengths', j.result_json #> '{debug,documentTextLengths}'\n    ),\n    'counterpartyLookup', j.result_json #> '{debug,counterpartyLookup}',\n    'actualCustomerResolution', j.result_json #> '{debug,actualCustomerResolution}',\n    'warnings', j.result_json->'warnings',\n    'run', to_jsonb(r) - 'result_summary',\n    'timeline', COALESCE(t.items, '[]'::jsonb)\n  ) AS \"auditDetail\"\nFROM target AS j\nLEFT JOIN latest_run AS r ON TRUE\nLEFT JOIN compact_products AS cp ON TRUE\nLEFT JOIN timeline AS t ON TRUE;",
+        "options": {
+          "queryReplacement": "={{ [String($json.recordKey), JSON.stringify($json)] }}"
+        }
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121008",
+      "name": "Postgres — детали одного tender",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2000,
+        64
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "postgres": {
+          "id": "B4rAYhhyBI6RQmNo",
+          "name": "Postgres account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Выполняется отдельно для каждого подозрительного record_key. Берёт компактные товары и timeline только этого tender."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const seed = $json.auditSeed || {};\nconst detail = $json.auditDetail || {};\nfunction text(value, limit) {\n  return String(value ?? '').replace(/\\s+/g, ' ').trim().slice(0, limit);\n}\nconst products = Array.isArray(detail.productCheck?.details)\n  ? detail.productCheck.details.slice(0, 60).map((item) => ({\n      positionIndex: item.positionIndex,\n      sourceProduct: text(item.sourceProduct, 500),\n      sourceQuantity: item.sourceQuantity,\n      quantity: item.quantity,\n      supplied: item.supplied,\n      fullMatch: item.fullMatch,\n      analogAccepted: item.analogAccepted,\n      selectedProduct: text(item.selectedProduct, 500),\n      correspondence: item.correspondence,\n      rationale: text(item.rationale, 1000),\n      selectedPointId: item.selectedPointId,\n      medianUnitPriceRub: item.medianUnitPriceRub,\n      positionTotalPriceRub: item.positionTotalPriceRub,\n      sourceRequirements: text(item.sourceRequirements, 1400),\n      sourceEvidence: text(item.sourceEvidence, 1000),\n    })) : [];\nconst compact = {\n  recordKey: detail.recordKey, seldonId: detail.seldonId, reportId: detail.reportId,\n  jobStatus: detail.jobStatus, attempt: detail.attempt, fields: detail.fields,\n  csvVerdict: {\n    status: seed.sourceStatus || '',\n    reason: seed.sourceReason || '',\n    note: text(seed.sourceNote, 4000),\n    sourceFile: seed.sourceFile || '',\n  },\n  deterministicIssues: seed.deterministicIssues,\n  scoutAudit: seed.scoutAudit || null,\n  productCheck: { ...(detail.productCheck || {}), details: products },\n  decision: detail.decision, documents: detail.documents,\n  counterpartyLookup: detail.counterpartyLookup,\n  actualCustomerResolution: detail.actualCustomerResolution,\n  warnings: Array.isArray(detail.warnings) ? detail.warnings.slice(0, 40) : [],\n  run: detail.run,\n  timeline: Array.isArray(detail.timeline) ? detail.timeline.slice(-60) : [],\n};\nconst system = [\n  'Ты независимый аудитор результатов Tender Autofill Worker.',\n  'Проверяй только предоставленные факты. Не выдумывай текст документации.',\n  'Если evidence недостаточно, верни needs_manual_review.',\n  'Не меняй бизнес-правила и не выполняй SQL.',\n  'Верни только один JSON-объект без Markdown.'\n].join(' ');\nconst prompt = [\n  'Сначала проверь вердикт из CSV и вывод первичного LLM-аудитора (scoutAudit), затем сопоставь их с result_json и timeline этого же тендера.',\n  'Проверь корректность статуса, основной причины, примечания, документов, coverage,',\n  'товарных сопоставлений, количества, цены, hardReasons и LLM evidence.',\n  '',\n  'Правила:',\n  '- для неделимого или неопределённого лота coverage должен быть >= 80%;',\n  '- для делимого лота достаточно хотя бы одной supplied позиции;',\n  '- для 223/44-ФЗ порог 1 млн проверяется только по initialPrice;',\n  '- для коммерции порог проверяется по Qdrant price × quantity только при полном расчёте;',\n  '- отсутствие/нулевая initialPrice не является автоматическим отказом;',\n  '- адреса, получатели и места поставки не являются товарами;',\n  '- одинаковый товар из ТЗ и спецификации должен быть одной позицией; короткое и длинное название могут быть дублем;',\n  '- поставка с работами требует прямой обязанности монтажа/установки/пусконаладки;',\n  '- условный заголовок «если монтаж осуществляется поставщиком» недостаточен;',\n  '- консигнация не включает хранение после дефекта, отказа, возврата или экспертизы;',\n  '- удалённая территория определяется по месту поставки, не региону заказчика;',\n  '- ЗИП/чертёж должен относиться к конкретной товарной позиции;',\n  '- напряжение объекта/подстанции не равно напряжению самого товара;',\n  '- отказ участника от постквалификации не равен отмене тендера организатором;',\n  '- необязательный аванс не равен оплате только после генподрядчика.',\n  '',\n  'Верни схему:',\n  JSON.stringify({\n    verdict: 'correct|confirmed_issue|needs_manual_review',\n    originalResultCorrect: true,\n    severity: 'low|medium|high',\n    summary: 'краткий вывод',\n    suggestedStatus: 'строка или null',\n    suggestedReason: 'строка или null',\n    issues: [{ code: 'CODE', message: 'описание', evidence: 'точный факт из payload' }]\n  }),\n  '',\n  'Данные одного тендера:',\n  JSON.stringify(compact)\n].join('\\n');\nreturn [{ json: {\n  auditSeed: seed,\n  auditDetail: compact,\n  systemPrompt: system,\n  judgePrompt: prompt\n} }];"
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121009",
+      "name": "Подготовить запрос судье",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        64
+      ],
+      "notesInFlow": true,
+      "notes": "Ограничивает товары, evidence, warnings и timeline. Один item = один тендер."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.judgePrompt }}",
+        "options": {
+          "systemMessage": "={{ $json.systemPrompt }}"
+        }
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121010",
+      "name": "AI Agent — LLM судья",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        2480,
+        64
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notesInFlow": true,
+      "notes": "Получает один tender из Loop Over Items: вердикт CSV, result_json и timeline. Использует Chat Model credential, без HTTP Request."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const source = $('Подготовить запрос судье').item.json;\nconst response = $json || {};\nlet content = response.output\n  ?? response.text\n  ?? response.response\n  ?? response.choices?.[0]?.message?.content\n  ?? '';\nif (Array.isArray(content)) content = content.map((part) => part?.text || part?.content || '').join('');\nfunction parseJson(value) {\n  if (value && typeof value === 'object') return value;\n  const fence = String.fromCharCode(96).repeat(3);\n  const sourceText = String(value || '').replaceAll(fence + 'json', '').replaceAll(fence, '').trim();\n  try { return JSON.parse(sourceText); } catch {}\n  const start = sourceText.indexOf('{');\n  const end = sourceText.lastIndexOf('}');\n  if (start >= 0 && end > start) {\n    try { return JSON.parse(sourceText.slice(start, end + 1)); } catch {}\n  }\n  return null;\n}\nconst audit = parseJson(content);\nconst fallback = {\n  verdict: 'needs_manual_review', originalResultCorrect: null, severity: 'high',\n  summary: 'Ответ LLM-судьи не удалось разобрать как JSON.',\n  suggestedStatus: null, suggestedReason: null,\n  issues: [{\n    code: 'AUDITOR_RESPONSE_PARSE_ERROR',\n    message: 'LLM не вернул валидный JSON.',\n    evidence: String(content || response.error?.message || '').slice(0, 1000)\n  }]\n};\nreturn [{ json: {\n  ...source.auditSeed,\n  auditDetail: source.auditDetail,\n  llmAudit: audit || fallback,\n  auditorModel: response.model || 'deepseek/deepseek-v4-flash-0731',\n  auditorRequestId: response.id || ''\n} }];"
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121011",
+      "name": "Разобрать вердикт судьи",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function cell(value) {\n  if (value === undefined || value === null) return '';\n  if (Array.isArray(value)) return value.join(' | ');\n  if (typeof value === 'object') return JSON.stringify(value);\n  return String(value);\n}\nfunction escapeCsv(value) {\n  const text = cell(value);\n  return /[;\"\\r\\n]/.test(text) ? '\"' + text.replace(/\"/g, '\"\"') + '\"' : text;\n}\nfunction issueText(issues) {\n  return (Array.isArray(issues) ? issues : [])\n    .map((item) => [item.code, item.message, item.evidence].filter(Boolean).join(' — '))\n    .join(' | ');\n}\nconst rows = $input.all().map((item) => {\n  const value = item.json || {};\n  const audit = value.llmAudit || {};\n  return {\n    'Seldon ID': value.requestedSeldonId || value.auditDetail?.seldonId || '',\n    'Record key': value.recordKey || value.auditDetail?.recordKey || '',\n    'Report ID': value.reportId || value.auditDetail?.reportId || '',\n    'Статус Worker': value.tenderStatus || '',\n    'Причина Worker': value.tenderReason || '',\n    'Примечание Worker': value.tenderNote || '',\n    'Отобран по': Array.isArray(value.selectionReasons) ? value.selectionReasons.join(' | ') : '',\n    'Первичный LLM: подозрение': value.scoutAudit?.suspicious,\n    'Первичный LLM: нужна детальная проверка': value.scoutAudit?.requiresDetailedReview,\n    'Первичный LLM: вывод': value.scoutAudit?.summary || '',\n    'Первичный LLM: сигналы': Array.isArray(value.scoutAudit?.signals) ? value.scoutAudit.signals.join(' | ') : '',\n    'Вердикт подробного аудитора': audit.verdict || 'needs_manual_review',\n    'Результат Worker корректен': audit.originalResultCorrect,\n    'Severity': audit.severity || 'medium',\n    'Вывод аудитора': audit.summary || '',\n    'Предлагаемый статус': audit.suggestedStatus || '',\n    'Предлагаемая причина': audit.suggestedReason || '',\n    'Детерминированные подозрения': issueText(value.deterministicIssues),\n    'Замечания LLM-судьи': issueText(audit.issues),\n    'Документов разобрано': value.parsedDocumentCount,\n    'Товаров всего': value.productsTotal,\n    'Поставляемых товаров': value.suppliedCount,\n    'Coverage, %': value.coveragePercent,\n    'Расчётная стоимость, руб.': value.supplyTotalPriceRub,\n    'Модель аудитора': value.auditorModel || '',\n    'Дата аудита': new Date().toISOString()\n  };\n});\nconst headers = Object.keys(rows[0] || { 'Результат': '' });\nconst lines = [headers.map(escapeCsv).join(';'),\n  ...rows.map((row) => headers.map((key) => escapeCsv(row[key])).join(';'))];\nconst day = new Date().toISOString().slice(0, 10);\nreturn [{ json: {\n  csvText: '\\uFEFF' + lines.join('\\r\\n'),\n  fileName: 'tender_autofill_audit_' + day + '.csv',\n  suspiciousCount: rows.length\n} }];"
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121012",
+      "name": "Сформировать CSV подозрений",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2960,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "csvText",
+        "options": {
+          "encoding": "utf8",
+          "fileName": "={{ $json.fileName }}"
+        }
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121013",
+      "name": "Создать CSV подозрений",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        3200,
+        64
+      ],
+      "notesInFlow": true,
+      "notes": "Готовый CSV доступен в binary output execution."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "function escapeCsv(value) {\n  const text = String(value ?? '');\n  return /[;\"\\r\\n]/.test(text) ? '\"' + text.replace(/\"/g, '\"\"') + '\"' : text;\n}\nconst day = new Date().toISOString().slice(0, 10);\nlet headers;\nlet row;\nif ($json.noIssues === true) {\n  headers = ['Результат', 'Проверено тендеров', 'Дата аудита'];\n  row = ['Подозрительных тендеров не найдено', $json.checkedCount || 0, new Date().toISOString()];\n} else {\n  headers = ['Seldon ID', 'Record key', 'Job status', 'Ошибка Worker', 'Статус Worker', 'Причина Worker', 'Вердикт аудитора', 'Severity', 'Детерминированные замечания', 'Дата аудита'];\n  const issues = (Array.isArray($json.deterministicIssues) ? $json.deterministicIssues : [])\n    .map((item) => [item.code, item.message].filter(Boolean).join(' — ')).join(' | ');\n  const severity = (Array.isArray($json.deterministicIssues) ? $json.deterministicIssues : [])\n    .some((item) => item.severity === 'high') ? 'high' : 'medium';\n  row = [$json.requestedSeldonId || '', $json.recordKey || '', $json.jobStatus || '',\n    $json.errorMessage || '', $json.tenderStatus || '', $json.tenderReason || '',\n    'needs_manual_review', severity, issues, new Date().toISOString()];\n}\nreturn [{ json: {\n  csvText: '\\uFEFF' + [headers.map(escapeCsv).join(';'), row.map(escapeCsv).join(';')].join('\\r\\n'),\n  fileName: 'tender_autofill_audit_' + day + '.csv',\n  suspiciousCount: $json.noIssues === true ? 0 : 1\n} }];"
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121014",
+      "name": "Сформировать CSV без LLM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "csvText",
+        "options": {
+          "encoding": "utf8",
+          "fileName": "={{ $json.fileName }}"
+        }
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121015",
+      "name": "Создать CSV без LLM",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2000,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Tender Autofill Quality Auditor — двухэтапный аудит\n\n1. Принимает CSV Finalizer и одним SQL получает лёгкую сводку по всем ID.\n2. Детерминированные правила только ставят метки и не отбрасывают строки.\n3. Первый Loop с batchSize=1 отправляет каждый tender в AI Agent первичного отбора.\n4. Кандидаты = deterministic OR первичный LLM OR операционная ошибка.\n5. Второй Loop запрашивает подробный result_json и timeline отдельно по каждому кандидату.\n6. Подробный AI Agent проверяет вердикт CSV, вывод первого LLM и логи одного tender.\n7. После завершения обоих циклов создаётся единый CSV. Production-данные не изменяются.",
+        "height": 420,
+        "width": 520,
+        "color": 5
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121016",
+      "name": "Инструкция",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1120,
+        -352
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121017",
+      "name": "Loop — тендеры для судьи",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1760,
+        64
+      ],
+      "notesInFlow": true,
+      "notes": "Последовательный цикл: SQL и AI Agent получают ровно один отобранный tender."
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "deepseek/deepseek-v4-flash-0731",
+          "mode": "list",
+          "cachedResultName": "deepseek/deepseek-v4-flash-0731"
+        },
+        "builtInTools": {},
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121018",
+      "name": "Chat Model — аудитор",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2480,
+        288
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "BJ6WpkyYLwrjOZhM",
+          "name": "OpenRouter прокси"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "После импорта проверьте credential OpenRouter прокси и выбранную модель."
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121019",
+      "name": "Loop — первичная проверка всех тендеров",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        320,
+        160
+      ],
+      "notesInFlow": true,
+      "notes": "Последовательно пропускает через первичный AI Agent каждый tender из CSV, а не только детерминированные подозрения."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "function short(value, limit = 3000) {\n  return String(value ?? '').replace(/\\s+/g, ' ').trim().slice(0, limit);\n}\nconst summary = {\n  seldonId: $json.requestedSeldonId,\n  recordKey: $json.recordKey,\n  reportId: $json.reportId,\n  csvVerdict: {\n    status: $json.sourceStatus || '', reason: $json.sourceReason || '',\n    note: short($json.sourceNote, 4000), sourceFile: $json.sourceFile || ''\n  },\n  databaseVerdict: {\n    jobStatus: $json.jobStatus, errorMessage: short($json.errorMessage, 1500),\n    status: $json.tenderStatus, reason: $json.tenderReason,\n    note: short($json.tenderNote, 4000)\n  },\n  initialPrice: $json.initialPrice,\n  products: { total: $json.productsTotal, supplied: $json.suppliedCount,\n    coveragePercent: $json.coveragePercent, coverageApproved: $json.coverageApproved,\n    lotDivisible: $json.lotDivisible, supplyTotalPriceRub: $json.supplyTotalPriceRub,\n    priceEvaluationComplete: $json.priceEvaluationComplete },\n  documents: { count: $json.documentCount, parsed: $json.parsedDocumentCount,\n    missing: $json.documentationMissing, unavailable: $json.documentationUnavailable,\n    processingStatus: $json.documentProcessingStatus },\n  hardReasonCount: $json.hardReasonCount, llmReasonCount: $json.llmReasonCount,\n  counterpartyStatus: $json.counterpartyStatus,\n  productPreview: Array.isArray($json.productPreview) ? $json.productPreview : [],\n  deterministicIssues: $json.deterministicIssues || []\n};\nconst prompt = [\n  'Выполни первичный аудит одного результата Tender Autofill.',\n  'Ищи любые подозрительные несостыковки, даже если их нет в deterministicIssues:',\n  '- противоречие статуса, причины и примечания;',\n  '- нелогичные документы, coverage, количество, цена и порог;',\n  '- причина без достаточного подтверждения;',\n  '- согласование при признаках отказа или отказ при признаках согласования;',\n  '- различие вердикта CSV и последнего результата БД;',\n  '- необычная или внутренне противоречивая формулировка;',\n  '- повтор одного товара коротким и длинным названием в разных документах;',\n  '- адрес, заказчик, получатель или место поставки, ошибочно записанные как товар.',\n  'Это только отбор кандидатов. Если данных недостаточно для уверенной проверки, пометь тендер для подробного аудита.',\n  'Верни только JSON:',\n  JSON.stringify({ suspicious: true, requiresDetailedReview: true,\n    confidence: 'low|medium|high', summary: 'кратко', signals: ['факт 1'] }),\n  'Лёгкая сводка одного тендера:', JSON.stringify(summary)\n].join('\\n');\nreturn [{ json: { scoutSeed: $json, scoutPrompt: prompt } }];"
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121020",
+      "name": "Подготовить первичный LLM-аудит",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        160
+      ],
+      "notesInFlow": true,
+      "notes": "Формирует компактный payload: вердикт CSV и лёгкая сводка БД одного tender, без полного result_json."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.scoutPrompt }}",
+        "options": {
+          "systemMessage": "Ты первичный независимый аудитор тендеров. Ищи подозрения шире фиксированных правил. Не выдумывай факты. Верни только JSON."
+        }
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121021",
+      "name": "AI Agent — первичный отбор",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        800,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notesInFlow": true,
+      "notes": "Просматривает каждый tender из CSV и решает, требуется ли подробная точечная проверка."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const seed = $('Подготовить первичный LLM-аудит').item.json.scoutSeed || {};\nconst response = $json || {};\nlet content = response.output ?? response.text ?? response.response ?? response.choices?.[0]?.message?.content ?? '';\nif (Array.isArray(content)) content = content.map((part) => part?.text || part?.content || '').join('');\nfunction parse(value) {\n  if (value && typeof value === 'object') return value;\n  const fence = String.fromCharCode(96).repeat(3);\n  const text = String(value || '').replaceAll(fence + 'json', '').replaceAll(fence, '').trim();\n  try { return JSON.parse(text); } catch {}\n  const start = text.indexOf('{'); const end = text.lastIndexOf('}');\n  if (start >= 0 && end > start) { try { return JSON.parse(text.slice(start, end + 1)); } catch {} }\n  return null;\n}\nconst parsed = parse(content);\nconst scoutAudit = parsed || {\n  suspicious: true, requiresDetailedReview: true, confidence: 'low',\n  summary: 'Ответ первичного аудитора не удалось разобрать; нужна подробная проверка.',\n  signals: [String(content || response.error?.message || 'Пустой ответ').slice(0, 1000)],\n  parseError: true\n};\nreturn [{ json: { ...seed, scoutAudit } }];"
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121022",
+      "name": "Разобрать первичный вердикт",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "deepseek/deepseek-v4-flash-0731",
+          "mode": "list",
+          "cachedResultName": "deepseek/deepseek-v4-flash-0731"
+        },
+        "builtInTools": {},
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121023",
+      "name": "Chat Model — первичный аудитор",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        800,
+        384
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "BJ6WpkyYLwrjOZhM",
+          "name": "OpenRouter прокси"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Модель для дешёвого первичного просмотра всех тендеров."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function yes(value) {\n  return value === true || String(value ?? '').toLowerCase() === 'true';\n}\nconst input = $input.all();\nconst selected = [];\nfor (const item of input) {\n  const row = item.json || {};\n  const scout = row.scoutAudit || {};\n  const deterministic = row.deterministicCandidate === true || (Array.isArray(row.deterministicIssues) && row.deterministicIssues.length > 0);\n  const llmSelected = yes(scout.suspicious) || yes(scout.requiresDetailedReview) || yes(scout.parseError);\n  const operational = row.jobStatus === 'failed' || (row.jobStatus === 'completed' && !row.hasResult) || !row.recordKey;\n  if (!deterministic && !llmSelected && !operational) continue;\n  const selectionReasons = [];\n  if (deterministic) selectionReasons.push('deterministic');\n  if (llmSelected) selectionReasons.push('llm_scout');\n  if (operational) selectionReasons.push('operational');\n  selected.push({ json: {\n    ...row,\n    selectionReasons,\n    needsLlm: Boolean(row.recordKey && row.hasResult)\n  } });\n}\nif (!selected.length) return [{ json: {\n  needsLlm: false, noIssues: true, checkedCount: input.length,\n  message: 'Детерминированная проверка и первичный LLM-аудит не нашли кандидатов.'\n} }];\nreturn selected;"
+      },
+      "id": "7b6d10b1-7ec3-4f33-b825-3b501c121024",
+      "name": "Объединить кандидатов детерминированный OR LLM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        160
+      ],
+      "notesInFlow": true,
+      "notes": "На подробный аудит попадает объединение: deterministicCandidate OR подозрение первичного AI Agent OR операционная ошибка."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Загрузить CSV для аудита": {
+      "main": [
+        [
+          {
+            "node": "Разделить загруженные CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Разделить загруженные CSV": {
+      "main": [
+        [
+          {
+            "node": "Извлечь строки CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Извлечь строки CSV": {
+      "main": [
+        [
+          {
+            "node": "Собрать Seldon ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Собрать Seldon ID": {
+      "main": [
+        [
+          {
+            "node": "Postgres — лёгкая сводка",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres — лёгкая сводка": {
+      "main": [
+        [
+          {
+            "node": "Детерминированная предварительная проверка",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Есть подозрения?": {
+      "main": [
+        [
+          {
+            "node": "Loop — тендеры для судьи",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Сформировать CSV без LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres — детали одного tender": {
+      "main": [
+        [
+          {
+            "node": "Подготовить запрос судье",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Подготовить запрос судье": {
+      "main": [
+        [
+          {
+            "node": "AI Agent — LLM судья",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Разобрать вердикт судьи": {
+      "main": [
+        [
+          {
+            "node": "Loop — тендеры для судьи",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Сформировать CSV подозрений": {
+      "main": [
+        [
+          {
+            "node": "Создать CSV подозрений",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Сформировать CSV без LLM": {
+      "main": [
+        [
+          {
+            "node": "Создать CSV без LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop — тендеры для судьи": {
+      "main": [
+        [
+          {
+            "node": "Сформировать CSV подозрений",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Postgres — детали одного tender",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent — LLM судья": {
+      "main": [
+        [
+          {
+            "node": "Разобрать вердикт судьи",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat Model — аудитор": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent — LLM судья",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Детерминированная предварительная проверка": {
+      "main": [
+        [
+          {
+            "node": "Loop — первичная проверка всех тендеров",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop — первичная проверка всех тендеров": {
+      "main": [
+        [
+          {
+            "node": "Объединить кандидатов детерминированный OR LLM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Подготовить первичный LLM-аудит",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Подготовить первичный LLM-аудит": {
+      "main": [
+        [
+          {
+            "node": "AI Agent — первичный отбор",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent — первичный отбор": {
+      "main": [
+        [
+          {
+            "node": "Разобрать первичный вердикт",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Разобрать первичный вердикт": {
+      "main": [
+        [
+          {
+            "node": "Loop — первичная проверка всех тендеров",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat Model — первичный аудитор": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent — первичный отбор",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Объединить кандидатов детерминированный OR LLM": {
+      "main": [
+        [
+          {
+            "node": "Есть подозрения?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "7b6d10b1-7ec3-4f33-b825-3b501c121999",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

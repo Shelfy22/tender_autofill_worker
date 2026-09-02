@@ -385,6 +385,7 @@ class CatalogMatcher:
                     documentPriceEvidence=product.documentPriceEvidence,
                     documentPriceSource=product.documentPriceSource,
                     sourceReference=product.sourceReference,
+                    sourceCells=product.sourceCells,
                     match=match,
                 )
             )

@@ -73,6 +73,42 @@ def test_characteristic_labels_do_not_replace_excel_header_columns() -> None:
     ]
 
 
+def test_invalid_structured_table_falls_back_to_text_extraction() -> None:
+    text = chr(10).join(
+        (
+            "Лист: Спецификация",
+            "Строка 1: A: Наименование товара | B: Ед. изм. | C: Количество",
+            "Строка 2: A: Кабель силовой | B: м | C: 25",
+        )
+    )
+    invalid_tables = [
+        {
+            "sheet": "Повреждённый лист",
+            "rows": [{"row": 0, "cells": "not-an-object"}],
+        }
+    ]
+
+    positions = extract_deterministic_positions(
+        text,
+        invalid_tables,  # type: ignore[arg-type]
+    )
+
+    assert [(item.product, item.quantity, item.unit) for item in positions] == [
+        ("Кабель силовой", 25.0, "м")
+    ]
+
+
+def test_malformed_llm_source_cells_are_normalized_without_failure() -> None:
+    position = TenderPosition.model_validate(
+        {
+            "product": "Кабель силовой",
+            "sourceCells": ["B: Кабель", "C: м", "D: 25"],
+        }
+    )
+
+    assert position.sourceCells == {}
+
+
 def test_merge_preserves_deterministic_document_price_on_llm_position() -> None:
     deterministic = [
         TenderPosition(

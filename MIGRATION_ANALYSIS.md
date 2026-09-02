@@ -318,11 +318,11 @@ Finalizer читает следующие ключи особенно явно:
 
 | attempt | Фактическая модель в JSON |
 |---|---|
-| 1 | `google/gemini-3.5-flash` |
-| 2 | `google/gemini-2.5-pro` |
-| 3 | `openai/gpt-5.5` |
+| 1 | `deepseek/deepseek-v4-flash-0731` |
+| 2 | `qwen/qwen3.7-flash` |
+| 3 | `qwen/qwen3.5-flash-02-23` |
 
-Это не `GPT-5 -> GPT-5-mini -> GPT-4.1`. Кроме того, attempt сейчас не добавляется Controller в payload, поэтому селектор обычно видит 1. Новая реализация должна сделать mapping environment-configurable и получать истинную попытку из PostgreSQL. Менять defaults на три названные пользователем GPT-модели без подтверждения нельзя.
+Текущая цепочка настраивается через environment: DeepSeek используется первым, затем Qwen3.7 Flash и Qwen3.5-Flash как fallback-модели.
 
 ## 10. Внешние зависимости
 

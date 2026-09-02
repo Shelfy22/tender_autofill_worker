@@ -731,6 +731,7 @@ documentLineTotalRub (сумма/стоимость всей строки), то
                     if position.sourceReference is not None
                     else None
                 ),
+                "sourceCells": position.sourceCells,
                 "requirements": position.requirements[:800],
                 "evidence": position.evidence[:800],
             }
@@ -766,6 +767,9 @@ documentLineTotalRub (сумма/стоимость всей строки), то
   и технические параметры.
 - sourceReference и evidence являются доказательствами. Отсутствие координат Excel снижает
   уверенность; не придумывай координаты.
+- Для Excel используй sourceCells как исходную JSON-строку таблицы. Значение из
+  sourceReference.productColumn является кандидатом в товар; значения из quantityColumn,
+  unitColumn и остальных колонок нельзя превращать в самостоятельные товары.
 
 Кандидаты:
 {json.dumps(items, ensure_ascii=False, indent=2)}

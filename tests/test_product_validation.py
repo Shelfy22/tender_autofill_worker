@@ -322,6 +322,62 @@ def test_headers_characteristics_and_preference_cells_are_removed_before_audit()
     assert debug["rejectedPositionCount"] == 4
 
 
+def test_structured_excel_cells_are_sent_to_llm_audit() -> None:
+    class AuditLlm:
+        seen: list[TenderPosition] = []
+
+        def audit_product_candidates(
+            self,
+            positions: list[TenderPosition],
+        ) -> ProductCandidateAuditResponse:
+            self.seen = positions
+            return ProductCandidateAuditResponse(
+                assignments=[
+                    ProductCandidateAssignment(
+                        positionIndex=1,
+                        role="purchase_item",
+                        confidence=0.99,
+                    )
+                ]
+            )
+
+    position = _position(
+        "Выключатель автоматический",
+        quantity=10,
+        unit="шт",
+    ).model_copy(
+        update={
+            "sourceCells": {
+                "A": "1",
+                "B": "Выключатель автоматический",
+                "C": "шт",
+                "D": "10",
+                "E": "Количество полюсов: 3",
+            },
+            "sourceReference": ProductSourceReference(
+                fileName="spec.xlsx",
+                sheet="Товары",
+                row=2,
+                productColumn="B",
+                unitColumn="C",
+                quantityColumn="D",
+                extractionMethod="excel_deterministic",
+            ),
+        }
+    )
+    llm = AuditLlm()
+
+    validated, _, debug = validate_product_candidates(
+        llm,  # type: ignore[arg-type]
+        [position],
+    )
+
+    assert llm.seen[0].sourceCells["B"] == "Выключатель автоматический"
+    assert llm.seen[0].sourceCells["D"] == "10"
+    assert validated == [position]
+    assert debug["requiresManualReview"] is False
+
+
 def test_only_non_product_cells_do_not_return_to_coverage_denominator() -> None:
     class AuditMustNotRun:
         def audit_product_candidates(

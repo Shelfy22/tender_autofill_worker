@@ -891,7 +891,17 @@ class DocumentProcessor:
                     )
             return result
 
-        text, status, warnings = parse_file(path, kind, self.settings, self.llm)
+        spreadsheet_tables = []
+        if kind in {"xls", "xlsx", "csv"}:
+            from app.services.parsers.spreadsheets import extract_spreadsheet_content
+
+            text, status, warnings, spreadsheet_tables = extract_spreadsheet_content(
+                path,
+                kind,
+                self.settings,
+            )
+        else:
+            text, status, warnings = parse_file(path, kind, self.settings, self.llm)
         warning = " ".join(warnings)
         resolved_name = safe_filename(
             str(descriptor.get("fileName") or path.name), path.name
@@ -918,6 +928,10 @@ class DocumentProcessor:
                 textPreview=text[:300],
                 parserStatus=status,
                 parserWarning=warning,
+                spreadsheetTables=[
+                    table.model_copy(update={"fileName": resolved_name})
+                    for table in spreadsheet_tables
+                ],
             )
         ]
 
@@ -969,6 +983,11 @@ def build_combined_text(
                 "parserStatus": document.parserStatus,
                 "textQualityOk": document.textQualityOk,
                 "textLength": len(document.text),
+                "spreadsheetTableCount": len(document.spreadsheetTables),
+                "spreadsheetRowCount": sum(
+                    len(table.rows)
+                    for table in document.spreadsheetTables
+                ),
             }
         )
     full = "\n".join(section for section in sections if section is not None)

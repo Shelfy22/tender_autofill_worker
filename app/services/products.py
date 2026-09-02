@@ -7,6 +7,8 @@ from typing import Any
 from app.models import (
     DocumentPriceSource,
     ProductSourceReference,
+    SpreadsheetRow,
+    SpreadsheetTable,
     TenderPosition,
     TenderPositionsResponse,
 )
@@ -170,6 +172,34 @@ def _header_role(value: Any) -> str | None:
     return None
 
 
+def infer_spreadsheet_headers(
+    rows: list[SpreadsheetRow],
+) -> tuple[list[int], dict[str, str], dict[str, str]]:
+    header_rows: list[int] = []
+    header_map: dict[str, str] = {}
+    header_labels: dict[str, str] = {}
+    for row in rows:
+        detected_headers = {
+            role: (column, value)
+            for column, value in row.cells.items()
+            if (role := _header_role(value)) is not None
+        }
+        core_header_roles = set(detected_headers) & {
+            "product",
+            "unit",
+            "quantity",
+            "unit_price",
+            "line_total",
+        }
+        if "product" not in detected_headers and len(core_header_roles) < 2:
+            continue
+        header_rows.append(row.row)
+        for role, (column, label) in detected_headers.items():
+            header_map[role] = column
+            header_labels[role] = label
+    return header_rows, header_map, header_labels
+
+
 def _parse_structured_cells(value: str) -> dict[str, str]:
     cells: dict[str, str] = {}
     for raw_part in value.split("|"):
@@ -229,7 +259,10 @@ def _currency_from_price_cells(*values: Any) -> str | None:
     return None
 
 
-def extract_deterministic_positions(text: str) -> list[TenderPosition]:
+def extract_deterministic_positions(
+    text: str,
+    spreadsheet_tables: list[SpreadsheetTable] | None = None,
+) -> list[TenderPosition]:
     normalized = _clean(text)
     patterns = [
         re.compile(
@@ -255,6 +288,7 @@ def extract_deterministic_positions(text: str) -> list[TenderPosition]:
         document_currency: str | None = None,
         document_price_source: DocumentPriceSource | None = None,
         source_reference: ProductSourceReference | None = None,
+        source_cells: dict[str, str] | None = None,
     ) -> None:
         name, unit = _clean(name), _clean(unit)
         quantity = parse_quantity(raw_quantity)
@@ -295,8 +329,110 @@ def extract_deterministic_positions(text: str) -> list[TenderPosition]:
                 ),
                 documentPriceSource=document_price_source,
                 sourceReference=source_reference,
+                sourceCells=dict(source_cells or {}),
             )
         )
+
+    for raw_table in spreadsheet_tables or []:
+        try:
+            table = (
+                raw_table
+                if isinstance(raw_table, SpreadsheetTable)
+                else SpreadsheetTable.model_validate(raw_table)
+            )
+        except Exception:
+            continue
+        header_columns: dict[str, str] = {}
+        header_labels: dict[str, str] = {}
+        for row in table.rows:
+            cells = row.cells
+            detected_headers = {
+                role: (column, value)
+                for column, value in cells.items()
+                if (role := _header_role(value)) is not None
+            }
+            core_header_roles = set(detected_headers) & {
+                "product",
+                "unit",
+                "quantity",
+                "unit_price",
+                "line_total",
+            }
+            is_header_row = (
+                "product" in detected_headers
+                or len(core_header_roles) >= 2
+            )
+            if is_header_row:
+                for role, (column, label) in detected_headers.items():
+                    header_columns[role] = column
+                    header_labels[role] = label
+                continue
+            if not {"product", "unit", "quantity"}.issubset(header_columns):
+                continue
+            name = cells.get(header_columns["product"], "")
+            unit = cells.get(header_columns["unit"], "")
+            raw_quantity = cells.get(header_columns["quantity"])
+            if not name or not unit or raw_quantity is None:
+                continue
+            unit_price_column = header_columns.get("unit_price", "")
+            line_total_column = header_columns.get("line_total", "")
+            raw_unit_price = cells.get(unit_price_column) if unit_price_column else None
+            raw_line_total = cells.get(line_total_column) if line_total_column else None
+            has_document_price = (
+                raw_unit_price not in {None, ""}
+                or raw_line_total not in {None, ""}
+            )
+            evidence = (
+                f"Строка {row.row}: "
+                + " | ".join(
+                    f"{column}: {value}"
+                    for column, value in cells.items()
+                )
+            )
+            price_source = (
+                DocumentPriceSource(
+                    fileName=table.fileName,
+                    sheet=table.sheet,
+                    row=row.row,
+                    unitPriceColumn=unit_price_column,
+                    lineTotalColumn=line_total_column,
+                    unitPriceHeader=header_labels.get("unit_price", ""),
+                    lineTotalHeader=header_labels.get("line_total", ""),
+                    extractionMethod="excel_deterministic",
+                )
+                if has_document_price
+                else None
+            )
+            add(
+                name,
+                unit,
+                raw_quantity,
+                evidence,
+                document_unit_price=raw_unit_price,
+                document_line_total=raw_line_total,
+                document_currency=_currency_from_price_cells(
+                    header_labels.get("unit_price"),
+                    header_labels.get("line_total"),
+                    raw_unit_price,
+                    raw_line_total,
+                ),
+                document_price_source=price_source,
+                source_reference=ProductSourceReference(
+                    fileName=table.fileName,
+                    sheet=table.sheet,
+                    row=row.row,
+                    productColumn=header_columns["product"],
+                    quantityColumn=header_columns["quantity"],
+                    unitColumn=header_columns["unit"],
+                    productHeader=header_labels.get("product", ""),
+                    quantityHeader=header_labels.get("quantity", ""),
+                    unitHeader=header_labels.get("unit", ""),
+                    extractionMethod="excel_deterministic",
+                ),
+                source_cells=cells,
+            )
+            if len(result) >= 100:
+                return result
 
     # Header-aware extraction for text emitted by the XLS/XLSX/CSV parser.
     # Column addresses make this deterministic even when cells between columns are empty.
@@ -678,6 +814,7 @@ def merge_positions(
                 "documentPriceEvidence",
                 "documentPriceSource",
                 "sourceReference",
+                "sourceCells",
             ):
                 existing_value = getattr(existing, field)
                 candidate_value = getattr(position, field)

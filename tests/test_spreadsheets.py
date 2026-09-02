@@ -1,9 +1,15 @@
+import json
 from pathlib import Path
 
 from openpyxl import Workbook
 
 from app.config import Settings
-from app.services.parsers.spreadsheets import extract_spreadsheet_text
+from app.models import SpreadsheetTable
+from app.services.documents import DocumentProcessor
+from app.services.parsers.spreadsheets import (
+    extract_spreadsheet_content,
+    extract_spreadsheet_text,
+)
 from app.services.products import extract_deterministic_positions
 
 
@@ -29,6 +35,104 @@ def test_xlsx_streaming_text_preserves_column_addresses_and_quantity(tmp_path: P
     positions = extract_deterministic_positions(text)
     assert [(item.product, item.unit, item.quantity) for item in positions] == [
         ("Кабель силовой", "шт", 12.0)
+    ]
+
+
+def test_xlsx_structured_json_has_header_map_and_valid_rows(tmp_path: Path) -> None:
+    path = tmp_path / "structured.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Товары"
+    sheet.append(
+        [
+            "№",
+            "Наименование товара",
+            "Ед. изм.",
+            "Количество",
+            "Количество полюсов",
+        ]
+    )
+    sheet.append([1, "Выключатель автоматический", "шт", 10, 3])
+    workbook.save(path)
+
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        max_text_chars_per_file=10_000,
+    )
+    text, status, warnings, tables = extract_spreadsheet_content(
+        path,
+        "xlsx",
+        settings,
+    )
+
+    assert status == "ok"
+    assert not warnings
+    assert len(tables) == 1
+    table = tables[0]
+    assert table.headerMap["product"] == "B"
+    assert table.headerMap["unit"] == "C"
+    assert table.headerMap["quantity"] == "D"
+    assert table.headerRows == [1]
+    assert table.rows[1].cells == {
+        "A": "1",
+        "B": "Выключатель автоматический",
+        "C": "шт",
+        "D": "10",
+        "E": "3",
+    }
+
+    serialized = json.dumps(
+        [item.model_dump() for item in tables],
+        ensure_ascii=False,
+    )
+    restored = [
+        SpreadsheetTable.model_validate(item)
+        for item in json.loads(serialized)
+    ]
+    positions = extract_deterministic_positions(text, restored)
+
+    assert len(positions) == 1
+    assert positions[0].product == "Выключатель автоматический"
+    assert positions[0].quantity == 10
+    assert positions[0].sourceCells["D"] == "10"
+    assert positions[0].sourceCells["E"] == "3"
+
+
+def test_document_processor_keeps_structured_tables_in_parsed_document(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "document.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Спецификация"
+    sheet.append(["Наименование товара", "Ед. изм.", "Количество"])
+    sheet.append(["Кабель силовой", "м", 25])
+    workbook.save(path)
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        temp_root=tmp_path,
+        max_text_chars_per_file=10_000,
+    )
+    processor = DocumentProcessor(settings, tmp_path)
+    try:
+        documents = processor._process_path(
+            path,
+            {"index": 1, "fileName": "document.xlsx"},
+            depth=0,
+        )
+    finally:
+        processor.close()
+
+    assert len(documents) == 1
+    assert documents[0].parserStatus == "ok"
+    assert len(documents[0].spreadsheetTables) == 1
+    assert documents[0].spreadsheetTables[0].fileName == "document.xlsx"
+    positions = extract_deterministic_positions(
+        documents[0].text,
+        documents[0].spreadsheetTables,
+    )
+    assert [(item.product, item.quantity, item.unit) for item in positions] == [
+        ("Кабель силовой", 25.0, "м")
     ]
 
 

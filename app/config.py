@@ -66,9 +66,9 @@ class Settings(BaseSettings):
     # API behaviour must be explicit: production may use an internal OpenRouter proxy
     # whose hostname does not contain "openrouter.ai".
     llm_provider: str = "openrouter"
-    llm_model_attempt_1: str = "google/gemini-3.5-flash"
-    llm_model_attempt_2: str = "google/gemini-2.5-pro"
-    llm_model_attempt_3: str = "openai/gpt-5.5"
+    llm_model_attempt_1: str = "deepseek/deepseek-v4-flash-0731"
+    llm_model_attempt_2: str = "qwen/qwen3.7-flash"
+    llm_model_attempt_3: str = "qwen/qwen3.5-flash-02-23"
     llm_enable_model_fallback: bool = True
     # Optional comma-separated override. Empty means: use the other attempt models.
     llm_fallback_models: str = ""
@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     llm_json_schema_strict: bool = True
     llm_enable_response_healing: bool = True
     llm_require_supported_parameters: bool = True
-    ocr_model: str = "google/gemini-2.5-flash"
+    ocr_model: str = "deepseek/deepseek-v4-flash-0731"
     ocr_fallback_models: str = ""
     ocr_pdf_engine: str = "mistral-ocr"
 

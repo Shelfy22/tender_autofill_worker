@@ -235,6 +235,12 @@ def test_mounting_cost_or_documentation_is_not_supply_with_work() -> None:
         "Поставщик передает заказчику руководство и документацию по монтажу оборудования.",
         "Поставщик обязан предоставить инструкцию по монтажу оборудования.",
         "Поставщик должен предоставить документацию по наладке и пуску оборудования.",
+        (
+            "По всем видам оборудования Поставщик должен предоставить полный комплект "
+            "технической и эксплуатационной документации на русском языке по монтажу, "
+            "наладке, пуску, сдаче в эксплуатацию, обеспечению правильной и безопасной "
+            "эксплуатации, технического обслуживания поставляемого оборудования."
+        ),
         "В комплект поставки входит руководство по монтажу и пусконаладке.",
     )
 
@@ -501,7 +507,7 @@ def test_supply_work_rejection_has_priority_over_ipro_and_product_review() -> No
     assert decision["manualReviewRequired"] is True
 
 
-def test_zip_in_main_product_completeness_is_not_repair_kit() -> None:
+def test_required_zip_in_main_product_completeness_triggers_reason() -> None:
     main_product = "Маркер по металлу электроискровой ЭИМ"
     text = (
         f"{main_product}. Комплектность: источник питания — 1 шт.; "
@@ -520,6 +526,71 @@ def test_zip_in_main_product_completeness_is_not_repair_kit() -> None:
                 }
             ],
         ),
+        text,
+    )
+
+    matching = [reason for reason in reasons if reason.reason == REPAIR_KIT_REASON]
+    assert len(matching) == 1
+    assert "ЗИП" in matching[0].evidence
+    assert checks["repairKitCheck"]["triggered"] is True
+
+
+def test_generator_required_zip_is_detected_outside_extracted_requirements() -> None:
+    for capacity in (80, 100):
+        product_name = (
+            f"Установка электрогенераторная номинальной мощностью {capacity} кВт"
+        )
+        text = (
+            f"{product_name}. Комплект поставки должен включать основной агрегат, "
+            "комплект ЗИП для технического обслуживания — 1 комплект."
+        )
+        reasons, checks = calculate_hard_reasons(
+            job(),
+            {"initialPrice": 25_097_905},
+            product_check(
+                total=1,
+                details=[
+                    {
+                        "positionIndex": 1,
+                        "sourceProduct": product_name,
+                        "productQuery": product_name,
+                        "sourceRequirements": f"Номинальная мощность {capacity} кВт",
+                    }
+                ],
+            ),
+            text,
+        )
+
+        assert REPAIR_KIT_REASON in [reason.reason for reason in reasons]
+        assert checks["repairKitCheck"]["triggered"] is True
+        assert "ЗИП" in checks["repairKitCheck"]["evidence"]
+
+
+def test_zip_documentation_without_physical_supply_does_not_trigger_reason() -> None:
+    text = (
+        "Поставщик должен предоставить документацию и руководство по эксплуатации "
+        "комплекта ЗИП."
+    )
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(total=1),
+        text,
+    )
+
+    assert REPAIR_KIT_REASON not in [reason.reason for reason in reasons]
+    assert checks["repairKitCheck"]["triggered"] is False
+
+
+def test_optional_zip_mention_does_not_trigger_reason() -> None:
+    text = (
+        "Комплект ЗИП может быть поставлен по отдельному заказу при необходимости "
+        "и не входит в комплект поставки оборудования."
+    )
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(total=1),
         text,
     )
 
@@ -580,7 +651,7 @@ def test_product_made_from_customer_layout_in_requirements_triggers_reason() -> 
     assert checks["repairKitCheck"]["triggered"] is True
 
 
-def test_llm_zip_reason_is_suppressed_for_main_product_completeness() -> None:
+def test_llm_zip_reason_is_accepted_for_required_main_product_completeness() -> None:
     main_product = "Маркер по металлу электроискровой ЭИМ"
     fields, _, decision = apply_final_decision(
         fields={},
@@ -614,9 +685,9 @@ def test_llm_zip_reason_is_suppressed_for_main_product_completeness() -> None:
         ),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
-    assert "tenderStatusReason" not in fields
-    assert decision["llmReasonCandidates"] == []
+    assert fields["tenderStatus"] == "Отказано КУ ЦП"
+    assert fields["tenderStatusReason"] == REPAIR_KIT_REASON
+    assert decision["llmReasonCandidates"][0]["reason"] == REPAIR_KIT_REASON
 
 
 def test_llm_cannot_reintroduce_delivery_deadline_without_validated_date() -> None:
@@ -655,6 +726,37 @@ def test_llm_supply_work_reason_is_suppressed_for_expertise_context() -> None:
         fields={},
         meta={},
         product_check=product_check(total=2),
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=SUPPLY_WORK_REASON,
+            detectedReasons=[
+                DecisionReason(
+                    reason=SUPPLY_WORK_REASON,
+                    evidence=evidence,
+                    confidence="high",
+                )
+            ],
+            confidence="high",
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert "tenderStatusReason" not in fields
+    assert decision["llmReasonCandidates"] == []
+
+
+def test_llm_supply_work_reason_is_suppressed_for_documentation_only() -> None:
+    evidence = (
+        "По всем видам оборудования Поставщик должен предоставить полный комплект "
+        "технической и эксплуатационной документации на русском языке по монтажу, "
+        "наладке, пуску, сдаче в эксплуатацию и техническому обслуживанию."
+    )
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=1),
         hard_reasons=[],
         counterparty_lookup={"status": "matched"},
         llm_decision=LlmDecision(
@@ -997,9 +1099,10 @@ def test_decision_prompt_distinguishes_supply_work_from_expertise() -> None:
     assert "предоставить документацию" in prompt
     assert "отрицательным evidence" in prompt
     assert "Не считать консигнацией ответственное/временное хранение" in prompt
-    assert "сама извлечённая товарная позиция" in prompt
-    assert "sourceRequirements именно этой товарной позиции" in prompt
-    assert "лишь входят в его комплектность" in prompt
+    assert "обязательный физический ЗИП" in prompt
+    assert "sourceRequirements позиции" in prompt
+    assert "входят в комплектность" in prompt
+    assert "Не считать обязательным ЗИП" in prompt
     assert "Регион регистрации" in prompt
 
 

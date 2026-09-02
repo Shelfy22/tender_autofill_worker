@@ -142,6 +142,7 @@ def summarize_product_coverage(
                     if item.sourceReference is not None
                     else None
                 ),
+                "sourceCells": item.sourceCells,
                 "supplied": supplied,
                 "fullMatch": full_match,
                 "analogMatch": analog_match,
