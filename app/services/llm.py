@@ -451,6 +451,12 @@ class LlmClient:
                     "jsonErrorPosition": error.pos,
                 }
             )
+        if error is not None:
+            choices = getattr(response, "choices", None) or []
+            choice = choices[0] if choices else None
+            message = getattr(choice, "message", None)
+            content = str(getattr(message, "content", None) or "")
+            details["contentPreview"] = content[:2000]
         self.observer.event(
             event_type="llm_response_parse",
             status="failed" if error else "completed",
@@ -474,67 +480,98 @@ class LlmClient:
         audit_details: dict[str, Any] | None = None,
     ) -> T:
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
-        started = time.monotonic()
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                temperature=0,
-                max_tokens=self.settings.llm_max_output_tokens,
-                response_format=self._response_format(schema),
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": f"{prompt}\n\nJSON Schema:\n{schema_json}"},
-                ],
-                extra_body=self._structured_extra_body(self.model_chain),
+        last_error: Exception | None = None
+        models = self.model_chain or [self.model]
+        for index, model in enumerate(models):
+            started = time.monotonic()
+            retry_hint = (
+                "\n\nPrevious model response was not accepted as valid JSON. "
+                "Return only one valid JSON object that matches the schema, without markdown, comments, or prose."
+                if index
+                else ""
             )
-        except Exception as exc:
-            self._observe_llm(
-                operation=operation,
-                primary_model=self.model,
-                model_chain=self.model_chain,
-                started=started,
-                error=exc,
-                audit_details=audit_details,
-            )
-            raise
-        self._record_model(response, self.model)
-        self._observe_llm(
-            operation=operation,
-            primary_model=self.model,
-            model_chain=self.model_chain,
-            started=started,
-            response=response,
-            audit_details=audit_details,
-        )
-        content = response.choices[0].message.content or ""
-        parse_started = time.monotonic()
-        extraction: JsonExtractionResult | None = None
-        fields_shape_normalized = False
-        products_shape_normalized = False
-        try:
-            finish_reason = self._response_details(response).get("finishReason")
-            normalized_finish_reason = str(finish_reason or "").strip().lower()
-            if normalized_finish_reason in {"length", "max_tokens", "max_output_tokens"}:
-                raise LlmResponseTruncatedError(
-                    f"LLM-ответ обрезан провайдером: finish_reason={finish_reason}"
+            try:
+                response = self.client.chat.completions.create(
+                    model=model,
+                    temperature=0,
+                    max_tokens=self.settings.llm_max_output_tokens,
+                    response_format=self._response_format(schema),
+                    messages=[
+                        {"role": "system", "content": system},
+                        {
+                            "role": "user",
+                            "content": f"{prompt}{retry_hint}\n\nJSON Schema:\n{schema_json}",
+                        },
+                    ],
+                    extra_body=self._structured_extra_body([model]),
                 )
-            extraction = extract_json_result(
-                content,
-                # Repairing a response explicitly marked as truncated could turn an
-                # incomplete business decision into an apparently valid one.
-                allow_repair=True,
-            )
-            fields_shape_normalized = bool(
-                schema is ExtractedFieldsResponse
-                and isinstance(extraction.value, dict)
-                and isinstance(extraction.value.get("fields"), list)
-            )
-            validation_value: Any = extraction.value
-            if schema is TenderPositionsResponse and isinstance(validation_value, list):
-                validation_value = {"products": validation_value, "warnings": []}
-                products_shape_normalized = True
-            validated = schema.model_validate(validation_value)
-        except Exception as exc:
+            except Exception as exc:
+                last_error = exc
+                self._observe_llm(
+                    operation=operation,
+                    primary_model=self.model,
+                    model_chain=models,
+                    started=started,
+                    error=exc,
+                    audit_details=audit_details,
+                )
+                if index + 1 < len(models):
+                    continue
+                raise
+
+            self._record_model(response, model)
+            content = response.choices[0].message.content or ""
+            parse_started = time.monotonic()
+            extraction: JsonExtractionResult | None = None
+            fields_shape_normalized = False
+            products_shape_normalized = False
+            try:
+                finish_reason = self._response_details(response).get("finishReason")
+                normalized_finish_reason = str(finish_reason or "").strip().lower()
+                if normalized_finish_reason in {"length", "max_tokens", "max_output_tokens"}:
+                    raise LlmResponseTruncatedError(
+                        f"LLM response was truncated by provider: finish_reason={finish_reason}"
+                    )
+                extraction = extract_json_result(
+                    content,
+                    # Repairing a response explicitly marked as truncated could turn an
+                    # incomplete business decision into an apparently valid one.
+                    allow_repair=True,
+                )
+                fields_shape_normalized = bool(
+                    schema is ExtractedFieldsResponse
+                    and isinstance(extraction.value, dict)
+                    and isinstance(extraction.value.get("fields"), list)
+                )
+                validation_value: Any = extraction.value
+                if schema is TenderPositionsResponse and isinstance(validation_value, list):
+                    validation_value = {"products": validation_value, "warnings": []}
+                    products_shape_normalized = True
+                validated = schema.model_validate(validation_value)
+            except Exception as exc:
+                last_error = exc
+                self._observe_parse(
+                    operation=operation,
+                    response=response,
+                    started=parse_started,
+                    extraction=extraction,
+                    fields_shape_normalized=fields_shape_normalized,
+                    products_shape_normalized=products_shape_normalized,
+                    error=exc,
+                )
+                self._observe_llm(
+                    operation=operation,
+                    primary_model=self.model,
+                    model_chain=models,
+                    started=started,
+                    response=response,
+                    error=exc,
+                    audit_details=audit_details,
+                )
+                if index + 1 < len(models):
+                    continue
+                raise
+
             self._observe_parse(
                 operation=operation,
                 response=response,
@@ -542,18 +579,20 @@ class LlmClient:
                 extraction=extraction,
                 fields_shape_normalized=fields_shape_normalized,
                 products_shape_normalized=products_shape_normalized,
-                error=exc,
             )
-            raise
-        self._observe_parse(
-            operation=operation,
-            response=response,
-            started=parse_started,
-            extraction=extraction,
-            fields_shape_normalized=fields_shape_normalized,
-            products_shape_normalized=products_shape_normalized,
-        )
-        return validated
+            self._observe_llm(
+                operation=operation,
+                primary_model=self.model,
+                model_chain=models,
+                started=started,
+                response=response,
+                audit_details=audit_details,
+            )
+            return validated
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("LLM model chain is empty")
 
     def extract_fields(self, combined_text: str) -> ExtractedFieldsResponse:
         skeleton = {name: {"value": None, "confidence": "low", "source": None, "evidence": None} for name in FIELD_NAMES}
