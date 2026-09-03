@@ -78,8 +78,8 @@ class Settings(BaseSettings):
     llm_json_schema_strict: bool = True
     llm_enable_response_healing: bool = True
     llm_require_supported_parameters: bool = True
-    catalog_selection_model: str = "qwen/qwen3.7-flash"
-    catalog_selection_fallback_models: str = "qwen/qwen3.5-flash-02-23,deepseek/deepseek-v4-flash-0731"
+    catalog_selection_model: str = "openai/gpt-oss-120b"
+    catalog_selection_fallback_models: str = "qwen/qwen3.7-flash,qwen/qwen3.5-flash-02-23"
     ocr_model: str = "deepseek/deepseek-v4-flash-0731"
     ocr_fallback_models: str = ""
     ocr_pdf_engine: str = "mistral-ocr"
