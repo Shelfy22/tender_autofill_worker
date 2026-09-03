@@ -5,6 +5,8 @@ import pytest
 
 from app.config import Settings
 from app.models import (
+    DocumentAnalysisResponse,
+    DocumentAnalysisUnit,
     ExtractedFieldsResponse,
     ProductHierarchyResponse,
     ProductCandidateAuditResponse,
@@ -13,6 +15,7 @@ from app.models import (
 )
 from app.services.llm import (
     LlmClient,
+    LlmMalformedResponseError,
     LlmResponseTruncatedError,
     extract_json,
     extract_json_result,
@@ -52,9 +55,12 @@ def test_json_call_rejects_even_valid_json_when_provider_marks_it_truncated() ->
             postgres_dsn="postgresql://user:pass@localhost/db",
             llm_api_key="test",
             llm_model_attempt_1="model-a",
+            llm_model_attempt_2="model-b",
+            llm_model_attempt_3="model-c",
         ),
         attempt=1,
     )
+    calls: list[str] = []
     response = SimpleNamespace(
         model="model-a",
         choices=[
@@ -65,10 +71,13 @@ def test_json_call_rejects_even_valid_json_when_provider_marks_it_truncated() ->
         ],
         usage=None,
     )
+
+    def create(**kwargs: object) -> SimpleNamespace:
+        calls.append(str(kwargs["model"]))
+        return response
+
     client.client = SimpleNamespace(
-        chat=SimpleNamespace(
-            completions=SimpleNamespace(create=lambda **_: response)
-        )
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )
 
     with pytest.raises(LlmResponseTruncatedError):
@@ -77,6 +86,8 @@ def test_json_call_rejects_even_valid_json_when_provider_marks_it_truncated() ->
             prompt="test",
             schema=ExtractedFieldsResponse,
         )
+
+    assert calls == ["model-a"]
 
 def test_json_call_falls_back_when_model_returns_invalid_json() -> None:
     client = LlmClient(
@@ -123,6 +134,90 @@ def test_json_call_falls_back_when_model_returns_invalid_json() -> None:
     assert parsed.fields == {}
     assert calls == ["model-a", "model-b"]
     assert client.models_used == ["model-a", "model-b"]
+
+
+def test_json_call_uses_stage_specific_completion_budget() -> None:
+    client = LlmClient(
+        Settings(
+            postgres_dsn="postgresql://user:pass@localhost/db",
+            llm_api_key="test",
+            llm_model_attempt_1="model-a",
+            llm_max_completion_tokens=24000,
+            catalog_selection_max_completion_tokens=1234,
+        ),
+        attempt=1,
+    )
+    captured: dict[str, object] = {}
+
+    def create(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            model="model-a",
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content='{"fields":{},"warnings":[]}'),
+                )
+            ],
+            usage=None,
+        )
+
+    client.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    client.json_call(
+        system="test",
+        prompt="test",
+        schema=ExtractedFieldsResponse,
+        operation="catalog_product_selection",
+    )
+
+    assert captured["max_tokens"] == 1234
+    assert captured["timeout"] == 45
+
+
+def test_json_call_respects_max_attempts_per_unit() -> None:
+    client = LlmClient(
+        Settings(
+            postgres_dsn="postgresql://user:pass@localhost/db",
+            llm_api_key="test",
+            llm_model_attempt_1="model-a",
+            llm_model_attempt_2="model-b",
+            llm_model_attempt_3="model-c",
+            llm_max_attempts_per_unit=2,
+        ),
+        attempt=1,
+    )
+    calls: list[str] = []
+
+    def create(**kwargs: object) -> SimpleNamespace:
+        model = str(kwargs["model"])
+        calls.append(model)
+        content = '{"fields":}' if model in {"model-a", "model-b"} else '{"fields":{},"warnings":[]}'
+        return SimpleNamespace(
+            model=model,
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=content),
+                )
+            ],
+            usage=None,
+        )
+
+    client.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with pytest.raises(Exception):
+        client.json_call(
+            system="test",
+            prompt="test",
+            schema=ExtractedFieldsResponse,
+        )
+
+    assert calls == ["model-a", "model-b"]
 
 
 def test_json_call_falls_back_when_provider_response_has_no_choices() -> None:
@@ -204,6 +299,35 @@ def test_json_call_normalizes_top_level_product_list() -> None:
     assert parsed.warnings == []
 
 
+def test_document_analyzer_prompt_distinguishes_documents_from_works_and_zip() -> None:
+    client = object.__new__(LlmClient)
+    captured: dict[str, object] = {}
+
+    def fake_json_call(**values: object) -> DocumentAnalysisResponse:
+        captured.update(values)
+        return DocumentAnalysisResponse(products=[], reasonHits=[], fieldCandidates=[])
+
+    client.json_call = fake_json_call  # type: ignore[method-assign]
+
+    response = client.analyze_document_unit(
+        DocumentAnalysisUnit(
+            unitId="unit-1",
+            sourceType="document",
+            fileName="spec.pdf",
+            text="предоставить документацию по монтажу, наладке и пуску; ЗИП входит в комплект поставки",
+            inputSha256="hash",
+        )
+    )
+
+    assert response.products == []
+    prompt = str(captured["prompt"])
+    assert captured["schema"] is DocumentAnalysisResponse
+    assert str(captured["operation"]).startswith("analyze_document: spec.pdf")
+    assert "Не считай инструкцию/руководство/документацию по монтажу" in prompt
+    assert "ЗИП/ремкомплект/запасные части" in prompt
+    assert "Не возвращай coverage" in prompt
+
+
 def test_product_hierarchy_uses_structured_response() -> None:
     client = object.__new__(LlmClient)
     captured: dict[str, object] = {}
@@ -247,41 +371,42 @@ def test_product_candidate_audit_uses_structured_response_and_source_cells() -> 
     assert "sourceReference" in str(captured["prompt"])
 
 
-def test_product_extraction_retries_truncated_full_response_in_chunks() -> None:
+
+def test_product_extraction_skips_chunk_retry_when_full_response_is_truncated() -> None:
     client = object.__new__(LlmClient)
     client.settings = SimpleNamespace(max_product_text_chars=100_000)
     calls: list[str] = []
 
     def fake_json_call(**values: object) -> TenderPositionsResponse:
-        operation = str(values["operation"])
-        calls.append(operation)
-        if operation == "extract_tender_products":
-            raise LlmResponseTruncatedError("finish_reason=length")
-        index = len(calls) - 1
-        return TenderPositionsResponse(
-            products=[
-                TenderPosition(
-                    product=f"Товар {index}",
-                    quantity=1,
-                    unit="шт",
-                )
-            ]
-        )
+        calls.append(str(values["operation"]))
+        raise LlmResponseTruncatedError("finish_reason=length")
 
     client.json_call = fake_json_call  # type: ignore[method-assign]
 
-    response = client.extract_products(
-        "\n".join(f"Строка {index}: товар" for index in range(1, 9)),
-        [],
-    )
+    response = client.extract_products("small tender text", [])
 
-    assert len(response.products) >= 2
-    assert any("повторено частями" in item for item in response.warnings)
-    assert calls[0] == "extract_tender_products"
-    assert all(
-        operation.startswith("extract_tender_products_chunk_")
-        for operation in calls[1:]
-    )
+    assert response.products == []
+    assert calls == ["extract_tender_products"]
+    assert any("skipped chunk retry" in item for item in response.warnings)
+
+
+def test_product_extraction_skips_chunk_retry_for_malformed_response() -> None:
+    client = object.__new__(LlmClient)
+    client.settings = SimpleNamespace(max_product_text_chars=100_000)
+    calls: list[str] = []
+
+    def fake_json_call(**values: object) -> TenderPositionsResponse:
+        calls.append(str(values["operation"]))
+        raise LlmMalformedResponseError("LLM response did not include choices")
+
+    client.json_call = fake_json_call  # type: ignore[method-assign]
+
+    response = client.extract_products("small tender text", [])
+
+    assert response.products == []
+    assert calls == ["extract_tender_products"]
+    assert any("skipped chunk retry" in item for item in response.warnings)
+
 
 def test_large_deterministic_product_list_skips_llm_product_extraction() -> None:
     client = object.__new__(LlmClient)
@@ -320,34 +445,26 @@ def test_trusted_deterministic_spreadsheet_positions_skip_llm_product_extraction
     assert response.products == []
     assert any("source of truth" in item for item in response.warnings)
 
-def test_large_product_text_skips_wasteful_full_llm_call() -> None:
+
+def test_large_product_text_skips_llm_product_extraction_without_chunks() -> None:
     client = object.__new__(LlmClient)
     client.settings = SimpleNamespace(max_product_text_chars=100_000)
-    calls: list[str] = []
 
-    def fake_json_call(**values: object) -> TenderPositionsResponse:
-        operation = str(values["operation"])
-        calls.append(operation)
-        return TenderPositionsResponse(products=[])
+    def fail_json_call(**_: object) -> TenderPositionsResponse:
+        raise AssertionError("LLM should not be called for oversized product extraction text")
 
-    client.json_call = fake_json_call  # type: ignore[method-assign]
+    client.json_call = fail_json_call  # type: ignore[method-assign]
 
     response = client.extract_products(
         "\n".join(
             f"Строка {index}: A: {index} | B: Товар {index} | D: шт | E: 1"
-            for index in range(1, 1_001)
+            for index in range(1, 5_001)
         ),
         [],
     )
 
     assert response.products == []
-    assert len(calls) > 1
-    assert "extract_tender_products" not in calls
-    assert all(
-        operation.startswith("extract_tender_products_chunk_")
-        for operation in calls
-    )
-    assert any("сразу выполнено небольшими частями" in item for item in response.warnings)
+    assert any("too large for safe single-call" in item for item in response.warnings)
 
 
 def test_markdown_wrapped_json_remains_supported() -> None:

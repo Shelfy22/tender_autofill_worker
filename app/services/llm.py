@@ -11,15 +11,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from json_repair import repair_json
-from openai import OpenAI
-from pydantic import BaseModel
+from openai import OpenAI, OpenAIError
+from pydantic import BaseModel, ValidationError
 
 from app.config import Settings
 from app.models import (
+    DocumentAnalysisResponse,
+    DocumentAnalysisUnit,
     ExtractedFieldsResponse,
     LlmDecision,
     ProductCandidateAuditResponse,
     ProductHierarchyResponse,
+    SpreadsheetCandidateReviewResponse,
+    TenderConsolidationResponse,
     TenderPosition,
     TenderPositionsResponse,
 )
@@ -48,48 +52,7 @@ class LlmMalformedResponseError(RuntimeError):
 
 
 PRODUCT_DIRECT_CALL_MAX_CHARS = 30_000
-PRODUCT_CHUNK_TARGET_CHARS = 12_000
-PRODUCT_CHUNK_MAX_DEPTH = 8
 PRODUCT_LLM_SKIP_DETERMINISTIC_COUNT = 25
-
-
-def _split_product_text(
-    text: str,
-    *,
-    target_chars: int = PRODUCT_CHUNK_TARGET_CHARS,
-) -> list[str]:
-    source = str(text or "").strip()
-    if not source:
-        return []
-    target = max(1_000, int(target_chars))
-    chunks: list[str] = []
-    current: list[str] = []
-    current_length = 0
-    for line in source.splitlines(keepends=True):
-        if len(line) > target:
-            if current:
-                chunks.append("".join(current).strip())
-                current = []
-                current_length = 0
-            chunks.extend(
-                line[index:index + target].strip()
-                for index in range(0, len(line), target)
-                if line[index:index + target].strip()
-            )
-            continue
-        if current and current_length + len(line) > target:
-            chunks.append("".join(current).strip())
-            current = []
-            current_length = 0
-        current.append(line)
-        current_length += len(line)
-    if current:
-        chunks.append("".join(current).strip())
-    chunks = [chunk for chunk in chunks if chunk]
-    if len(chunks) >= 2:
-        return chunks
-    midpoint = max(1, len(source) // 2)
-    return [chunk for chunk in (source[:midpoint].strip(), source[midpoint:].strip()) if chunk]
 
 
 def _json_candidates(source: str) -> list[tuple[str, str]]:
@@ -351,6 +314,7 @@ class LlmClient:
         return {
             "finishReason": getattr(choice, "finish_reason", None),
             "contentChars": len(content),
+            "outputChars": len(content),
             "contentSha256": hashlib.sha256(content.encode("utf-8")).hexdigest()
             if content
             else None,
@@ -392,12 +356,25 @@ class LlmClient:
         response: Any = None,
         error: BaseException | None = None,
         audit_details: dict[str, Any] | None = None,
+        configured_max_completion_tokens: int | None = None,
+        input_chars: int | None = None,
+        schema_chars: int | None = None,
+        input_sha256: str | None = None,
+        logical_call_id: str | None = None,
+        physical_call_index: int = 1,
+        timeout_seconds: float | None = None,
+        configured_max_attempts: int | None = None,
     ) -> None:
         if not self.observer:
             return
         actual_model = str(getattr(response, "model", None) or primary_model)
         prompt_tokens, completion_tokens, total_tokens = self._usage(response)
-        fallback_used = actual_model != primary_model
+        fallback_used = physical_call_index > 1 or actual_model != primary_model
+        duration = round(time.monotonic() - started, 3)
+        truncated = isinstance(error, LlmResponseTruncatedError)
+        status_code = int(getattr(error, "status_code", 0) or 0) if error else 200
+        rate_limited = status_code == 429
+        timeout_error = error is not None and "timeout" in type(error).__name__.lower()
         counters = {
             "llm_requests": 1,
             "llm_successes" if error is None else "llm_failures": 1,
@@ -405,6 +382,21 @@ class LlmClient:
             "llm_completion_tokens": completion_tokens,
             "llm_total_tokens": total_tokens,
             "llm_fallbacks": 1 if fallback_used else 0,
+        }
+        llm_performance = {
+            "logicalCalls": 1 if physical_call_index == 1 else 0,
+            "physicalCalls": 1,
+            "fallbackCalls": 1 if fallback_used else 0,
+            "retriedCalls": 0,
+            "successfulCalls": 1 if error is None else 0,
+            "failedCalls": 1 if error is not None else 0,
+            "truncatedCalls": 1 if truncated else 0,
+            "rateLimitedCalls": 1 if rate_limited else 0,
+            "timeoutCalls": 1 if timeout_error else 0,
+            "totalLlmSeconds": duration,
+            "successfulLlmSeconds": duration if error is None else 0,
+            "failedLlmSeconds": duration if error is not None else 0,
+            "fallbackLlmSeconds": duration if fallback_used else 0,
         }
         self.observer.event(
             event_type="external_call",
@@ -416,8 +408,8 @@ class LlmClient:
             primary_model=primary_model,
             provider_request_id=str(getattr(response, "id", "") or "") or None,
             http_method="POST",
-            http_status=int(getattr(error, "status_code", 0) or 0) or (200 if error is None else None),
-            duration_seconds=round(time.monotonic() - started, 3),
+            http_status=status_code or None,
+            duration_seconds=duration,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
@@ -426,6 +418,20 @@ class LlmClient:
                 "modelChain": model_chain,
                 "fallbackUsed": fallback_used,
                 "attempt": self.attempt,
+                "jobAttempt": self.attempt,
+                "logicalCallId": logical_call_id,
+                "physicalCallIndex": physical_call_index,
+                "physicalCallBudget": len(model_chain),
+                "inputSha256": input_sha256,
+                "inputChars": input_chars,
+                "schemaChars": schema_chars,
+                "configuredMaxCompletionTokens": configured_max_completion_tokens,
+                "timeoutSeconds": timeout_seconds,
+                "configuredMaxAttemptsPerUnit": configured_max_attempts,
+                "actualPromptTokens": prompt_tokens,
+                "actualCompletionTokens": completion_tokens,
+                "actualTotalTokens": total_tokens,
+                "llmPerformance": llm_performance,
                 **(self._response_details(response) if response is not None else {}),
                 **(audit_details or {}),
             },
@@ -443,16 +449,36 @@ class LlmClient:
         products_shape_normalized: bool = False,
         error: BaseException | None = None,
         primary_model: str | None = None,
+        configured_max_completion_tokens: int | None = None,
+        input_chars: int | None = None,
+        schema_chars: int | None = None,
+        input_sha256: str | None = None,
+        logical_call_id: str | None = None,
+        timeout_seconds: float | None = None,
+        configured_max_attempts: int | None = None,
     ) -> None:
         if not self.observer:
             return
         initial_error = extraction.initial_error if extraction else None
+        prompt_tokens, completion_tokens, total_tokens = self._usage(response)
         details: dict[str, Any] = {
             **self._response_details(response),
             "jsonSource": extraction.source if extraction else None,
             "jsonRepaired": bool(extraction and extraction.repaired),
             "fieldsShapeNormalized": fields_shape_normalized,
             "productsShapeNormalized": products_shape_normalized,
+            "attempt": self.attempt,
+            "jobAttempt": self.attempt,
+            "logicalCallId": logical_call_id,
+            "inputSha256": input_sha256,
+            "inputChars": input_chars,
+            "schemaChars": schema_chars,
+            "configuredMaxCompletionTokens": configured_max_completion_tokens,
+            "timeoutSeconds": timeout_seconds,
+            "configuredMaxAttemptsPerUnit": configured_max_attempts,
+            "actualPromptTokens": prompt_tokens,
+            "actualCompletionTokens": completion_tokens,
+            "actualTotalTokens": total_tokens,
         }
         if initial_error is not None:
             details.update(
@@ -500,11 +526,22 @@ class LlmClient:
         model_chain: list[str] | None = None,
     ) -> T:
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+        max_completion_tokens = self.settings.max_completion_tokens_for(operation)
+        request_timeout = self.settings.timeout_for(operation) or self.settings.llm_timeout_seconds
+        request_payload = f"{system}\n\n{prompt}\n\nJSON Schema:\n{schema_json}"
+        input_sha256 = hashlib.sha256(request_payload.encode("utf-8")).hexdigest()
+        logical_call_id = hashlib.sha256(
+            f"{operation}\n{schema.__name__}\n{input_sha256}".encode("utf-8")
+        ).hexdigest()
+        input_chars = len(prompt) + len(system)
+        schema_chars = len(schema_json)
         last_error: Exception | None = None
-        models = model_chain or self.model_chain or [self.model]
+        max_attempts = max(1, int(self.settings.llm_max_attempts_per_unit))
+        models = list(model_chain or self.model_chain or [self.model])[:max_attempts]
         primary_model = models[0]
         for index, model in enumerate(models):
             started = time.monotonic()
+            physical_call_index = index + 1
             retry_hint = (
                 "\n\nPrevious model response was not accepted as valid JSON. "
                 "Return only one valid JSON object that matches the schema, without markdown, comments, or prose."
@@ -515,7 +552,8 @@ class LlmClient:
                 response = self.client.chat.completions.create(
                     model=model,
                     temperature=0,
-                    max_tokens=self.settings.llm_max_output_tokens,
+                    max_tokens=max_completion_tokens,
+                    timeout=request_timeout,
                     response_format=self._response_format(schema),
                     messages=[
                         {"role": "system", "content": system},
@@ -535,6 +573,14 @@ class LlmClient:
                     started=started,
                     error=exc,
                     audit_details=audit_details,
+                    configured_max_completion_tokens=max_completion_tokens,
+                    input_chars=input_chars,
+                    schema_chars=schema_chars,
+                    input_sha256=input_sha256,
+                    logical_call_id=logical_call_id,
+                    physical_call_index=physical_call_index,
+                    timeout_seconds=request_timeout,
+                    configured_max_attempts=max_attempts,
                 )
                 if index + 1 < len(models):
                     continue
@@ -580,6 +626,13 @@ class LlmClient:
                     products_shape_normalized=products_shape_normalized,
                     error=exc,
                     primary_model=primary_model,
+                    configured_max_completion_tokens=max_completion_tokens,
+                    input_chars=input_chars,
+                    schema_chars=schema_chars,
+                    input_sha256=input_sha256,
+                    logical_call_id=logical_call_id,
+                    timeout_seconds=request_timeout,
+                    configured_max_attempts=max_attempts,
                 )
                 self._observe_llm(
                     operation=operation,
@@ -589,7 +642,17 @@ class LlmClient:
                     response=response,
                     error=exc,
                     audit_details=audit_details,
+                    configured_max_completion_tokens=max_completion_tokens,
+                    input_chars=input_chars,
+                    schema_chars=schema_chars,
+                    input_sha256=input_sha256,
+                    logical_call_id=logical_call_id,
+                    physical_call_index=physical_call_index,
+                    timeout_seconds=request_timeout,
+                    configured_max_attempts=max_attempts,
                 )
+                if isinstance(exc, LlmResponseTruncatedError):
+                    raise
                 if index + 1 < len(models):
                     continue
                 raise
@@ -602,6 +665,13 @@ class LlmClient:
                 fields_shape_normalized=fields_shape_normalized,
                 products_shape_normalized=products_shape_normalized,
                 primary_model=primary_model,
+                configured_max_completion_tokens=max_completion_tokens,
+                input_chars=input_chars,
+                schema_chars=schema_chars,
+                input_sha256=input_sha256,
+                logical_call_id=logical_call_id,
+                timeout_seconds=request_timeout,
+                configured_max_attempts=max_attempts,
             )
             self._observe_llm(
                 operation=operation,
@@ -610,6 +680,14 @@ class LlmClient:
                 started=started,
                 response=response,
                 audit_details=audit_details,
+                configured_max_completion_tokens=max_completion_tokens,
+                input_chars=input_chars,
+                schema_chars=schema_chars,
+                input_sha256=input_sha256,
+                logical_call_id=logical_call_id,
+                physical_call_index=physical_call_index,
+                timeout_seconds=request_timeout,
+                configured_max_attempts=max_attempts,
             )
             return validated
 
@@ -708,94 +786,168 @@ documentLineTotalRub (сумма/стоимость всей строки), то
 {text_part}
 """.strip()
 
-        should_chunk_immediately = (
-            len(source_text) > PRODUCT_DIRECT_CALL_MAX_CHARS
-            or len(deterministic) > 25
-        )
-        warnings: list[str] = []
-        if not should_chunk_immediately:
-            try:
-                return self.json_call(
-                    system="Ты извлекаешь товарные позиции. Только валидный JSON.",
-                    prompt=build_prompt(source_text, deterministic),
-                    schema=TenderPositionsResponse,
-                    operation="extract_tender_products",
-                )
-            except LlmResponseTruncatedError:
-                warnings.append(
-                "Полный ответ LLM по товарным позициям был обрезан; "
-                "извлечение автоматически повторено частями."
-                )
-        else:
-            warnings.append(
-                "Большой текст или большой детерминированный список позиций: "
-                "LLM-извлечение сразу выполнено небольшими частями."
+
+        if len(source_text) > PRODUCT_DIRECT_CALL_MAX_CHARS:
+            return TenderPositionsResponse(
+                products=[],
+                warnings=[
+                    "Product extraction text is too large for safe single-call LLM extraction; "
+                    "skipped LLM product extraction instead of splitting into chunks."
+                ],
             )
 
-        # Deterministic Excel positions are merged by the pipeline after this call,
-        # so repeating their complete JSON in every LLM chunk only wastes context
-        # and output tokens. Each small text chunk extracts its own visible rows.
-        work: list[tuple[str, int]] = [
-            (chunk, 0)
-            for chunk in _split_product_text(source_text)
+        try:
+            return self.json_call(
+                system="Ты извлекаешь товарные позиции. Только валидный JSON.",
+                prompt=build_prompt(source_text, deterministic),
+                schema=TenderPositionsResponse,
+                operation="extract_tender_products",
+            )
+        except (LlmResponseTruncatedError, LlmMalformedResponseError, OpenAIError, ValidationError) as exc:
+            return TenderPositionsResponse(
+                products=[],
+                warnings=[
+                    "LLM product extraction returned an unsafe response; "
+                    f"skipped chunk retry and continued with deterministic/Seldon positions. Error: {exc}"
+                ],
+            )
+
+
+    def review_spreadsheet_candidates(
+        self,
+        positions: list[TenderPosition],
+    ) -> SpreadsheetCandidateReviewResponse:
+        items = [
+            {
+                "candidateId": position.candidateId,
+                "product": position.product,
+                "productQuery": position.productQuery,
+                "quantity": position.quantity,
+                "unit": position.unit,
+                "sourceReference": (
+                    position.sourceReference.model_dump()
+                    if position.sourceReference is not None
+                    else None
+                ),
+                "sourceCells": position.sourceCells,
+                "evidence": position.evidence[:300],
+            }
+            for position in positions
+            if position.candidateId
         ]
-        if not work:
-            return TenderPositionsResponse(products=[], warnings=warnings)
+        prompt = f"""
+Проверь deterministic Excel candidates. Верни только JSON.
 
-        products = []
-        call_number = 0
-        while work:
-            text_part, depth = work.pop(0)
-            call_number += 1
-            try:
-                response = self.json_call(
-                    system="Ты извлекаешь товарные позиции. Только валидный JSON.",
-                    prompt=build_prompt(text_part, []),
-                    schema=TenderPositionsResponse,
-                    operation=f"extract_tender_products_chunk_{call_number}",
-                )
-            except LlmResponseTruncatedError:
-                if depth >= PRODUCT_CHUNK_MAX_DEPTH:
-                    raise
-                text_chunks = _split_product_text(
-                    text_part,
-                    target_chars=max(1_000, len(text_part) // 2),
-                )
-                if len(text_chunks) < 2:
-                    raise
-                work[0:0] = [
-                    (chunk, depth + 1)
-                    for chunk in text_chunks
-                ]
-                continue
-            products.extend(response.products)
-            warnings.extend(response.warnings)
+Твоя задача — не извлекать таблицу заново и не переписывать числа/цены/координаты.
+Python уже знает quantity, unit, prices, sourceCells и sourceReference.
+Для каждого candidateId верни ровно одно решение:
+- KEEP: это настоящая закупаемая товарная позиция;
+- CORRECT: это товар, но название нужно нормализовать; укажи normalizedProduct;
+- REMOVE: это адрес, число, заголовок, характеристика, служебная строка, компонент без доказательства самостоятельной поставки или дубль;
+- NEW: только если в sourceCells явно есть реальная закупаемая позиция, которую candidate product пропустил; укажи normalizedProduct.
 
-        unique_products = []
-        seen: set[tuple[str, float | None, str]] = set()
-        for product in products:
-            key = (
-                re.sub(
-                    r"[^a-zа-яё0-9]+",
-                    " ",
-                    str(product.productQuery or product.product).casefold(),
-                ).strip(),
-                product.quantity,
-                product.unit.casefold(),
-            )
-            if not key[0] or key in seen:
-                continue
-            seen.add(key)
-            unique_products.append(product)
-            if len(unique_products) >= 100:
-                warnings.append(
-                    "После частичного извлечения достигнут лимит 100 уникальных позиций."
-                )
-                break
-        return TenderPositionsResponse(
-            products=unique_products,
-            warnings=list(dict.fromkeys(warnings)),
+Правила:
+- Не превращай quantity/unit/price/адрес/слово «преимущество»/заголовки в товары.
+- Дубль одной и той же модели/позиции удаляй через REMOVE и duplicateOfCandidateId.
+- Повтор одной позиции в ТЗ/договоре/спецификации не увеличивает количество.
+- При конфликте количества не удаляй автоматически: KEEP/CORRECT с reason о конфликте.
+- reason короткий, до 300 символов. Не копируй всю строку.
+
+Candidates:
+{json.dumps(items, ensure_ascii=False, indent=2)}
+""".strip()
+        return self.json_call(
+            system=(
+                "Ты классифицируешь Excel candidates по candidateId. "
+                "Не генерируй заново metadata таблицы. Только JSON."
+            ),
+            prompt=prompt,
+            schema=SpreadsheetCandidateReviewResponse,
+            operation="analyze_document: spreadsheet_candidate_review",
         )
+
+    def analyze_document_unit(
+        self,
+        unit: DocumentAnalysisUnit,
+    ) -> DocumentAnalysisResponse:
+        prompt = f"""
+Проанализируй один DocumentAnalysisUnit. Верни только компактный JSON.
+
+Источник:
+- unitId: {unit.unitId}
+- sourceType: {unit.sourceType}
+- fileName: {unit.fileName}
+- documentKind: {unit.documentKind}
+- part: {unit.partIndex}/{unit.partTotal}
+- inputSha256: {unit.inputSha256}
+
+Нужно извлечь только факты из этого unit:
+1. products — закупаемые товарные позиции из текста. Evidence до 500 символов.
+2. reasonHits — только реально подтверждённые недетерминированные причины отказа. Не возвращай false для остальных причин.
+3. fieldCandidates — найденные поля карточки тендера, если они явно есть в этом unit.
+
+Ограничения:
+- Не принимай финальное решение по тендеру.
+- Не считай инструкцию/руководство/документацию по монтажу, наладке или пуску работами.
+- Причина «Номенклатура. Поставка с работами» только при прямой обязанности поставщика выполнить монтаж/установку/ПНР/шефмонтаж/ввод в эксплуатацию.
+- ЗИП/ремкомплект/запасные части — reasonHit, если физический комплект/запчасти входят в поставку или сама позиция является ЗИП.
+- Не возвращай coverage, цены каталога, final status, полный справочник причин или raw pages.
+- Для Excel не повторяй deterministic metadata; если candidates переданы, опирайся на candidateId.
+
+Spreadsheet candidates, если есть:
+{json.dumps(unit.spreadsheetCandidates, ensure_ascii=False, indent=2)}
+
+Текст unit:
+{unit.text}
+""".strip()
+        return self.json_call(
+            system=(
+                "Ты Document Analyzer. Читаешь ровно один bounded unit и извлекаешь "
+                "products, reasonHits, fieldCandidates. Не принимаешь финальное решение. Только JSON."
+            ),
+            prompt=prompt,
+            schema=DocumentAnalysisResponse,
+            operation=f"analyze_document: {unit.fileName or unit.sourceType} part {unit.partIndex}/{unit.partTotal}",
+            audit_details={
+                "unitId": unit.unitId,
+                "unitInputSha256": unit.inputSha256,
+                "sourceType": unit.sourceType,
+                "fileName": unit.fileName,
+                "partIndex": unit.partIndex,
+                "partTotal": unit.partTotal,
+            },
+        )
+
+    def consolidate_document_analysis(
+        self,
+        results: list[dict[str, Any]],
+    ) -> TenderConsolidationResponse:
+        compact = json.dumps(results, ensure_ascii=False, separators=(",", ":"))
+        prompt = f"""
+Сконсолидируй результаты Document Analysis. Только JSON.
+
+Вход уже structured и compact. Raw document text тебе не передан.
+Задачи:
+- объединить products;
+- удалить междокументные дубли;
+- удалить мусорные товары: адреса, числа, заголовки, характеристики, служебные строки;
+- сохранить quantity conflict как warning/incomplete, а не молча суммировать;
+- объединить reasonHits и fieldCandidates;
+- не считать coverage, Qdrant selection, final status или причины по каталогу.
+
+DocumentAnalysisResults:
+{compact}
+""".strip()
+        return self.json_call(
+            system=(
+                "Ты Tender Consolidator. Получаешь только structured facts, не raw text. "
+                "Не принимаешь финальное решение. Только JSON."
+            ),
+            prompt=prompt,
+            schema=TenderConsolidationResponse,
+            operation="consolidate_tender_analysis",
+        )
+
 
     def audit_product_candidates(
         self,
@@ -931,7 +1083,13 @@ Input positions:
 
     def ocr_pdf(self, path: Path) -> str:
         data = base64.b64encode(path.read_bytes()).decode("ascii")
-        ocr_models = self.settings.models_for_ocr()
+        ocr_models = self.settings.models_for_ocr()[: max(1, int(self.settings.llm_max_attempts_per_unit))]
+        max_completion_tokens = self.settings.max_completion_tokens_for("ocr_pdf")
+        request_timeout = self.settings.timeout_for("ocr_pdf") or self.settings.llm_timeout_seconds
+        file_bytes = path.stat().st_size
+        input_sha256 = hashlib.sha256(
+            f"ocr_pdf\n{path.name}\n{file_bytes}".encode("utf-8")
+        ).hexdigest()
         extra_body: dict[str, Any] = {
             "plugins": [{"id": "file-parser", "pdf": {"engine": self.settings.ocr_pdf_engine}}]
         }
@@ -941,7 +1099,8 @@ Input positions:
             response = self.client.chat.completions.create(
                 model=ocr_models[0],
                 temperature=0,
-                max_tokens=self.settings.llm_max_output_tokens,
+                max_tokens=max_completion_tokens,
+                timeout=request_timeout,
                 messages=[
                     {
                         "role": "system",
@@ -970,6 +1129,14 @@ Input positions:
                 model_chain=ocr_models,
                 started=started,
                 error=exc,
+                configured_max_completion_tokens=max_completion_tokens,
+                input_chars=file_bytes,
+                schema_chars=0,
+                input_sha256=input_sha256,
+                logical_call_id=input_sha256,
+                physical_call_index=1,
+                timeout_seconds=request_timeout,
+                configured_max_attempts=len(ocr_models),
             )
             raise
         self._record_model(response, ocr_models[0])
@@ -979,5 +1146,11 @@ Input positions:
             model_chain=ocr_models,
             started=started,
             response=response,
+            configured_max_completion_tokens=max_completion_tokens,
+            input_chars=file_bytes,
+            schema_chars=0,
+            input_sha256=input_sha256,
+            logical_call_id=input_sha256,
+            physical_call_index=1,
         )
         return response.choices[0].message.content or ""

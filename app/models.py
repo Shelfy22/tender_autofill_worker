@@ -212,6 +212,7 @@ class ProductSourceReference(BaseModel):
 
 
 class TenderPosition(BaseModel):
+    candidateId: str = ""
     product: str
     productQuery: str | None = None
     brand: str = ""
@@ -312,6 +313,83 @@ class ProductCandidateAuditResponse(BaseModel):
         default_factory=list,
         max_length=100,
     )
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SpreadsheetCandidateDecision(BaseModel):
+    candidateId: str
+    decision: Literal["KEEP", "CORRECT", "REMOVE", "NEW"]
+    normalizedProduct: str | None = None
+    reason: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    duplicateOfCandidateId: str | None = None
+
+
+class SpreadsheetCandidateReviewResponse(BaseModel):
+    decisions: list[SpreadsheetCandidateDecision] = Field(default_factory=list, max_length=150)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DocumentFieldCandidate(BaseModel):
+    fieldName: str
+    value: Any = None
+    confidence: Literal["low", "medium", "high"] = "low"
+    evidence: str = ""
+    sourceReference: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def trim_evidence(cls, value: Any) -> str:
+        return str(value or "").strip()[:500]
+
+
+class DocumentReasonHit(BaseModel):
+    reason: str
+    evidence: str = ""
+    confidence: Literal["low", "medium", "high"] = "low"
+    sourceReference: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def trim_evidence(cls, value: Any) -> str:
+        return str(value or "").strip()[:500]
+
+
+class DocumentAnalysisUnit(BaseModel):
+    unitId: str
+    sourceType: Literal["seldon_page", "document", "spreadsheet"] = "document"
+    documentIndex: int | None = None
+    fileName: str = ""
+    documentKind: str = "document"
+    partIndex: int = Field(default=1, ge=1)
+    partTotal: int = Field(default=1, ge=1)
+    text: str = ""
+    spreadsheetCandidates: list[dict[str, Any]] = Field(default_factory=list)
+    inputSha256: str = ""
+
+
+class DocumentAnalysisResponse(BaseModel):
+    products: list[TenderPosition] = Field(default_factory=list, max_length=100)
+    reasonHits: list[DocumentReasonHit] = Field(default_factory=list, max_length=50)
+    fieldCandidates: list[DocumentFieldCandidate] = Field(default_factory=list, max_length=80)
+    analysisIncomplete: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DocumentAnalysisResult(DocumentAnalysisResponse):
+    unitId: str
+    inputSha256: str = ""
+    sourceType: str = "document"
+    fileName: str = ""
+    partIndex: int = 1
+    partTotal: int = 1
+
+
+class TenderConsolidationResponse(BaseModel):
+    products: list[TenderPosition] = Field(default_factory=list, max_length=100)
+    reasonHits: list[DocumentReasonHit] = Field(default_factory=list, max_length=80)
+    fieldCandidates: list[DocumentFieldCandidate] = Field(default_factory=list, max_length=120)
+    incompleteUnitIds: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 

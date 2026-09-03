@@ -64,7 +64,7 @@ def _set(
 def validate_fields(
     job: NormalizedJob,
     extracted: ExtractedFieldsResponse | None,
-    combined_text: str,
+    deterministic_text: str,
     documents: list[ParsedDocument],
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     fields: dict[str, Any] = {}
@@ -137,7 +137,7 @@ def validate_fields(
             f"Лот делимый: {report_lot_divisible}",
         )
 
-    text_lower = combined_text.lower().replace("ё", "е")
+    text_lower = deterministic_text.lower().replace("ё", "е")
     if not fields.get("federalLaw"):
         law = "223" if "223-фз" in text_lower or job.report_id == 1 else "44" if "44-фз" in text_lower or job.report_id == 2 else "commercial" if job.report_id == 3 else None
         _set(fields, meta, "federalLaw", law, "Seldon/документы", "high", f"reportId={job.report_id}")
@@ -155,10 +155,10 @@ def validate_fields(
         _set(fields, meta, "nationalRegime", regime, "Fallback validation", "medium", "Проверка национального режима")
 
     if not fields.get("paymentDelayDays"):
-        match = re.search(r"оплат[а-я\s]{0,80}в\s+течение\s+(\d+)\s*(?:рабоч|календарн)?\s*д", combined_text, re.I)
+        match = re.search(r"оплат[а-я\s]{0,80}в\s+течение\s+(\d+)\s*(?:рабоч|календарн)?\s*д", deterministic_text, re.I)
         if match:
             _set(fields, meta, "paymentDelayDays", int(match.group(1)), "Fallback validation", "high", match.group(0))
-    if re.search(r"по\s+заявк|партиями|график(?:у|а)?\s+поставки", combined_text, re.I):
+    if re.search(r"по\s+заявк|партиями|график(?:у|а)?\s+поставки", deterministic_text, re.I):
         _set(fields, meta, "deliveryType", "by_requests", "Fallback validation", "high", "Поставка партиями/по заявкам")
         if not fields.get("deliveryNote"):
             _set(fields, meta, "deliveryNote", "Поставка партиями/по заявкам", "Fallback validation", "high", "Поставка партиями/по заявкам")

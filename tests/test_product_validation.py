@@ -1,11 +1,17 @@
+from types import SimpleNamespace
+
 from app.models import (
     ProductCandidateAssignment,
     ProductCandidateAuditResponse,
     ProductSourceReference,
+    SpreadsheetCandidateDecision,
+    SpreadsheetCandidateReviewResponse,
     TenderPosition,
 )
 from app.services.product_validation import (
     apply_product_candidate_audit,
+    apply_spreadsheet_candidate_review,
+    review_spreadsheet_candidate_positions,
     validate_product_candidates,
 )
 
@@ -24,6 +30,96 @@ def _position(
         unit=unit,
         requirements=requirements,
     )
+
+
+def _excel_position(candidate_id: str, product: str, row: int) -> TenderPosition:
+    return TenderPosition(
+        candidateId=candidate_id,
+        product=product,
+        productQuery=product,
+        quantity=10,
+        unit="шт",
+        evidence=f"Строка {row}: B: {product} | C: шт | D: 10",
+        source="excel_table_deterministic",
+        sourceReference=ProductSourceReference(
+            fileName="spec.xlsx",
+            sheet="Лист1",
+            row=row,
+            productColumn="B",
+            quantityColumn="D",
+            unitColumn="C",
+            extractionMethod="excel_deterministic",
+        ),
+        sourceCells={"B": product, "C": "шт", "D": "10"},
+    )
+
+
+def test_spreadsheet_candidate_review_removes_and_corrects_without_touching_metadata() -> None:
+    positions = [
+        _excel_position("xlsx:spec.xlsx:Лист1:2", "10", 2),
+        _excel_position("xlsx:spec.xlsx:Лист1:3", "Кабель селовой", 3),
+    ]
+    response = SpreadsheetCandidateReviewResponse(
+        decisions=[
+            SpreadsheetCandidateDecision(
+                candidateId="xlsx:spec.xlsx:Лист1:2",
+                decision="REMOVE",
+                reason="Это количество, а не товар",
+                confidence=0.99,
+            ),
+            SpreadsheetCandidateDecision(
+                candidateId="xlsx:spec.xlsx:Лист1:3",
+                decision="CORRECT",
+                normalizedProduct="Кабель силовой",
+                reason="Исправлена OCR/опечатка в названии",
+                confidence=0.9,
+            ),
+        ]
+    )
+
+    reviewed, warnings, debug = apply_spreadsheet_candidate_review(positions, response)
+
+    assert [position.product for position in reviewed] == ["Кабель силовой"]
+    assert reviewed[0].quantity == 10
+    assert reviewed[0].unit == "шт"
+    assert reviewed[0].sourceReference == positions[1].sourceReference
+    assert debug["removedCount"] == 1
+    assert debug["correctedCount"] == 1
+    assert any("исключён до Qdrant" in warning for warning in warnings)
+
+
+def test_spreadsheet_candidate_review_is_row_aware_batched() -> None:
+    positions = [
+        _excel_position(f"xlsx:spec.xlsx:Лист1:{row}", f"Товар {row}", row)
+        for row in range(2, 9)
+    ]
+    calls: list[list[str]] = []
+
+    class FakeLlm:
+        settings = SimpleNamespace(
+            spreadsheet_candidate_review_max_rows=3,
+            spreadsheet_candidate_review_max_chars=100_000,
+        )
+
+        def review_spreadsheet_candidates(self, batch: list[TenderPosition]) -> SpreadsheetCandidateReviewResponse:
+            calls.append([position.candidateId for position in batch])
+            return SpreadsheetCandidateReviewResponse(
+                decisions=[
+                    SpreadsheetCandidateDecision(
+                        candidateId=position.candidateId,
+                        decision="KEEP",
+                        confidence=0.99,
+                    )
+                    for position in batch
+                ]
+            )
+
+    reviewed, warnings, debug = review_spreadsheet_candidate_positions(FakeLlm(), positions)  # type: ignore[arg-type]
+
+    assert [position.candidateId for position in reviewed] == [position.candidateId for position in positions]
+    assert not warnings
+    assert debug["batchCount"] == 3
+    assert [len(call) for call in calls] == [3, 3, 1]
 
 
 def test_high_confidence_characteristic_is_removed_before_catalog() -> None:

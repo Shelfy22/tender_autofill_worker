@@ -1106,6 +1106,32 @@ def test_decision_prompt_distinguishes_supply_work_from_expertise() -> None:
     assert "Регион регистрации" in prompt
 
 
+def test_decision_prompt_uses_document_reason_hits_as_compact_semantic_facts() -> None:
+    prompt = build_decision_prompt(
+        fields={},
+        hard_reasons=[],
+        checks={
+            "documentReasonHits": [
+                {
+                    "reason": REPAIR_KIT_REASON,
+                    "evidence": "В комплект поставки входит физический ЗИП",
+                    "confidence": "high",
+                }
+            ],
+            "documentAnalysisIncomplete": False,
+        },
+        product_check=product_check(total=1),
+        all_text='{"documentAnalysis":{"reasonHits":[{"reason":"ЗИП"}]}}',
+        maximum_text_chars=10_000,
+    )
+
+    assert "documentReasonHits" in prompt
+    assert "В комплект поставки входит физический ЗИП" in prompt
+    assert "Текст / structured facts" in prompt
+    assert "не требуй повторного чтения raw документации" in prompt
+    assert "documentAnalysisIncomplete=true" in prompt
+
+
 def test_decision_prompt_excludes_actual_cost_reason_from_llm_options() -> None:
     prompt = build_decision_prompt(
         fields={"initialPrice": 1_300_000},

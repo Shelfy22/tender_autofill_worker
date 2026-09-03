@@ -361,8 +361,33 @@ class Repository:
                         ),
                     ]
                 )
-                if bool((event.get("details") or {}).get("fallbackUsed")):
+                details = event.get("details") or {}
+                performance = details.get("llmPerformance") if isinstance(details, dict) else {}
+                if bool(details.get("fallbackUsed")):
                     metric_increments.append(("llm_fallbacks", model, status, 1))
+                if isinstance(performance, dict):
+                    metric_mapping = {
+                        "logicalCalls": "llm_logical_calls",
+                        "physicalCalls": "llm_physical_calls",
+                        "fallbackCalls": "llm_fallback_calls",
+                        "retriedCalls": "llm_retried_calls",
+                        "failedCalls": "llm_failed_calls",
+                        "truncatedCalls": "llm_truncated_calls",
+                        "rateLimitedCalls": "llm_rate_limited_calls",
+                        "timeoutCalls": "llm_timeout_calls",
+                    }
+                    for source_key, metric_name in metric_mapping.items():
+                        value = int(performance.get(source_key) or 0)
+                        if value:
+                            metric_increments.append((metric_name, model, status, value))
+                    for source_key, metric_name in {
+                        "totalLlmSeconds": "llm_seconds_total",
+                        "failedLlmSeconds": "llm_failed_seconds_total",
+                        "fallbackLlmSeconds": "llm_fallback_seconds_total",
+                    }.items():
+                        seconds = float(performance.get(source_key) or 0)
+                        if seconds > 0:
+                            metric_increments.append((metric_name, model, status, int(round(seconds * 1000))))
             elif event.get("event_type") == "external_call" and service == "qdrant":
                 metric_increments.extend(
                     [

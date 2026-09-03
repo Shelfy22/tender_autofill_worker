@@ -9,6 +9,7 @@ from app.models import (
     ProductCandidateAuditResponse,
     ProductHierarchyAssignment,
     ProductHierarchyResponse,
+    SpreadsheetCandidateReviewResponse,
     TenderPosition,
 )
 from app.services.product_hierarchy import apply_product_hierarchy
@@ -395,6 +396,222 @@ def apply_product_candidate_audit(
             "они сохранены в диагностике, расчёт покрытия продолжен."
         )
     return validated, list(dict.fromkeys(warnings)), debug
+
+
+def _spreadsheet_candidate_payload(position: TenderPosition) -> dict[str, Any]:
+    return {
+        "candidateId": position.candidateId,
+        "product": position.product,
+        "productQuery": position.productQuery,
+        "quantity": position.quantity,
+        "unit": position.unit,
+        "sourceReference": (
+            position.sourceReference.model_dump()
+            if position.sourceReference is not None
+            else None
+        ),
+        "sourceCells": position.sourceCells,
+        "evidence": position.evidence[:300],
+    }
+
+
+def _spreadsheet_review_batches(
+    settings: Any,
+    positions: list[TenderPosition],
+) -> list[list[TenderPosition]]:
+    max_rows = max(1, int(getattr(settings, "spreadsheet_candidate_review_max_rows", 40)))
+    max_chars = max(1_000, int(getattr(settings, "spreadsheet_candidate_review_max_chars", 24_000)))
+    batches: list[list[TenderPosition]] = []
+    current: list[TenderPosition] = []
+    current_chars = 0
+    for position in positions:
+        candidate_chars = len(str(_spreadsheet_candidate_payload(position)))
+        if current and (len(current) >= max_rows or current_chars + candidate_chars > max_chars):
+            batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(position)
+        current_chars += candidate_chars
+    if current:
+        batches.append(current)
+    return batches
+
+
+def apply_spreadsheet_candidate_review(
+    positions: list[TenderPosition],
+    response: SpreadsheetCandidateReviewResponse,
+) -> tuple[list[TenderPosition], list[str], dict[str, Any]]:
+    warnings = list(response.warnings)
+    debug: dict[str, Any] = {
+        "reviewRequested": bool(positions),
+        "applied": False,
+        "originalPositionCount": len(positions),
+        "validatedPositionCount": len(positions),
+        "removedCount": 0,
+        "correctedCount": 0,
+        "newCount": 0,
+        "unresolved": [],
+        "decisions": [],
+    }
+    by_id = {position.candidateId: index for index, position in enumerate(positions) if position.candidateId}
+    decisions = {}
+    for decision in response.decisions:
+        if not decision.candidateId:
+            continue
+        decisions[decision.candidateId] = decision
+        debug["decisions"].append(decision.model_dump())
+
+    result: list[TenderPosition] = []
+    removed_ids: set[str] = set()
+    for position in positions:
+        decision = decisions.get(position.candidateId)
+        if decision is None:
+            result.append(position)
+            debug["unresolved"].append(
+                {
+                    "candidateId": position.candidateId,
+                    "product": position.product,
+                    "reason": "LLM review did not return a decision for candidateId",
+                }
+            )
+            continue
+        if decision.decision == "REMOVE":
+            target_ok = not decision.duplicateOfCandidateId or decision.duplicateOfCandidateId in by_id
+            if decision.confidence >= AUDIT_ACTION_CONFIDENCE and target_ok:
+                removed_ids.add(position.candidateId)
+                warnings.append(
+                    "Excel candidate исключён до Qdrant: "
+                    f"{position.product[:200]} ({decision.reason[:200]})."
+                )
+                continue
+            result.append(position)
+            debug["unresolved"].append(
+                {
+                    "candidateId": position.candidateId,
+                    "product": position.product,
+                    "reason": decision.reason or "Недостаточная уверенность для REMOVE",
+                }
+            )
+            continue
+        if decision.decision == "CORRECT" and decision.normalizedProduct and decision.confidence >= AUDIT_REVIEW_CONFIDENCE:
+            corrected_name = _clean(decision.normalizedProduct)
+            if corrected_name and corrected_name != position.product:
+                result.append(
+                    position.model_copy(
+                        update={
+                            "product": corrected_name,
+                            "productQuery": corrected_name,
+                            "evidence": _clean(
+                                " | ".join(
+                                    filter(
+                                        None,
+                                        (
+                                            position.evidence,
+                                            f"Excel candidate review corrected name: {decision.reason[:300]}",
+                                        ),
+                                    )
+                                )
+                            )[:1200],
+                        }
+                    )
+                )
+                debug["correctedCount"] += 1
+                continue
+        result.append(position)
+
+    existing_names = {_identity(position.productQuery or position.product) for position in result}
+    for decision in response.decisions:
+        if decision.decision != "NEW" or not decision.normalizedProduct:
+            continue
+        normalized = _clean(decision.normalizedProduct)
+        if decision.confidence < AUDIT_ACTION_CONFIDENCE or not normalized:
+            debug["unresolved"].append(
+                {
+                    "candidateId": decision.candidateId,
+                    "product": normalized,
+                    "reason": decision.reason or "Недостаточная уверенность для NEW",
+                }
+            )
+            continue
+        key = _identity(normalized)
+        if key and key in existing_names:
+            continue
+        existing_names.add(key)
+        result.append(
+            TenderPosition(
+                candidateId=f"llm:new:{decision.candidateId}",
+                product=normalized,
+                productQuery=normalized,
+                evidence=decision.reason[:500],
+                source="llm_excel_candidate_review",
+            )
+        )
+        debug["newCount"] += 1
+        warnings.append(f"LLM обнаружила пропущенную Excel-позицию: {normalized[:200]}.")
+
+    debug["removedCount"] = len(removed_ids)
+    debug["validatedPositionCount"] = len(result)
+    debug["applied"] = bool(removed_ids or debug["correctedCount"] or debug["newCount"])
+    return result, list(dict.fromkeys(warnings)), debug
+
+
+def review_spreadsheet_candidate_positions(
+    llm: LlmClient,
+    positions: list[TenderPosition],
+) -> tuple[list[TenderPosition], list[str], dict[str, Any]]:
+    spreadsheet_positions = [position for position in positions if position.candidateId.startswith("xlsx:")]
+    if not spreadsheet_positions:
+        return positions, [], {
+            "reviewRequested": False,
+            "originalPositionCount": len(positions),
+            "validatedPositionCount": len(positions),
+        }
+
+    current_by_id = {position.candidateId: position for position in positions if position.candidateId}
+    all_warnings: list[str] = []
+    combined_debug: dict[str, Any] = {
+        "reviewRequested": True,
+        "batchCount": 0,
+        "originalPositionCount": len(positions),
+        "validatedPositionCount": len(positions),
+        "batches": [],
+    }
+    try:
+        for batch in _spreadsheet_review_batches(llm.settings, spreadsheet_positions):
+            combined_debug["batchCount"] += 1
+            response = llm.review_spreadsheet_candidates(batch)
+            reviewed_batch, warnings, debug = apply_spreadsheet_candidate_review(batch, response)
+            all_warnings.extend(warnings)
+            combined_debug["batches"].append(debug)
+            batch_ids = {position.candidateId for position in batch}
+            for candidate_id in batch_ids:
+                current_by_id.pop(candidate_id, None)
+            for position in reviewed_batch:
+                if position.candidateId:
+                    current_by_id[position.candidateId] = position
+    except Exception as exc:
+        combined_debug["failed"] = True
+        combined_debug["error"] = f"{type(exc).__name__}: {exc}"
+        return positions, [
+            "Excel candidate review недоступен; deterministic Excel позиции сохранены без LLM-фильтра: "
+            f"{type(exc).__name__}: {exc}"
+        ], combined_debug
+
+    ordered: list[TenderPosition] = []
+    emitted: set[str] = set()
+    for position in positions:
+        if position.candidateId and position.candidateId in current_by_id:
+            ordered.append(current_by_id[position.candidateId])
+            emitted.add(position.candidateId)
+        elif not position.candidateId:
+            ordered.append(position)
+    for candidate_id, position in current_by_id.items():
+        if candidate_id not in emitted and candidate_id.startswith("llm:new:"):
+            ordered.append(position)
+
+    combined_debug["validatedPositionCount"] = len(ordered)
+    combined_debug["applied"] = any(batch.get("applied") for batch in combined_debug["batches"])
+    return ordered, list(dict.fromkeys(all_warnings)), combined_debug
 
 
 def validate_product_candidates(

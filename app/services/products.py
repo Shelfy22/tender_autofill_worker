@@ -283,6 +283,7 @@ def extract_deterministic_positions(
         raw_quantity: Any,
         evidence: str,
         *,
+        candidate_id: str = "",
         document_unit_price: Any = None,
         document_line_total: Any = None,
         document_currency: str | None = None,
@@ -313,6 +314,7 @@ def extract_deterministic_positions(
         seen[key] = len(result)
         result.append(
             TenderPosition(
+                candidateId=candidate_id,
                 product=name,
                 productQuery=name,
                 quantity=quantity,
@@ -408,6 +410,7 @@ def extract_deterministic_positions(
                 unit,
                 raw_quantity,
                 evidence,
+                candidate_id=f"xlsx:{table.fileName}:{table.sheet}:{row.row}",
                 document_unit_price=raw_unit_price,
                 document_line_total=raw_line_total,
                 document_currency=_currency_from_price_cells(

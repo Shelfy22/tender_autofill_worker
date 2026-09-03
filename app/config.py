@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     max_combined_text_chars: int = Field(default=500_000, ge=1_000)
     max_product_text_chars: int = Field(default=250_000, ge=1_000)
     max_decision_text_chars: int = Field(default=220_000, ge=1_000)
+    enable_document_analysis_pipeline: bool = True
+    document_analysis_unit_max_chars: int = Field(default=50_000, ge=5_000)
+    document_analysis_max_units: int = Field(default=20, ge=1, le=200)
+    spreadsheet_candidate_review_max_rows: int = Field(default=40, ge=5, le=150)
+    spreadsheet_candidate_review_max_chars: int = Field(default=24_000, ge=5_000)
     pdf_ocr_max_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
 
     seldon_base_url: str = "https://apitorgi.myseldon.com"
@@ -73,7 +78,24 @@ class Settings(BaseSettings):
     # Optional comma-separated override. Empty means: use the other attempt models.
     llm_fallback_models: str = ""
     llm_timeout_seconds: float = Field(default=300, gt=0)
+    llm_max_attempts_per_unit: int = Field(default=2, ge=1, le=3)
+    # Optional per-stage HTTP timeouts. None means use llm_timeout_seconds from the client.
+    document_analysis_timeout_seconds: float | None = Field(default=120, gt=0)
+    product_extraction_timeout_seconds: float | None = Field(default=90, gt=0)
+    catalog_selection_timeout_seconds: float | None = Field(default=45, gt=0)
+    final_decision_timeout_seconds: float | None = Field(default=60, gt=0)
+    ocr_timeout_seconds: float | None = Field(default=180, gt=0)
+    # Legacy global cap kept for backward compatibility with existing .env files.
     llm_max_output_tokens: int = Field(default=16_000, ge=256)
+    # New per-stage completion-token budgets. LLM_MAX_COMPLETION_TOKENS is the
+    # default for structured JSON calls; stage-specific values override it only
+    # where a stage genuinely needs a different output budget.
+    llm_max_completion_tokens: int | None = Field(default=24_000, ge=256)
+    document_analysis_max_completion_tokens: int | None = Field(default=24_000, ge=256)
+    product_extraction_max_completion_tokens: int | None = Field(default=24_000, ge=256)
+    catalog_selection_max_completion_tokens: int | None = Field(default=4_000, ge=256)
+    final_decision_max_completion_tokens: int | None = Field(default=4_000, ge=256)
+    ocr_max_completion_tokens: int | None = Field(default=24_000, ge=256)
     llm_structured_output_mode: str = "json_schema"
     llm_json_schema_strict: bool = True
     llm_enable_response_healing: bool = True
@@ -175,6 +197,41 @@ class Settings(BaseSettings):
         return list(
             dict.fromkeys([self.ocr_model, *self._model_list(self.ocr_fallback_models)])
         )
+
+    def max_completion_tokens_for(self, operation: str) -> int:
+        """Return the configured completion-token budget for an LLM stage.
+
+        llm_max_output_tokens remains a backward-compatible fallback for old
+        deployments. New deployments should prefer LLM_MAX_COMPLETION_TOKENS and
+        the stage-specific overrides below.
+        """
+        base = self.llm_max_completion_tokens or self.llm_max_output_tokens
+        normalized = (operation or "").strip().lower()
+        if normalized in {"ocr_pdf", "ocr"}:
+            return self.ocr_max_completion_tokens or base
+        if normalized in {"catalog_product_selection", "select_catalog_product"}:
+            return self.catalog_selection_max_completion_tokens or base
+        if normalized in {"final_decision", "apply_final_decision", "decide_tender_status"}:
+            return self.final_decision_max_completion_tokens or base
+        if normalized in {"extract_tender_products", "audit_product_candidates"}:
+            return self.product_extraction_max_completion_tokens or base
+        if normalized.startswith("analyze_document"):
+            return self.document_analysis_max_completion_tokens or base
+        return base
+
+    def timeout_for(self, operation: str) -> float | None:
+        normalized = (operation or "").strip().lower()
+        if normalized in {"ocr_pdf", "ocr"}:
+            return self.ocr_timeout_seconds
+        if normalized in {"catalog_product_selection", "select_catalog_product"}:
+            return self.catalog_selection_timeout_seconds
+        if normalized in {"final_decision", "apply_final_decision", "decide_tender_status"}:
+            return self.final_decision_timeout_seconds
+        if normalized in {"extract_tender_products", "audit_product_candidates"}:
+            return self.product_extraction_timeout_seconds
+        if normalized.startswith("analyze_document"):
+            return self.document_analysis_timeout_seconds
+        return None
 
 
 @lru_cache

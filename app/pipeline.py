@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -8,7 +9,7 @@ from typing import Any, Callable, TypeVar
 
 from app.config import Settings
 from app.logging import stage
-from app.models import JobClaim, ParsedDocument, TenderResult
+from app.models import JobClaim, ParsedDocument, TenderPositionsResponse, TenderResult
 from app.observability import RunObserver
 from app.services.catalog import CatalogMatcher
 from app.services.coverage import summarize_product_coverage
@@ -18,14 +19,22 @@ from app.services.decision import (
     build_decision_prompt,
     calculate_hard_reasons,
 )
+from app.services.document_analysis import (
+    build_document_analysis_units,
+    fields_from_consolidation,
+    result_from_unit,
+)
 from app.services.documents import (
     DocumentProcessor,
-    build_combined_text,
+    build_combined_text as build_deterministic_text,
     document_processing_context,
 )
 from app.services.llm import LlmClient
 from app.services.normalization import deduplicate_strings, normalize_job_payload
-from app.services.product_validation import validate_product_candidates
+from app.services.product_validation import (
+    review_spreadsheet_candidate_positions,
+    validate_product_candidates,
+)
 from app.services.products import (
     extract_deterministic_positions,
     extract_seldon_positions,
@@ -39,7 +48,7 @@ from app.services.validation import validate_fields
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
 def build_product_extraction_text(
-    combined_text: str,
+    deterministic_text: str,
     documents: list[ParsedDocument],
 ) -> tuple[str, list[str], bool]:
     spreadsheet_documents = [
@@ -48,7 +57,7 @@ def build_product_extraction_text(
         if document.spreadsheetTables and document.text.strip()
     ]
     if not spreadsheet_documents:
-        return combined_text, [], False
+        return deterministic_text, [], False
 
     sections = [
         "--- SPREADSHEET DOCUMENTS FOR PRODUCT EXTRACTION ONLY ---",
@@ -215,19 +224,111 @@ class TenderPipeline:
                 if document.parserWarning:
                     self.warnings.append(f"{document.fileName}: {document.parserWarning}")
 
-            combined_text, document_lengths, combined_warnings = self._run_stage(
-                "Prepare Combined Text for LLM2",
-                lambda: build_combined_text(page_text, parsed_documents, self.settings),
+            deterministic_text, document_lengths, deterministic_text_warnings = self._run_stage(
+                "Prepare Deterministic Text for Regex Rules",
+                lambda: build_deterministic_text(page_text, parsed_documents, self.settings),
             )
-            self.warnings.extend(combined_warnings)
+            self.warnings.extend(deterministic_text_warnings)
 
-            extracted_fields = self._run_stage(
-                "AI Agent - Extract Tender Fields2",
-                lambda: llm.extract_fields(combined_text),
+            seldon_positions = self._run_stage(
+                "Детерминированное извлечение товарных позиций из Seldon purchase",
+                lambda: extract_seldon_positions(job.seldon_purchase),
             )
+            spreadsheet_tables = [
+                table
+                for document in parsed_documents
+                for table in document.spreadsheetTables
+            ]
+            deterministic_positions = self._run_stage(
+                "Детерминированное извлечение товарных позиций из Excel",
+                lambda: extract_deterministic_positions(
+                    deterministic_text,
+                    spreadsheet_tables,
+                ),
+            )
+
+            document_analysis_debug: dict[str, Any] = {"enabled": self.settings.enable_document_analysis_pipeline}
+            document_consolidation = None
+            spreadsheet_review_debug: dict[str, Any] = {"reviewRequested": False}
+            if self.settings.enable_document_analysis_pipeline:
+                deterministic_positions, spreadsheet_review_warnings, spreadsheet_review_debug = self._run_stage(
+                    "Analyze Spreadsheet Candidate Units",
+                    lambda: review_spreadsheet_candidate_positions(llm, deterministic_positions),
+                )
+                self.warnings.extend(spreadsheet_review_warnings)
+                document_analysis_units, unit_warnings = self._run_stage(
+                    "Build Document Analysis Units",
+                    lambda: build_document_analysis_units(
+                        page_text,
+                        parsed_documents,
+                        [],
+                        self.settings,
+                        skip_spreadsheet_candidate_units=True,
+                    ),
+                )
+                self.warnings.extend(unit_warnings)
+                document_analysis_results = []
+                for unit in document_analysis_units:
+                    document_analysis_results.append(
+                        self._run_stage(
+                            f"Analyze Document Unit: {unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}",
+                            lambda unit=unit: result_from_unit(unit, llm.analyze_document_unit(unit)),
+                        )
+                    )
+                document_consolidation = self._run_stage(
+                    "Consolidate Tender Analysis",
+                    lambda: llm.consolidate_document_analysis(
+                        [result.model_dump(mode="json") for result in document_analysis_results]
+                    ),
+                )
+                self.warnings.extend(document_consolidation.warnings)
+                extracted_fields = self._run_stage(
+                    "Build Fields From Document Analysis",
+                    lambda: fields_from_consolidation(document_consolidation),
+                )
+                document_analysis_debug.update(
+                    {
+                        "unitCount": len(document_analysis_units),
+                        "resultCount": len(document_analysis_results),
+                        "consolidatedProductCount": len(document_consolidation.products),
+                        "reasonHitCount": len(document_consolidation.reasonHits),
+                        "fieldCandidateCount": len(document_consolidation.fieldCandidates),
+                        "incompleteUnitIds": document_consolidation.incompleteUnitIds,
+                    }
+                )
+                product_extraction_text = ""
+                product_text_spreadsheet_only = True
+                llm_positions = TenderPositionsResponse(
+                    products=document_consolidation.products,
+                    warnings=document_consolidation.warnings,
+                )
+            else:
+                extracted_fields = self._run_stage(
+                    "AI Agent - Extract Tender Fields2",
+                    lambda: llm.extract_fields(deterministic_text),
+                )
+                deterministic_positions, spreadsheet_review_warnings, spreadsheet_review_debug = self._run_stage(
+                    "Review Spreadsheet Product Candidates",
+                    lambda: review_spreadsheet_candidate_positions(llm, deterministic_positions),
+                )
+                self.warnings.extend(spreadsheet_review_warnings)
+                product_extraction_text, product_text_warnings, product_text_spreadsheet_only = self._run_stage(
+                    "Prepare Product Extraction Text",
+                    lambda: build_product_extraction_text(deterministic_text, parsed_documents),
+                )
+                self.warnings.extend(product_text_warnings)
+                llm_positions = self._run_stage(
+                    "AI Agent - Extract Tender Positions",
+                    lambda: llm.extract_products(
+                        product_extraction_text,
+                        [position.model_dump() for position in deterministic_positions],
+                        trust_deterministic=product_text_spreadsheet_only and bool(deterministic_positions),
+                    ),
+                )
+
             fields, meta, validation_warnings = self._run_stage(
                 "Validate Fields2",
-                lambda: validate_fields(job, extracted_fields, combined_text, parsed_documents),
+                lambda: validate_fields(job, extracted_fields, deterministic_text, parsed_documents),
             )
             self.warnings.extend(validation_warnings)
 
@@ -245,35 +346,6 @@ class TenderPipeline:
             )
             self.warnings.extend(ipro_warnings)
 
-            seldon_positions = self._run_stage(
-                "Детерминированное извлечение товарных позиций из Seldon purchase",
-                lambda: extract_seldon_positions(job.seldon_purchase),
-            )
-            spreadsheet_tables = [
-                table
-                for document in parsed_documents
-                for table in document.spreadsheetTables
-            ]
-            deterministic_positions = self._run_stage(
-                "Детерминированное извлечение товарных позиций из Excel",
-                lambda: extract_deterministic_positions(
-                    combined_text,
-                    spreadsheet_tables,
-                ),
-            )
-            product_extraction_text, product_text_warnings, product_text_spreadsheet_only = self._run_stage(
-                "Prepare Product Extraction Text",
-                lambda: build_product_extraction_text(combined_text, parsed_documents),
-            )
-            self.warnings.extend(product_text_warnings)
-            llm_positions = self._run_stage(
-                "AI Agent - Extract Tender Positions",
-                lambda: llm.extract_products(
-                    product_extraction_text,
-                    [position.model_dump() for position in deterministic_positions],
-                    trust_deterministic=product_text_spreadsheet_only and bool(deterministic_positions),
-                ),
-            )
             positions, position_warnings = self._run_stage(
                 "Parse Tender Positions",
                 lambda: merge_positions(
@@ -284,11 +356,21 @@ class TenderPipeline:
             )
             self.warnings.extend(position_warnings)
 
-            positions, validation_warnings, validation_debug = self._run_stage(
-                "Validate Product Candidates",
-                lambda: validate_product_candidates(llm, positions),
-            )
-            self.warnings.extend(validation_warnings)
+            if document_consolidation is None:
+                positions, validation_warnings, validation_debug = self._run_stage(
+                    "Validate Product Candidates",
+                    lambda: validate_product_candidates(llm, positions),
+                )
+                self.warnings.extend(validation_warnings)
+            else:
+                validation_debug = {
+                    "reviewRequested": False,
+                    "skipped": "Tender Consolidator already performed product candidate cleanup.",
+                    "originalPositionCount": len(positions),
+                    "validatedPositionCount": len(positions),
+                    "requiresManualReview": bool(document_consolidation.incompleteUnitIds),
+                    "hierarchy": {},
+                }
 
             match_items, catalog_warnings = self._run_stage(
                 "Поиск товаров в каталоге/Qdrant",
@@ -316,18 +398,35 @@ class TenderPipeline:
                     job,
                     fields,
                     product_check,
-                    combined_text,
+                    deterministic_text,
                     document_context=document_context,
                 ),
             )
             checks["counterpartyRequiresWork"] = counterparty_lookup.get("status") != "matched"
             checks["counterpartyEvidence"] = counterparty_lookup.get("reason") or "Контрагент найден в IPro"
+            if document_consolidation is not None:
+                checks["documentReasonHits"] = [
+                    reason.model_dump(mode="json")
+                    for reason in document_consolidation.reasonHits
+                ]
+                checks["documentAnalysisIncomplete"] = bool(document_consolidation.incompleteUnitIds)
+                checks["documentAnalysisIncompleteUnitIds"] = document_consolidation.incompleteUnitIds
             decision_prompt = build_decision_prompt(
                 fields=fields,
                 hard_reasons=hard_reasons,
                 checks=checks,
                 product_check=product_check,
-                all_text=combined_text,
+                all_text=(
+                    json.dumps(
+                        {
+                            "documentAnalysis": document_consolidation.model_dump(mode="json"),
+                            "note": "Compact structured analysis; raw tender text is not passed to final decision.",
+                        },
+                        ensure_ascii=False,
+                    )
+                    if document_consolidation is not None
+                    else deterministic_text
+                ),
                 maximum_text_chars=self.settings.max_decision_text_chars,
                 report_id=job.report_id,
             )
@@ -355,11 +454,13 @@ class TenderPipeline:
                 "documentLinks": [descriptor.get("url") for descriptor in descriptors],
                 "seldonDocumentsStatus": document_context,
                 "seldonStructuredProductsCount": len(seldon_positions),
-                "combinedTextLength": len(combined_text),
-                "llmTextLength": len(combined_text),
+                "deterministicTextLength": len(deterministic_text),
+                "llmTextLength": 0 if document_consolidation is not None else len(deterministic_text),
                 "productExtractionTextLength": len(product_extraction_text),
                 "productExtractionSpreadsheetOnly": product_text_spreadsheet_only,
-                "wasClipped": bool(combined_warnings),
+                "documentAnalysis": document_analysis_debug,
+                "deterministicTextWasClipped": bool(deterministic_text_warnings),
+                "wasClipped": bool(deterministic_text_warnings),
                 "toCode": job.to_code,
                 "remainingDays": job.remaining_days,
                 "reportId": job.report_id,
@@ -371,6 +472,7 @@ class TenderPipeline:
                 "actualCustomerResolution": customer_debug,
                 "counterpartyLookup": counterparty_lookup,
                 "productCheck": product_check,
+                "spreadsheetCandidateReview": spreadsheet_review_debug,
                 "tenderDecision": decision,
                 "decisionContext": {**checks, "hardReasons": [reason.as_dict() for reason in hard_reasons]},
             }

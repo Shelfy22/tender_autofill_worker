@@ -1536,7 +1536,14 @@ def build_decision_prompt(
   не является причиной отказа и не должно возвращаться в primaryReason/detectedReasons.
   Если документы отсутствуют, действует отдельная детерминированная причина отсутствия документации.
 
+- Если context содержит documentReasonHits, это уже проверенные Document Analyzer semantic факты.
+  Используй их для detectedReasons и не требуй повторного чтения raw документации.
+- Если ниже в поле «Текст / structured facts» передан JSON documentAnalysis, это компактные факты,
+  а не сырой текст тендера. Не проси исходный документ и не делай выводов вне evidence.
+- Если documentAnalysisIncomplete=true, не утверждай, что причина отсутствует; просто не добавляй её
+  без evidence и учитывай неполноту в note/confidence.
+
 Поля: {fields}
 Контекст: {context}
-Текст: {all_text[:maximum_text_chars]}
+Текст / structured facts: {all_text[:maximum_text_chars]}
 """.strip()

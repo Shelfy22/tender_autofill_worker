@@ -123,3 +123,51 @@ def test_llm_observation_counts_tokens_and_actual_fallback_model() -> None:
     assert event["completion_tokens"] == 30
     assert event["counters"]["llm_requests"] == 1
     assert event["counters"]["llm_fallbacks"] == 1
+    assert event["details"]["actualPromptTokens"] == 120
+    assert event["details"]["actualCompletionTokens"] == 30
+    assert event["details"]["actualTotalTokens"] == 150
+
+
+def test_llm_observation_records_budget_input_hash_and_performance_debug() -> None:
+    observer = FakeObserver()
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        llm_api_key="test",
+        llm_model_attempt_1="primary",
+        llm_model_attempt_2="fallback",
+    )
+    client = LlmClient(settings, attempt=3, observer=observer)  # type: ignore[arg-type]
+    response = SimpleNamespace(
+        id="generation-2",
+        model="primary",
+        choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content="{}"))],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+    client._observe_llm(
+        operation="analyze_document: spec.xlsx",
+        primary_model="primary",
+        model_chain=["primary", "fallback"],
+        started=0.0,
+        response=response,
+        configured_max_completion_tokens=24000,
+        input_chars=12345,
+        schema_chars=678,
+        input_sha256="input-hash",
+        logical_call_id="logical-id",
+        physical_call_index=1,
+    )
+
+    event = observer.events[0]
+    details = event["details"]
+    assert details["jobAttempt"] == 3
+    assert details["configuredMaxCompletionTokens"] == 24000
+    assert details["timeoutSeconds"] is None
+    assert details["configuredMaxAttemptsPerUnit"] is None
+    assert details["inputChars"] == 12345
+    assert details["schemaChars"] == 678
+    assert details["inputSha256"] == "input-hash"
+    assert details["logicalCallId"] == "logical-id"
+    assert details["outputChars"] == 2
+    assert details["llmPerformance"]["logicalCalls"] == 1
+    assert details["llmPerformance"]["physicalCalls"] == 1
