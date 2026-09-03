@@ -271,6 +271,7 @@ class TenderPipeline:
                 lambda: llm.extract_products(
                     product_extraction_text,
                     [position.model_dump() for position in deterministic_positions],
+                    trust_deterministic=product_text_spreadsheet_only and bool(deterministic_positions),
                 ),
             )
             positions, position_warnings = self._run_stage(

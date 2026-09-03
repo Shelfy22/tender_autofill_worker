@@ -302,6 +302,24 @@ def test_large_deterministic_product_list_skips_llm_product_extraction() -> None
     assert response.products == []
     assert any("skipped full-text LLM product extraction" in item for item in response.warnings)
 
+
+def test_trusted_deterministic_spreadsheet_positions_skip_llm_product_extraction() -> None:
+    client = object.__new__(LlmClient)
+    client.settings = SimpleNamespace(max_product_text_chars=100_000)
+
+    def fail_json_call(**_: object) -> TenderPositionsResponse:
+        raise AssertionError("LLM should not be called for trusted spreadsheet rows")
+
+    client.json_call = fail_json_call  # type: ignore[method-assign]
+    response = client.extract_products(
+        "spreadsheet-only tender text",
+        [{"product": "Product 1", "quantity": 1, "unit": "pcs"}],
+        trust_deterministic=True,
+    )
+
+    assert response.products == []
+    assert any("source of truth" in item for item in response.warnings)
+
 def test_large_product_text_skips_wasteful_full_llm_call() -> None:
     client = object.__new__(LlmClient)
     client.settings = SimpleNamespace(max_product_text_chars=100_000)

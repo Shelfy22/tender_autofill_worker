@@ -626,8 +626,22 @@ class LlmClient:
             operation="extract_tender_fields",
         )
 
-    def extract_products(self, text: str, deterministic: list[dict[str, Any]]) -> TenderPositionsResponse:
+    def extract_products(
+        self,
+        text: str,
+        deterministic: list[dict[str, Any]],
+        *,
+        trust_deterministic: bool = False,
+    ) -> TenderPositionsResponse:
         source_text = text[: self.settings.max_product_text_chars]
+        if trust_deterministic and deterministic:
+            return TenderPositionsResponse(
+                products=[],
+                warnings=[
+                    "Deterministic spreadsheet product rows are used as the source of truth; "
+                    "skipped LLM product extraction to avoid duplicate rows and long model calls."
+                ],
+            )
         if len(deterministic) >= PRODUCT_LLM_SKIP_DETERMINISTIC_COUNT:
             return TenderPositionsResponse(
                 products=[],
