@@ -21,9 +21,11 @@ class SelectionLlm:
     def __init__(self, point_id: str) -> None:
         self.point_id = point_id
         self.prompt = ""
+        self.model_chain: list[str] | None = None
 
     def json_call(self, **values: object) -> CatalogSelection:
         self.prompt = str(values["prompt"])
+        self.model_chain = values.get("model_chain")  # type: ignore[assignment]
         assert values["schema"] is CatalogSelection
         return CatalogSelection(
             selectedPointId=self.point_id,
@@ -256,6 +258,7 @@ def test_catalog_llm_returns_only_point_id_and_python_hydrates_catalog_fields() 
         matcher.close()
 
     assert "не по цене" in llm.prompt
+    assert llm.model_chain == settings.models_for_catalog_selection()
     assert match.name == "Стеллаж Универсал 2500"
     assert match.link == "https://www.etm.ru/cat/nn/476338"
     assert match.median_price == 15707.43

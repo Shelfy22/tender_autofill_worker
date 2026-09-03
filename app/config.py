@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     llm_json_schema_strict: bool = True
     llm_enable_response_healing: bool = True
     llm_require_supported_parameters: bool = True
+    catalog_selection_model: str = "qwen/qwen3.7-flash"
+    catalog_selection_fallback_models: str = "qwen/qwen3.5-flash-02-23,deepseek/deepseek-v4-flash-0731"
     ocr_model: str = "deepseek/deepseek-v4-flash-0731"
     ocr_fallback_models: str = ""
     ocr_pdf_engine: str = "mistral-ocr"
@@ -154,6 +156,18 @@ class Settings(BaseSettings):
         index = min(max(attempt, 1), 3) - 1
         candidates = configured or [*attempt_models[index:], *attempt_models[:index]]
         return list(dict.fromkeys([primary, *candidates]))
+
+    def models_for_catalog_selection(self) -> list[str]:
+        if not self.llm_enable_model_fallback:
+            return [self.catalog_selection_model]
+        return list(
+            dict.fromkeys(
+                [
+                    self.catalog_selection_model,
+                    *self._model_list(self.catalog_selection_fallback_models),
+                ]
+            )
+        )
 
     def models_for_ocr(self) -> list[str]:
         if not self.llm_enable_model_fallback:

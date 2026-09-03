@@ -656,6 +656,7 @@ normalizedCandidates: {candidates_json}
             schema=CatalogSelection,
             operation="catalog_product_selection",
             audit_details=self._position_context,
+            model_chain=self.settings.models_for_catalog_selection(),
         )
         selected = next(
             (

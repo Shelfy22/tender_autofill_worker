@@ -70,3 +70,17 @@ def test_structured_output_uses_pydantic_json_schema() -> None:
 def test_json_object_compatibility_mode_can_be_selected() -> None:
     client = LlmClient(settings(llm_structured_output_mode="json_object"), attempt=1)
     assert client._response_format(ExtractedFieldsResponse) == {"type": "json_object"}
+
+
+def test_catalog_selection_uses_qwen_first_by_default() -> None:
+    assert settings().models_for_catalog_selection() == [
+        "qwen/qwen3.7-flash",
+        "qwen/qwen3.5-flash-02-23",
+        "deepseek/deepseek-v4-flash-0731",
+    ]
+
+
+def test_catalog_selection_model_fallback_can_be_disabled() -> None:
+    assert settings(llm_enable_model_fallback=False).models_for_catalog_selection() == [
+        "qwen/qwen3.7-flash"
+    ]

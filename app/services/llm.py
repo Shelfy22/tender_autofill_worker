@@ -442,6 +442,7 @@ class LlmClient:
         fields_shape_normalized: bool = False,
         products_shape_normalized: bool = False,
         error: BaseException | None = None,
+        primary_model: str | None = None,
     ) -> None:
         if not self.observer:
             return
@@ -482,7 +483,7 @@ class LlmClient:
             service="llm",
             operation=f"{operation}_parse",
             model=str(getattr(response, "model", None) or self.model),
-            primary_model=self.model,
+            primary_model=primary_model or self.model,
             duration_seconds=round(time.monotonic() - started, 3),
             error=error,
             details=details,
@@ -496,10 +497,12 @@ class LlmClient:
         schema: type[T],
         operation: str = "structured_json",
         audit_details: dict[str, Any] | None = None,
+        model_chain: list[str] | None = None,
     ) -> T:
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
         last_error: Exception | None = None
-        models = self.model_chain or [self.model]
+        models = model_chain or self.model_chain or [self.model]
+        primary_model = models[0]
         for index, model in enumerate(models):
             started = time.monotonic()
             retry_hint = (
@@ -527,7 +530,7 @@ class LlmClient:
                 last_error = exc
                 self._observe_llm(
                     operation=operation,
-                    primary_model=self.model,
+                    primary_model=primary_model,
                     model_chain=models,
                     started=started,
                     error=exc,
@@ -576,10 +579,11 @@ class LlmClient:
                     fields_shape_normalized=fields_shape_normalized,
                     products_shape_normalized=products_shape_normalized,
                     error=exc,
+                    primary_model=primary_model,
                 )
                 self._observe_llm(
                     operation=operation,
-                    primary_model=self.model,
+                    primary_model=primary_model,
                     model_chain=models,
                     started=started,
                     response=response,
@@ -597,10 +601,11 @@ class LlmClient:
                 extraction=extraction,
                 fields_shape_normalized=fields_shape_normalized,
                 products_shape_normalized=products_shape_normalized,
+                primary_model=primary_model,
             )
             self._observe_llm(
                 operation=operation,
-                primary_model=self.model,
+                primary_model=primary_model,
                 model_chain=models,
                 started=started,
                 response=response,
