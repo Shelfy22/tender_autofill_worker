@@ -8,7 +8,7 @@ from typing import Any, Callable, TypeVar
 
 from app.config import Settings
 from app.logging import stage
-from app.models import JobClaim, TenderResult
+from app.models import JobClaim, ParsedDocument, TenderResult
 from app.observability import RunObserver
 from app.services.catalog import CatalogMatcher
 from app.services.coverage import summarize_product_coverage
@@ -38,7 +38,48 @@ from app.services.validation import validate_fields
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
+def build_product_extraction_text(
+    combined_text: str,
+    documents: list[ParsedDocument],
+) -> tuple[str, list[str], bool]:
+    spreadsheet_documents = [
+        document
+        for document in documents
+        if document.spreadsheetTables and document.text.strip()
+    ]
+    if not spreadsheet_documents:
+        return combined_text, [], False
 
+    sections = [
+        "--- SPREADSHEET DOCUMENTS FOR PRODUCT EXTRACTION ONLY ---",
+    ]
+    for number, document in enumerate(spreadsheet_documents, start=1):
+        sections.extend(
+            [
+                "",
+                f"--- DOCUMENT {number} ---",
+                f"fileName: {document.fileName}",
+                (
+                    f"originalFileName: {document.originalFileName}"
+                    if document.originalFileName and document.originalFileName != document.fileName
+                    else ""
+                ),
+                f"documentKind: {document.documentKind}",
+                f"extension: {document.fileExtension}",
+                f"parserStatus: {document.parserStatus}",
+                f"spreadsheetTableCount: {len(document.spreadsheetTables)}",
+                document.text,
+            ]
+        )
+    text = "\n".join(section for section in sections if section)
+    return (
+        text,
+        [
+            "LLM product extraction was limited to spreadsheet documents; "
+            "non-spreadsheet tender text remains available for fields and decision checks."
+        ],
+        True,
+    )
 
 class TenderPipeline:
     def __init__(
@@ -220,10 +261,16 @@ class TenderPipeline:
                     spreadsheet_tables,
                 ),
             )
+            product_extraction_text, product_text_warnings, product_text_spreadsheet_only = self._run_stage(
+                "Prepare Product Extraction Text",
+                lambda: build_product_extraction_text(combined_text, parsed_documents),
+            )
+            self.warnings.extend(product_text_warnings)
             llm_positions = self._run_stage(
                 "AI Agent - Extract Tender Positions",
                 lambda: llm.extract_products(
-                    combined_text, [position.model_dump() for position in deterministic_positions]
+                    product_extraction_text,
+                    [position.model_dump() for position in deterministic_positions],
                 ),
             )
             positions, position_warnings = self._run_stage(
@@ -309,6 +356,8 @@ class TenderPipeline:
                 "seldonStructuredProductsCount": len(seldon_positions),
                 "combinedTextLength": len(combined_text),
                 "llmTextLength": len(combined_text),
+                "productExtractionTextLength": len(product_extraction_text),
+                "productExtractionSpreadsheetOnly": product_text_spreadsheet_only,
                 "wasClipped": bool(combined_warnings),
                 "toCode": job.to_code,
                 "remainingDays": job.remaining_days,

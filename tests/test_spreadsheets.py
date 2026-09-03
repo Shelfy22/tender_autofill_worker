@@ -4,7 +4,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from app.config import Settings
-from app.models import SpreadsheetTable
+from app.models import ParsedDocument, SpreadsheetRow, SpreadsheetTable
 from app.services.documents import DocumentProcessor
 from app.services.parsers.spreadsheets import (
     extract_spreadsheet_content,
@@ -202,3 +202,59 @@ def test_xlsx_prices_are_extracted_by_headers_with_source_coordinates(tmp_path: 
     assert position.sourceReference.unitColumn == "C"
     assert position.sourceReference.quantityColumn == "D"
     assert position.sourceReference.extractionMethod == "excel_deterministic"
+
+def test_product_extraction_text_uses_only_spreadsheet_documents() -> None:
+    from app.pipeline import build_product_extraction_text
+
+    spreadsheet = ParsedDocument(
+        documentIndex=1,
+        fileName="spec.xlsx",
+        fileExtension="xlsx",
+        parserStatus="ok",
+        text="Лист: Sheet1\nСтрока 1: A: Наименование товара | B: Количество\nСтрока 2: A: Cable | B: 10",
+        spreadsheetTables=[
+            SpreadsheetTable(
+                sheet="Sheet1",
+                rows=[SpreadsheetRow(row=2, cells={"A": "Cable", "B": "10"})],
+            )
+        ],
+    )
+    contract = ParsedDocument(
+        documentIndex=2,
+        fileName="contract.docx",
+        fileExtension="docx",
+        parserStatus="ok",
+        text="Contract text should not be sent to product extraction",
+    )
+
+    text, warnings, spreadsheet_only = build_product_extraction_text(
+        "combined text with contract",
+        [spreadsheet, contract],
+    )
+
+    assert spreadsheet_only is True
+    assert warnings
+    assert "Cable" in text
+    assert "contract.docx" not in text
+    assert "Contract text should not be sent" not in text
+
+
+def test_product_extraction_text_falls_back_to_combined_text_without_spreadsheets() -> None:
+    from app.pipeline import build_product_extraction_text
+
+    text, warnings, spreadsheet_only = build_product_extraction_text(
+        "combined text with pdf products",
+        [
+            ParsedDocument(
+                documentIndex=1,
+                fileName="spec.pdf",
+                fileExtension="pdf",
+                parserStatus="ok",
+                text="pdf text",
+            )
+        ],
+    )
+
+    assert text == "combined text with pdf products"
+    assert warnings == []
+    assert spreadsheet_only is False
