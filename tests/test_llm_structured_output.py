@@ -125,6 +125,50 @@ def test_json_call_falls_back_when_model_returns_invalid_json() -> None:
     assert client.models_used == ["model-a", "model-b"]
 
 
+def test_json_call_falls_back_when_provider_response_has_no_choices() -> None:
+    client = LlmClient(
+        Settings(
+            postgres_dsn="postgresql://user:pass@localhost/db",
+            llm_api_key="test",
+            llm_model_attempt_1="model-a",
+            llm_model_attempt_2="model-b",
+            llm_model_attempt_3="model-c",
+        ),
+        attempt=1,
+    )
+    calls: list[str] = []
+
+    def create(**kwargs: object) -> SimpleNamespace:
+        model = str(kwargs["model"])
+        calls.append(model)
+        if model == "model-a":
+            return SimpleNamespace(model=model, choices=None, usage=None)
+        return SimpleNamespace(
+            model=model,
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content='{"fields":{},"warnings":[]}'),
+                )
+            ],
+            usage=None,
+        )
+
+    client.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    parsed = client.json_call(
+        system="test",
+        prompt="test",
+        schema=ExtractedFieldsResponse,
+    )
+
+    assert parsed.fields == {}
+    assert calls == ["model-a", "model-b"]
+    assert client.models_used == ["model-a", "model-b"]
+
+
 def test_json_call_normalizes_top_level_product_list() -> None:
     client = LlmClient(
         Settings(

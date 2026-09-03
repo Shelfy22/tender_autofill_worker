@@ -43,6 +43,10 @@ class LlmResponseTruncatedError(RuntimeError):
     """The provider stopped before returning a complete structured response."""
 
 
+class LlmMalformedResponseError(RuntimeError):
+    pass
+
+
 PRODUCT_DIRECT_CALL_MAX_CHARS = 30_000
 PRODUCT_CHUNK_TARGET_CHARS = 12_000
 PRODUCT_CHUNK_MAX_DEPTH = 8
@@ -357,6 +361,19 @@ class LlmClient:
             self.models_used.append(used)
 
     @staticmethod
+    def _response_content(response: Any) -> str:
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise LlmMalformedResponseError("LLM response did not include choices")
+        choice = choices[0]
+        if choice is None:
+            raise LlmMalformedResponseError("LLM response first choice is empty")
+        message = getattr(choice, "message", None)
+        if message is None:
+            raise LlmMalformedResponseError("LLM response choice did not include message")
+        return str(getattr(message, "content", None) or "")
+
+    @staticmethod
     def _usage(response: Any) -> tuple[int, int, int]:
         usage = getattr(response, "usage", None)
         prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -520,7 +537,6 @@ class LlmClient:
                 raise
 
             self._record_model(response, model)
-            content = response.choices[0].message.content or ""
             parse_started = time.monotonic()
             extraction: JsonExtractionResult | None = None
             fields_shape_normalized = False
@@ -532,6 +548,7 @@ class LlmClient:
                     raise LlmResponseTruncatedError(
                         f"LLM response was truncated by provider: finish_reason={finish_reason}"
                     )
+                content = self._response_content(response)
                 extraction = extract_json_result(
                     content,
                     # Repairing a response explicitly marked as truncated could turn an
