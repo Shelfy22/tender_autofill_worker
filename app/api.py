@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import base64
 import hmac
+import json
 import logging
+import tempfile
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import quote
 from typing import AsyncIterator
 
 import redis
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
 from app import __version__
@@ -15,6 +20,8 @@ from app.celery_app import celery_app
 from app.config import get_settings
 from app.db import get_repository
 from app.logging import configure_logging
+from app.services.documents import safe_filename
+from app.services.product_matching import LocalDocument, run_product_matching_from_files
 from app.models import (
     AcceptedJob,
     BatchDispatchRequest,
@@ -127,6 +134,78 @@ def dispatch_batch(request: BatchDispatchRequest) -> BatchDispatchResponse:
     )
 
 
+
+@app.post(
+    "/product-matching/from-documents",
+    dependencies=[Depends(authorize)],
+)
+async def product_matching_from_documents(request: Request) -> Response:
+    try:
+        form = await request.form()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid multipart form data: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    tender_name = str(form.get("tender_name") or form.get("tenderName") or "").strip()
+    uploads = [value for _, value in form.multi_items() if hasattr(value, "filename")]
+    if not uploads:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files uploaded")
+
+    settings.temp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="product-match-upload-", dir=settings.temp_root) as temp_name:
+        upload_dir = Path(temp_name)
+        local_files: list[LocalDocument] = []
+        for index, upload in enumerate(uploads, start=1):
+            source_name = safe_filename(getattr(upload, "filename", "") or f"document_{index}", f"document_{index}")
+            destination = upload_dir / f"{index:03d}_{source_name}"
+            size = 0
+            with destination.open("wb") as output:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > settings.max_download_bytes_per_file:
+                        raise HTTPException(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail=f"File {source_name} exceeds MAX_DOWNLOAD_BYTES_PER_FILE",
+                        )
+                    output.write(chunk)
+            if size == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File {source_name} is empty",
+                )
+            local_files.append(LocalDocument(file_name=source_name, path=destination))
+
+        try:
+            workbook, debug = run_product_matching_from_files(
+                local_files,
+                settings,
+                tender_name=tender_name,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Product matching failed: {type(exc).__name__}: {exc}",
+            ) from exc
+
+    output_name = safe_filename(
+        f"autopodbor_{tender_name or 'documents'}.xlsx",
+        "autopodbor_documents.xlsx",
+    )
+    debug_json = json.dumps(debug, ensure_ascii=False).encode("utf-8")
+    debug_header = base64.urlsafe_b64encode(debug_json).decode("ascii")[:7000]
+    return Response(
+        content=workbook,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename=\"autopodbor_documents.xlsx\"; filename*=UTF-8''{quote(output_name)}",
+            "X-Product-Matching-Debug-B64": debug_header,
+        },
+    )
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     postgres_ok = repository.ping()

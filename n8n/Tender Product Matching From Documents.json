@@ -1,0 +1,91 @@
+{
+    "name":  "Tender Product Matching From Documents",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "formTitle":  "Tender product matching from documents",
+                                         "formDescription":  "Upload tender documents or one archive with documents. The workflow returns an XLSX product matching file.",
+                                         "formFields":  {
+                                                            "values":  [
+                                                                           {
+                                                                               "fieldLabel":  "Tender name",
+                                                                               "fieldName":  "tenderName",
+                                                                               "fieldType":  "text",
+                                                                               "requiredField":  false
+                                                                           },
+                                                                           {
+                                                                               "fieldLabel":  "Tender documents",
+                                                                               "fieldName":  "documents",
+                                                                               "fieldType":  "file",
+                                                                               "acceptFileTypes":  ".zip,.rar,.7z,.xlsx,.xls,.csv,.docx,.doc,.pdf,application/zip,application/pdf",
+                                                                               "requiredField":  true,
+                                                                               "multipleFiles":  true
+                                                                           }
+                                                                       ]
+                                                        },
+                                         "options":  {
+                                                         "appendAttribution":  false
+                                                     }
+                                     },
+                      "id":  "fb1d2e20-75f2-4f3c-8f15-8d8c940e2001",
+                      "name":  "Upload tender documents",
+                      "type":  "n8n-nodes-base.formTrigger",
+                      "typeVersion":  2.2,
+                      "position":  [
+                                       -620,
+                                       120
+                                   ],
+                      "webhookId":  "tender-product-matching-from-documents"
+                  },
+                  {
+                      "parameters":  {
+                                         "mode":  "runOnceForAllItems",
+                                         "jsCode":  "const env = typeof $env !== \u0027undefined\u0027 ? $env : process.env;\nconst endpoint = String(env.TENDER_PRODUCT_MATCHING_URL || \u0027http://tender-api:8000/product-matching/from-documents\u0027).trim();\nconst apiKey = String(env.TENDER_PYTHON_API_KEY || \u0027\u0027).trim();\nconst form = new FormData();\n\nlet tenderName = \u0027\u0027;\nconst allItems = $input.all();\nfor (const item of allItems) {\n  tenderName ||= String(item.json?.tenderName || \u0027\u0027).trim();\n}\nform.append(\u0027tender_name\u0027, tenderName || \u0027documents\u0027);\n\nlet fileCount = 0;\nfor (let itemIndex = 0; itemIndex \u003c allItems.length; itemIndex++) {\n  const item = allItems[itemIndex];\n  const binaries = item.binary || {};\n  for (const [propertyName, binary] of Object.entries(binaries)) {\n    const buffer = await this.helpers.getBinaryDataBuffer(itemIndex, propertyName);\n    const fileName = String(binary.fileName || propertyName || `document_${fileCount + 1}`);\n    const mimeType = String(binary.mimeType || \u0027application/octet-stream\u0027);\n    form.append(\u0027files\u0027, new Blob([buffer], { type: mimeType }), fileName);\n    fileCount++;\n  }\n}\n\nif (!fileCount) {\n  throw new Error(\u0027No uploaded tender documents found.\u0027);\n}\n\nconst headers = {};\nif (apiKey) headers[\u0027X-API-Key\u0027] = apiKey;\n\nconst response = await fetch(endpoint, { method: \u0027POST\u0027, headers, body: form });\nconst debugHeader = response.headers.get(\u0027x-product-matching-debug-b64\u0027) || \u0027\u0027;\nif (!response.ok) {\n  const text = await response.text();\n  throw new Error(`Tender Worker returned HTTP ${response.status}: ${text.slice(0, 2000)}`);\n}\n\nconst arrayBuffer = await response.arrayBuffer();\nconst outputName = `autopodbor_${(tenderName || \u0027documents\u0027).replace(/[^a-z0-9_-]+/gi, \u0027_\u0027).slice(0, 80) || \u0027documents\u0027}.xlsx`;\nconst binary = await this.helpers.prepareBinaryData(\n  Buffer.from(arrayBuffer),\n  outputName,\n  \u0027application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\u0027\n);\n\nlet debug = null;\ntry {\n  const normalizedDebug = debugHeader.replace(/-/g, \u0027+\u0027).replace(/_/g, \u0027/\u0027);\n  debug = debugHeader ? JSON.parse(Buffer.from(normalizedDebug, \u0027base64\u0027).toString(\u0027utf8\u0027)) : null;\n} catch {\n  debug = debugHeader ? { encoded: debugHeader } : null;\n}\n\nreturn [{\n  json: {\n    status: \u0027completed\u0027,\n    tenderName: tenderName || null,\n    uploadedFiles: fileCount,\n    fileName: outputName,\n    debug,\n  },\n  binary: { data: binary },\n}];"
+                                     },
+                      "id":  "fb1d2e20-75f2-4f3c-8f15-8d8c940e2002",
+                      "name":  "Build product matching in Tender Worker",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -300,
+                                       120
+                                   ],
+                      "notesInFlow":  true,
+                      "notes":  "Posts all uploaded binary files to POST /product-matching/from-documents. Override URL with TENDER_PRODUCT_MATCHING_URL."
+                  },
+                  {
+                      "parameters":  {
+                                         "content":  "## Product matching from documents\n\n1. The form accepts one archive or multiple tender documents.\n2. The Code node sends files to Python Worker: POST /product-matching/from-documents.\n3. Worker parses documents, runs LLM document analysis, consolidates products without duplicates, searches Qdrant/catalog, and returns XLSX.\n\nRequired env: TENDER_PYTHON_API_KEY. Optional env: TENDER_PRODUCT_MATCHING_URL.",
+                                         "height":  300,
+                                         "width":  520
+                                     },
+                      "id":  "fb1d2e20-75f2-4f3c-8f15-8d8c940e2003",
+                      "name":  "Notes",
+                      "type":  "n8n-nodes-base.stickyNote",
+                      "typeVersion":  1,
+                      "position":  [
+                                       -640,
+                                       -260
+                                   ]
+                  }
+              ],
+    "connections":  {
+                        "Upload tender documents":  {
+                                                        "main":  [
+                                                                     {
+                                                                         "node":  "Build product matching in Tender Worker",
+                                                                         "type":  "main",
+                                                                         "index":  0
+                                                                     }
+                                                                 ]
+                                                    }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "binaryMode":  "separate"
+                 },
+    "tags":  [
+
+             ]
+}
