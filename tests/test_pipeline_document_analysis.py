@@ -17,6 +17,7 @@ from app.models import (
 from app.pipeline import TenderPipeline
 from app.services.customer import ActualCustomerResponse
 from app.services.decision import REPAIR_KIT_REASON
+from app.services.llm import LlmResponseTruncatedError
 
 
 class FakeSeldonDocuments:
@@ -222,7 +223,12 @@ def test_document_analysis_pipeline_uses_units_consolidator_and_no_legacy_llm(mo
         report_id=1,
         seldon_id="123",
         report_fields={"Код ТО": "ТО1", "Код ФЗ": "223"},
-        input_json={"reportId": 1, "seldonId": "123", "toCode": "ТО1", "lawCode": "223"},
+        input_json={
+            "reportId": 1,
+            "seldonId": "123",
+            "toCode": "ТО1",
+            "lawCode": "223",
+        },
     )
 
     result = TenderPipeline(settings, tmp_path).run(claim)
@@ -237,3 +243,59 @@ def test_document_analysis_pipeline_uses_units_consolidator_and_no_legacy_llm(mo
     assert "Validate Product Candidates" not in steps
     assert "Build Fields From Document Analysis" in steps
     assert result["debug"]["llmTextLength"] == 0
+
+
+class TruncatingDocumentFakeLlmClient(FakeLlmClient):
+    def analyze_document_unit(self, unit: object) -> DocumentAnalysisResponse:
+        if getattr(unit, "sourceType", "") == "document":
+            self.calls.append("analyze_document_unit")
+            raise LlmResponseTruncatedError(
+                "LLM response was truncated by provider: finish_reason=length"
+            )
+        return super().analyze_document_unit(unit)
+
+
+def test_document_analysis_pipeline_marks_truncated_unit_incomplete(monkeypatch, tmp_path) -> None:
+    import app.pipeline as pipeline_module
+
+    def make_llm(*args: object, **kwargs: object) -> TruncatingDocumentFakeLlmClient:
+        global LAST_LLM
+        LAST_LLM = TruncatingDocumentFakeLlmClient(*args, **kwargs)
+        return LAST_LLM
+
+    monkeypatch.setattr(pipeline_module, "SeldonClient", FakeSeldonClient)
+    monkeypatch.setattr(pipeline_module, "DocumentProcessor", FakeDocumentProcessor)
+    monkeypatch.setattr(pipeline_module, "IProClient", FakeIProClient)
+    monkeypatch.setattr(pipeline_module, "CatalogMatcher", FakeCatalogMatcher)
+    monkeypatch.setattr(pipeline_module, "LlmClient", make_llm)
+
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        llm_api_key="test",
+        enable_document_analysis_pipeline=True,
+    )
+    claim = JobClaim(
+        record_key="record-1",
+        batch_id="batch-1",
+        attempt=1,
+        report_id=1,
+        seldon_id="123",
+        report_fields={"Код ТО": "ТО1", "Код ФЗ": "223"},
+        input_json={
+            "reportId": 1,
+            "seldonId": "123",
+            "toCode": "ТО1",
+            "lawCode": "223",
+        },
+    )
+
+    result = TenderPipeline(settings, tmp_path).run(claim)
+
+    assert LAST_LLM is not None
+    assert LAST_LLM.calls.count("analyze_document_unit") == result["debug"]["documentAnalysis"]["unitCount"]
+    assert LAST_LLM.calls.count("consolidate_document_analysis") == 1
+    assert LAST_LLM.calls.count("decide") == 1
+    assert result["debug"]["documentAnalysis"]["incompleteUnitIds"] == ["unit:2:document:1:part:1"]
+    assert result["debug"]["documentAnalysis"]["resultCount"] == 2
+    assert any("truncated LLM response" in warning for warning in result["warnings"])
+    assert any("Document Analysis completed with incomplete units" in warning for warning in result["warnings"])

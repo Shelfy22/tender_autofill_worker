@@ -9,7 +9,7 @@ from typing import Any, Callable, TypeVar
 
 from app.config import Settings
 from app.logging import stage
-from app.models import JobClaim, ParsedDocument, TenderPositionsResponse, TenderResult
+from app.models import DocumentAnalysisResult, JobClaim, ParsedDocument, TenderPositionsResponse, TenderResult
 from app.observability import RunObserver
 from app.services.catalog import CatalogMatcher
 from app.services.coverage import summarize_product_coverage
@@ -29,7 +29,7 @@ from app.services.documents import (
     build_combined_text as build_deterministic_text,
     document_processing_context,
 )
-from app.services.llm import LlmClient
+from app.services.llm import LlmClient, LlmResponseTruncatedError
 from app.services.normalization import deduplicate_strings, normalize_job_payload
 from app.services.product_validation import (
     review_spreadsheet_candidate_positions,
@@ -267,12 +267,36 @@ class TenderPipeline:
                     ),
                 )
                 self.warnings.extend(unit_warnings)
-                document_analysis_results = []
+                document_analysis_results: list[DocumentAnalysisResult] = []
+                incomplete_document_unit_ids: list[str] = []
+
+                def analyze_unit_safely(unit: Any) -> DocumentAnalysisResult:
+                    try:
+                        return result_from_unit(unit, llm.analyze_document_unit(unit))
+                    except LlmResponseTruncatedError as exc:
+                        warning = (
+                            f"Document Analysis unit {unit.unitId} "
+                            f"({unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}) "
+                            f"returned a truncated LLM response and was marked incomplete: {exc}"
+                        )
+                        self.warnings.append(warning)
+                        incomplete_document_unit_ids.append(unit.unitId)
+                        return DocumentAnalysisResult(
+                            unitId=unit.unitId,
+                            inputSha256=unit.inputSha256,
+                            sourceType=unit.sourceType,
+                            fileName=unit.fileName,
+                            partIndex=unit.partIndex,
+                            partTotal=unit.partTotal,
+                            analysisIncomplete=True,
+                            warnings=[warning],
+                        )
+
                 for unit in document_analysis_units:
                     document_analysis_results.append(
                         self._run_stage(
                             f"Analyze Document Unit: {unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}",
-                            lambda unit=unit: result_from_unit(unit, llm.analyze_document_unit(unit)),
+                            lambda unit=unit: analyze_unit_safely(unit),
                         )
                     )
                 document_consolidation = self._run_stage(
@@ -281,6 +305,24 @@ class TenderPipeline:
                         [result.model_dump(mode="json") for result in document_analysis_results]
                     ),
                 )
+                if incomplete_document_unit_ids:
+                    incomplete_ids = list(document_consolidation.incompleteUnitIds)
+                    for unit_id in incomplete_document_unit_ids:
+                        if unit_id not in incomplete_ids:
+                            incomplete_ids.append(unit_id)
+                    consolidation_warnings = list(document_consolidation.warnings)
+                    warning = (
+                        "Document Analysis completed with incomplete units: "
+                        + ", ".join(incomplete_document_unit_ids)
+                    )
+                    if warning not in consolidation_warnings:
+                        consolidation_warnings.append(warning)
+                    document_consolidation = document_consolidation.model_copy(
+                        update={
+                            "incompleteUnitIds": incomplete_ids,
+                            "warnings": consolidation_warnings,
+                        }
+                    )
                 self.warnings.extend(document_consolidation.warnings)
                 extracted_fields = self._run_stage(
                     "Build Fields From Document Analysis",

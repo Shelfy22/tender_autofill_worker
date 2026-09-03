@@ -49,6 +49,43 @@ def test_truncated_response_can_be_forbidden_from_repair() -> None:
         extract_json_result('{"decision":"reject"', allow_repair=False)
 
 
+
+
+def test_json_call_disables_openrouter_reasoning_by_default() -> None:
+    client = LlmClient(
+        Settings(
+            postgres_dsn="postgresql://user:pass@localhost/db",
+            llm_api_key="test",
+            llm_model_attempt_1="model-a",
+        ),
+        attempt=1,
+    )
+    captured: dict[str, object] = {}
+
+    def create(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            model="model-a",
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content='{"fields":{},"warnings":[]}'),
+                )
+            ],
+            usage=None,
+        )
+
+    client.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    client.json_call(system="test", prompt="test", schema=ExtractedFieldsResponse)
+
+    extra_body = captured["extra_body"]
+    assert isinstance(extra_body, dict)
+    assert extra_body["reasoning"] == {"effort": "none"}
+    assert str(captured["messages"][1]["content"]).startswith("/no_think\n")
+
 def test_json_call_rejects_even_valid_json_when_provider_marks_it_truncated() -> None:
     client = LlmClient(
         Settings(
@@ -87,7 +124,7 @@ def test_json_call_rejects_even_valid_json_when_provider_marks_it_truncated() ->
             schema=ExtractedFieldsResponse,
         )
 
-    assert calls == ["model-a"]
+    assert calls == ["model-a", "model-b"]
 
 def test_json_call_falls_back_when_model_returns_invalid_json() -> None:
     client = LlmClient(

@@ -40,6 +40,7 @@ def test_openrouter_structured_body_contains_routing_and_healing() -> None:
     assert client._structured_extra_body(client.model_chain) == {
         "models": ["model-b", "model-c"],
         "provider": {"require_parameters": True},
+        "reasoning": {"effort": "none"},
         "plugins": [{"id": "response-healing"}],
     }
 

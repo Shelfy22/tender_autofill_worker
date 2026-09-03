@@ -100,6 +100,9 @@ class Settings(BaseSettings):
     llm_json_schema_strict: bool = True
     llm_enable_response_healing: bool = True
     llm_require_supported_parameters: bool = True
+    # OpenRouter reasoning/thinking tokens are billed as completion tokens. Keep
+    # structured JSON calls in non-thinking mode unless explicitly overridden.
+    llm_reasoning_effort: str = "none"
     catalog_selection_model: str = "openai/gpt-oss-120b"
     catalog_selection_fallback_models: str = "qwen/qwen3.7-flash,qwen/qwen3.5-flash-02-23"
     ocr_model: str = "deepseek/deepseek-v4-flash-0731"
@@ -151,6 +154,17 @@ class Settings(BaseSettings):
         if normalized not in {"json_schema", "json_object"}:
             raise ValueError(
                 "llm_structured_output_mode must be json_schema or json_object"
+            )
+        return normalized
+
+    @field_validator("llm_reasoning_effort")
+    @classmethod
+    def validate_llm_reasoning_effort(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        allowed = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+        if normalized not in allowed:
+            raise ValueError(
+                "llm_reasoning_effort must be none, minimal, low, medium, high, xhigh, or max"
             )
         return normalized
 

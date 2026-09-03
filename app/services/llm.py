@@ -285,6 +285,9 @@ class LlmClient:
             return body
         if self.settings.llm_require_supported_parameters:
             body["provider"] = {"require_parameters": True}
+        reasoning_effort = self.settings.llm_reasoning_effort
+        if reasoning_effort:
+            body["reasoning"] = {"effort": reasoning_effort}
         if self.settings.llm_enable_response_healing:
             body["plugins"] = [{"id": "response-healing"}]
         return body
@@ -528,7 +531,8 @@ class LlmClient:
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
         max_completion_tokens = self.settings.max_completion_tokens_for(operation)
         request_timeout = self.settings.timeout_for(operation) or self.settings.llm_timeout_seconds
-        request_payload = f"{system}\n\n{prompt}\n\nJSON Schema:\n{schema_json}"
+        thinking_hint = "/no_think\n" if self.settings.llm_reasoning_effort == "none" else ""
+        request_payload = f"{system}\n\n{thinking_hint}{prompt}\n\nJSON Schema:\n{schema_json}"
         input_sha256 = hashlib.sha256(request_payload.encode("utf-8")).hexdigest()
         logical_call_id = hashlib.sha256(
             f"{operation}\n{schema.__name__}\n{input_sha256}".encode("utf-8")
@@ -559,7 +563,7 @@ class LlmClient:
                         {"role": "system", "content": system},
                         {
                             "role": "user",
-                            "content": f"{prompt}{retry_hint}\n\nJSON Schema:\n{schema_json}",
+                            "content": f"{thinking_hint}{prompt}{retry_hint}\n\nJSON Schema:\n{schema_json}",
                         },
                     ],
                     extra_body=self._structured_extra_body([model]),
@@ -651,8 +655,6 @@ class LlmClient:
                     timeout_seconds=request_timeout,
                     configured_max_attempts=max_attempts,
                 )
-                if isinstance(exc, LlmResponseTruncatedError):
-                    raise
                 if index + 1 < len(models):
                     continue
                 raise
@@ -888,6 +890,9 @@ Candidates:
 
 Ограничения:
 - Не принимай финальное решение по тендеру.
+- Верни не более 25 products, 20 reasonHits и 30 fieldCandidates для одного unit.
+- Если фактов больше, выбери самые важные, поставь analysisIncomplete=true и добавь короткое warning.
+- Evidence держи коротким: только фрагмент-доказательство, не копируй большие абзацы.
 - Не считай инструкцию/руководство/документацию по монтажу, наладке или пуску работами.
 - Причина «Номенклатура. Поставка с работами» только при прямой обязанности поставщика выполнить монтаж/установку/ПНР/шефмонтаж/ввод в эксплуатацию.
 - ЗИП/ремкомплект/запасные части — reasonHit, если физический комплект/запчасти входят в поставку или сама позиция является ЗИП.
