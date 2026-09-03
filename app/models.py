@@ -185,6 +185,21 @@ class ProductSourceReference(BaseModel):
         "llm",
     ] = "llm"
 
+    @field_validator(
+        "fileName",
+        "sheet",
+        "productColumn",
+        "quantityColumn",
+        "unitColumn",
+        "productHeader",
+        "quantityHeader",
+        "unitHeader",
+        mode="before",
+    )
+    @classmethod
+    def normalize_nullable_source_reference_strings(cls, value: Any) -> str:
+        return "" if value is None else str(value)
+
     @field_validator("extractionMethod", mode="before")
     @classmethod
     def normalize_extraction_method(cls, value: Any) -> str:

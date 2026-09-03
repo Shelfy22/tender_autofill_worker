@@ -50,6 +50,7 @@ class LlmMalformedResponseError(RuntimeError):
 PRODUCT_DIRECT_CALL_MAX_CHARS = 30_000
 PRODUCT_CHUNK_TARGET_CHARS = 12_000
 PRODUCT_CHUNK_MAX_DEPTH = 8
+PRODUCT_LLM_SKIP_DETERMINISTIC_COUNT = 25
 
 
 def _split_product_text(
@@ -627,6 +628,14 @@ class LlmClient:
 
     def extract_products(self, text: str, deterministic: list[dict[str, Any]]) -> TenderPositionsResponse:
         source_text = text[: self.settings.max_product_text_chars]
+        if len(deterministic) >= PRODUCT_LLM_SKIP_DETERMINISTIC_COUNT:
+            return TenderPositionsResponse(
+                products=[],
+                warnings=[
+                    "Deterministic Excel already produced a large product list; "
+                    "skipped full-text LLM product extraction to avoid duplicate rows and long model calls."
+                ],
+            )
 
         def build_prompt(
             text_part: str,

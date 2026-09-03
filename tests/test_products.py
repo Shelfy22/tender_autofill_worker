@@ -185,6 +185,28 @@ def test_seldon_structured_quantity_has_priority_over_excel_and_llm() -> None:
     assert merged[0].quantity == 200
     assert merged[0].unit == "шт"
 
+def test_llm_source_reference_null_strings_are_normalized() -> None:
+    position = TenderPosition.model_validate(
+        {
+            "product": "Cable",
+            "sourceReference": {
+                "fileName": None,
+                "sheet": None,
+                "row": 1,
+                "productColumn": None,
+                "quantityColumn": None,
+                "unitColumn": None,
+                "productHeader": None,
+                "quantityHeader": None,
+                "unitHeader": None,
+                "extractionMethod": "llm",
+            },
+        }
+    )
+
+    assert position.sourceReference is not None
+    assert position.sourceReference.sheet == ""
+    assert position.sourceReference.productColumn == ""
 
 def test_empty_llm_document_price_source_is_normalized_to_null() -> None:
     position = TenderPosition.model_validate(

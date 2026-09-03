@@ -283,6 +283,24 @@ def test_product_extraction_retries_truncated_full_response_in_chunks() -> None:
         for operation in calls[1:]
     )
 
+def test_large_deterministic_product_list_skips_llm_product_extraction() -> None:
+    client = object.__new__(LlmClient)
+    client.settings = SimpleNamespace(max_product_text_chars=100_000)
+
+    def fail_json_call(**_: object) -> TenderPositionsResponse:
+        raise AssertionError("LLM should not be called for large deterministic lists")
+
+    client.json_call = fail_json_call  # type: ignore[method-assign]
+    response = client.extract_products(
+        "long tender text",
+        [
+            {"product": f"Product {index}", "quantity": 1, "unit": "pcs"}
+            for index in range(25)
+        ],
+    )
+
+    assert response.products == []
+    assert any("skipped full-text LLM product extraction" in item for item in response.warnings)
 
 def test_large_product_text_skips_wasteful_full_llm_call() -> None:
     client = object.__new__(LlmClient)
