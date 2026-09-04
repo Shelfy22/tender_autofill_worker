@@ -94,3 +94,93 @@ def test_document_analysis_units_are_capped_with_warning() -> None:
 
     assert len(units) == 2
     assert any("Document Analysis units limited" in warning for warning in warnings)
+
+
+def test_document_analysis_default_keeps_large_file_as_single_unit() -> None:
+    document = ParsedDocument(
+        documentIndex=1,
+        fileName="large-spec.pdf",
+        documentKind="technical",
+        text="A" * 900_000,
+        textQualityOk=True,
+    )
+
+    units, warnings = build_document_analysis_units(
+        "",
+        [document],
+        [],
+        _settings(),
+    )
+
+    assert not warnings
+    assert len(units) == 1
+    assert units[0].sourceType == "document"
+    assert units[0].partIndex == 1
+    assert units[0].partTotal == 1
+    assert len(units[0].text) == 900_000
+
+
+def test_document_analysis_default_splits_only_above_context_limit() -> None:
+    document = ParsedDocument(
+        documentIndex=1,
+        fileName="huge-spec.pdf",
+        documentKind="technical",
+        text="A" * 1_000_001,
+        textQualityOk=True,
+    )
+
+    units, warnings = build_document_analysis_units(
+        "",
+        [document],
+        [],
+        _settings(),
+    )
+
+    assert not warnings
+    assert [unit.partIndex for unit in units] == [1, 2]
+    assert [unit.partTotal for unit in units] == [2, 2]
+    assert len(units[0].text) == 1_000_000
+    assert len(units[1].text) == 1
+
+
+def test_spreadsheet_document_analysis_default_keeps_candidates_in_one_unit() -> None:
+    document = ParsedDocument(
+        documentIndex=2,
+        fileName="spec.xlsx",
+        documentKind="specification",
+        text="spreadsheet text",
+        textQualityOk=True,
+        spreadsheetTables=[{"sheet": "Лист1", "rows": []}],
+    )
+    positions = [
+        TenderPosition(
+            candidateId=f"xlsx:spec.xlsx:Лист1:{row}",
+            product=f"Товар {row}",
+            quantity=1,
+            unit="шт",
+            source="excel_table_deterministic",
+            sourceReference=ProductSourceReference(
+                fileName="spec.xlsx",
+                sheet="Лист1",
+                row=row,
+                productColumn="B",
+                quantityColumn="D",
+                unitColumn="C",
+                extractionMethod="excel_deterministic",
+            ),
+            sourceCells={"B": f"Товар {row}", "C": "шт", "D": "1"},
+        )
+        for row in range(2, 132)
+    ]
+
+    units, warnings = build_document_analysis_units(
+        "",
+        [document],
+        positions,
+        _settings(),
+    )
+
+    assert not warnings
+    assert len(units) == 1
+    assert units[0].sourceType == "spreadsheet"
+    assert len(units[0].spreadsheetCandidates) == 130

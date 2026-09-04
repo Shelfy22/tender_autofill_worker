@@ -51,15 +51,15 @@ class Settings(BaseSettings):
     max_archive_uncompressed_bytes: int = Field(default=500 * 1024 * 1024, ge=1)
     max_archive_compression_ratio: float = Field(default=100.0, ge=1)
     max_archive_depth: int = Field(default=1, ge=0, le=5)
-    max_text_chars_per_file: int = Field(default=250_000, ge=1_000)
-    max_combined_text_chars: int = Field(default=500_000, ge=1_000)
-    max_product_text_chars: int = Field(default=250_000, ge=1_000)
+    max_text_chars_per_file: int = Field(default=1_000_000, ge=1_000)
+    max_combined_text_chars: int = Field(default=1_000_000, ge=1_000)
+    max_product_text_chars: int = Field(default=1_000_000, ge=1_000)
     max_decision_text_chars: int = Field(default=220_000, ge=1_000)
     enable_document_analysis_pipeline: bool = True
-    document_analysis_unit_max_chars: int = Field(default=50_000, ge=5_000)
-    document_analysis_max_units: int = Field(default=20, ge=1, le=200)
-    spreadsheet_candidate_review_max_rows: int = Field(default=40, ge=5, le=150)
-    spreadsheet_candidate_review_max_chars: int = Field(default=24_000, ge=5_000)
+    document_analysis_unit_max_chars: int = Field(default=1_000_000, ge=5_000)
+    document_analysis_max_units: int = Field(default=100, ge=1, le=500)
+    spreadsheet_candidate_review_max_rows: int = Field(default=100_000, ge=5, le=1_000_000)
+    spreadsheet_candidate_review_max_chars: int = Field(default=1_000_000, ge=5_000)
     pdf_ocr_max_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
 
     seldon_base_url: str = "https://apitorgi.myseldon.com"
