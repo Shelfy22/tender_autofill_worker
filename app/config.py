@@ -78,13 +78,14 @@ class Settings(BaseSettings):
     # Optional comma-separated override. Empty means: use the other attempt models.
     llm_fallback_models: str = ""
     llm_timeout_seconds: float = Field(default=300, gt=0)
-    llm_max_attempts_per_unit: int = Field(default=2, ge=1, le=3)
+    llm_max_attempts_per_unit: int = Field(default=3, ge=1, le=3)
     # Optional per-stage HTTP timeouts. None means use llm_timeout_seconds from the client.
     document_analysis_timeout_seconds: float | None = Field(default=120, gt=0)
+    consolidation_timeout_seconds: float | None = Field(default=60, gt=0)
     product_extraction_timeout_seconds: float | None = Field(default=90, gt=0)
     catalog_selection_timeout_seconds: float | None = Field(default=45, gt=0)
     final_decision_timeout_seconds: float | None = Field(default=60, gt=0)
-    ocr_timeout_seconds: float | None = Field(default=180, gt=0)
+    ocr_timeout_seconds: float | None = Field(default=360, gt=0)
     # Legacy global cap kept for backward compatibility with existing .env files.
     llm_max_output_tokens: int = Field(default=16_000, ge=256)
     # New per-stage completion-token budgets. LLM_MAX_COMPLETION_TOKENS is the
@@ -96,6 +97,7 @@ class Settings(BaseSettings):
     catalog_selection_max_completion_tokens: int | None = Field(default=4_000, ge=256)
     final_decision_max_completion_tokens: int | None = Field(default=4_000, ge=256)
     ocr_max_completion_tokens: int | None = Field(default=24_000, ge=256)
+    llm_rate_limit_backoff_seconds: float = Field(default=5, ge=0, le=60)
     llm_structured_output_mode: str = "json_schema"
     llm_json_schema_strict: bool = True
     llm_enable_response_healing: bool = True
@@ -243,6 +245,8 @@ class Settings(BaseSettings):
             return self.final_decision_timeout_seconds
         if normalized in {"extract_tender_products", "audit_product_candidates"}:
             return self.product_extraction_timeout_seconds
+        if normalized in {"consolidate_tender_analysis", "consolidate_document_analysis"}:
+            return self.consolidation_timeout_seconds
         if normalized.startswith("analyze_document"):
             return self.document_analysis_timeout_seconds
         return None

@@ -43,7 +43,14 @@ def extract_pdf_text(
     if path.stat().st_size > settings.pdf_ocr_max_bytes:
         warnings.append("PDF превышает PDF_OCR_MAX_BYTES и не отправлен в OCR.")
         return "", "ocr_size_limit", warnings
-    ocr_text = llm.ocr_pdf(path)
+    try:
+        ocr_text = llm.ocr_pdf(path)
+    except TimeoutError as exc:
+        warnings.append(f"OCR превысил лимит времени и файл пропущен: {exc}")
+        return "", "ocr_timeout", warnings
+    except Exception as exc:
+        warnings.append(f"OCR не выполнен, файл пропущен: {type(exc).__name__}: {exc}")
+        return "", "ocr_failed", warnings
     if len(ocr_text.strip()) >= 100:
         return ocr_text.strip(), "ocr_ok", warnings
     warnings.append("OCR не вернул полезный текст.")

@@ -124,7 +124,7 @@ def test_json_call_rejects_even_valid_json_when_provider_marks_it_truncated() ->
             schema=ExtractedFieldsResponse,
         )
 
-    assert calls == ["model-a", "model-b"]
+    assert calls == ["model-a", "model-b", "model-c"]
 
 def test_json_call_falls_back_when_model_returns_invalid_json() -> None:
     client = LlmClient(

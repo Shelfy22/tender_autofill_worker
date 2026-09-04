@@ -1,3 +1,7 @@
+import time
+
+import pytest
+
 from app.config import Settings
 from app.models import ExtractedFieldsResponse
 from app.services.llm import LlmClient
@@ -85,3 +89,22 @@ def test_catalog_selection_model_fallback_can_be_disabled() -> None:
     assert settings(llm_enable_model_fallback=False).models_for_catalog_selection() == [
         "openai/gpt-oss-120b"
     ]
+
+
+def test_stage_timeouts_and_full_model_fallback_defaults() -> None:
+    configured = settings()
+
+    assert configured.timeout_for("consolidate_tender_analysis") == 60
+    assert configured.timeout_for("ocr_pdf") == 360
+    assert configured.llm_max_attempts_per_unit == 3
+    assert configured.models_for_attempt(1) == ["model-a", "model-b", "model-c"]
+
+
+def test_llm_wall_timeout_returns_before_slow_call_finishes() -> None:
+    client = LlmClient(settings(llm_rate_limit_backoff_seconds=0), attempt=1)
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError):
+        client._call_with_wall_timeout("unit-test", 0.01, lambda: time.sleep(1))
+
+    assert time.monotonic() - started < 0.5

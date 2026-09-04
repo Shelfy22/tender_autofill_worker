@@ -4,7 +4,9 @@ import base64
 import copy
 import hashlib
 import json
+import queue
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +35,10 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T", bound=BaseModel)
+
+
+class LlmWallTimeoutError(TimeoutError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -270,6 +276,39 @@ class LlmClient:
             timeout=settings.llm_timeout_seconds,
             max_retries=0,
         )
+
+    def _call_with_wall_timeout(self, operation: str, timeout_seconds: float | None, call: Any) -> Any:
+        if timeout_seconds is None:
+            return call()
+        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+        def runner() -> None:
+            try:
+                result_queue.put(("ok", call()))
+            except BaseException as exc:
+                result_queue.put(("error", exc))
+
+        thread = threading.Thread(target=runner, name=f"llm-{operation}", daemon=True)
+        thread.start()
+        try:
+            kind, payload = result_queue.get(timeout=float(timeout_seconds))
+        except queue.Empty as exc:
+            raise LlmWallTimeoutError(
+                f"LLM operation {operation} exceeded wall timeout {timeout_seconds} seconds"
+            ) from exc
+        if kind == "error":
+            raise payload
+        return payload
+
+    def _rate_limit_backoff(self, model_index: int) -> None:
+        delay = float(getattr(self.settings, "llm_rate_limit_backoff_seconds", 0) or 0)
+        if delay > 0:
+            time.sleep(delay * max(1, model_index + 1))
+
+    @staticmethod
+    def _is_rate_limit_error(error: BaseException) -> bool:
+        status_code = int(getattr(error, "status_code", 0) or 0)
+        return status_code == 429 or "ratelimit" in type(error).__name__.lower()
 
     def _uses_openrouter_extensions(self) -> bool:
         return self.settings.llm_provider == "openrouter"
@@ -553,20 +592,24 @@ class LlmClient:
                 else ""
             )
             try:
-                response = self.client.chat.completions.create(
-                    model=model,
-                    temperature=0,
-                    max_tokens=max_completion_tokens,
-                    timeout=request_timeout,
-                    response_format=self._response_format(schema),
-                    messages=[
-                        {"role": "system", "content": system},
-                        {
-                            "role": "user",
-                            "content": f"{thinking_hint}{prompt}{retry_hint}\n\nJSON Schema:\n{schema_json}",
-                        },
-                    ],
-                    extra_body=self._structured_extra_body([model]),
+                response = self._call_with_wall_timeout(
+                    operation,
+                    request_timeout,
+                    lambda model=model, retry_hint=retry_hint: self.client.chat.completions.create(
+                        model=model,
+                        temperature=0,
+                        max_tokens=max_completion_tokens,
+                        timeout=request_timeout,
+                        response_format=self._response_format(schema),
+                        messages=[
+                            {"role": "system", "content": system},
+                            {
+                                "role": "user",
+                                "content": f"{thinking_hint}{prompt}{retry_hint}\n\nJSON Schema:\n{schema_json}",
+                            },
+                        ],
+                        extra_body=self._structured_extra_body([model]),
+                    ),
                 )
             except Exception as exc:
                 last_error = exc
@@ -587,6 +630,8 @@ class LlmClient:
                     configured_max_attempts=max_attempts,
                 )
                 if index + 1 < len(models):
+                    if self._is_rate_limit_error(exc):
+                        self._rate_limit_backoff(index)
                     continue
                 raise
 
@@ -656,6 +701,8 @@ class LlmClient:
                     configured_max_attempts=max_attempts,
                 )
                 if index + 1 < len(models):
+                    if self._is_rate_limit_error(exc):
+                        self._rate_limit_backoff(index)
                     continue
                 raise
 
@@ -1101,31 +1148,35 @@ Input positions:
         extra_body.update(self._fallback_body(ocr_models))
         started = time.monotonic()
         try:
-            response = self.client.chat.completions.create(
-                model=ocr_models[0],
-                temperature=0,
-                max_tokens=max_completion_tokens,
-                timeout=request_timeout,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Ты OCR-модуль. Верни только распознанный текст документа без markdown.",
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Распознай весь текст PDF, сохраняя таблицы и числа."},
-                            {
-                                "type": "file",
-                                "file": {
-                                    "filename": path.name,
-                                    "file_data": f"data:application/pdf;base64,{data}",
+            response = self._call_with_wall_timeout(
+                "ocr_pdf",
+                request_timeout,
+                lambda: self.client.chat.completions.create(
+                    model=ocr_models[0],
+                    temperature=0,
+                    max_tokens=max_completion_tokens,
+                    timeout=request_timeout,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an OCR module. Return only recognized document text without markdown.",
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Recognize all PDF text, preserving tables and numbers."},
+                                {
+                                    "type": "file",
+                                    "file": {
+                                        "filename": path.name,
+                                        "file_data": f"data:application/pdf;base64,{data}",
+                                    },
                                 },
-                            },
-                        ],
-                    },
-                ],
-                extra_body=extra_body,
+                            ],
+                        },
+                    ],
+                    extra_body=extra_body,
+                ),
             )
         except Exception as exc:
             self._observe_llm(
@@ -1157,5 +1208,7 @@ Input positions:
             input_sha256=input_sha256,
             logical_call_id=input_sha256,
             physical_call_index=1,
+            timeout_seconds=request_timeout,
+            configured_max_attempts=len(ocr_models),
         )
         return response.choices[0].message.content or ""
