@@ -96,6 +96,62 @@ def test_document_analysis_units_are_capped_with_warning() -> None:
     assert any("Document Analysis units limited" in warning for warning in warnings)
 
 
+def test_document_analysis_batches_two_small_documents_by_default() -> None:
+    documents = [
+        ParsedDocument(
+            documentIndex=index,
+            fileName=f"doc-{index}.txt",
+            documentKind="technical",
+            text=f"document {index}",
+            textQualityOk=True,
+        )
+        for index in range(1, 4)
+    ]
+
+    units, warnings = build_document_analysis_units(
+        "",
+        documents,
+        [],
+        _settings(),
+    )
+
+    assert not warnings
+    assert len(units) == 2
+    assert units[0].unitId == "unit:1:documents:1-2"
+    assert units[0].documentIndex is None
+    assert units[0].fileName == "doc-1.txt; doc-2.txt"
+    assert units[0].documentKind == "document_batch"
+    assert "--- DOCUMENT 1 ---" in units[0].text
+    assert "--- DOCUMENT 2 ---" in units[0].text
+    assert units[1].documentIndex == 3
+    assert units[1].text == "document 3"
+
+
+def test_document_analysis_does_not_batch_documents_above_unit_limit() -> None:
+    documents = [
+        ParsedDocument(
+            documentIndex=index,
+            fileName=f"large-{index}.txt",
+            documentKind="technical",
+            text="A" * 6_000,
+            textQualityOk=True,
+        )
+        for index in range(1, 3)
+    ]
+
+    units, warnings = build_document_analysis_units(
+        "",
+        documents,
+        [],
+        _settings(document_analysis_unit_max_chars=10_000),
+    )
+
+    assert not warnings
+    assert len(units) == 2
+    assert [unit.documentIndex for unit in units] == [1, 2]
+    assert [len(unit.text) for unit in units] == [6_000, 6_000]
+
+
 def test_document_analysis_default_keeps_large_file_as_single_unit() -> None:
     document = ParsedDocument(
         documentIndex=1,

@@ -566,6 +566,35 @@ def test_generator_required_zip_is_detected_outside_extracted_requirements() -> 
         assert "ЗИП" in checks["repairKitCheck"]["evidence"]
 
 
+def test_zip_as_part_of_product_completeness_triggers_repair_kit_reason() -> None:
+    text = (
+        "Поставка шкафа управления. ЗИП указан как часть комплектности товара "
+        "и входит в состав комплекта поставки основного оборудования."
+    )
+
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(
+            total=1,
+            details=[
+                {
+                    "positionIndex": 1,
+                    "sourceProduct": "Шкаф управления",
+                    "productQuery": "Шкаф управления",
+                }
+            ],
+        ),
+        text,
+    )
+
+    matching = [reason for reason in reasons if reason.reason == REPAIR_KIT_REASON]
+    assert len(matching) == 1
+    assert "ЗИП" in matching[0].evidence
+    assert "комплектности" in matching[0].evidence
+    assert checks["repairKitCheck"]["triggered"] is True
+
+
 def test_zip_documentation_without_physical_supply_does_not_trigger_reason() -> None:
     text = (
         "Поставщик должен предоставить документацию и руководство по эксплуатации "

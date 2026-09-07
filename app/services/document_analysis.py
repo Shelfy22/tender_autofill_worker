@@ -172,8 +172,90 @@ def build_document_analysis_units(
         )
         unit_number += 1
 
+    documents_per_unit = max(
+        1,
+        int(getattr(settings, "document_analysis_documents_per_unit", 1)),
+    )
+    current_documents: list[ParsedDocument] = []
+    current_raw_parts: list[str] = []
+    current_sections: list[str] = []
+    current_chars = 0
+
+    def document_section(document: ParsedDocument, text_part: str, index: int, total: int) -> str:
+        return "\n".join(
+            section
+            for section in (
+                f"--- DOCUMENT {document.documentIndex} ---",
+                f"fileName: {document.fileName}",
+                (
+                    f"originalFileName: {document.originalFileName}"
+                    if document.originalFileName and document.originalFileName != document.fileName
+                    else ""
+                ),
+                f"documentKind: {document.documentKind}",
+                f"extension: {document.fileExtension}",
+                f"parserStatus: {document.parserStatus}",
+                f"part: {index}/{total}",
+                "",
+                text_part,
+            )
+            if section is not None
+        ).strip()
+
+    def add_document_unit(spec: dict[str, Any]) -> None:
+        nonlocal unit_number
+        units.append(
+            DocumentAnalysisUnit(
+                unitId=spec["unitId"],
+                sourceType="document",
+                documentIndex=spec["documentIndex"],
+                fileName=spec["fileName"],
+                documentKind=spec["documentKind"],
+                partIndex=spec["partIndex"],
+                partTotal=spec["partTotal"],
+                text=spec["text"],
+                inputSha256=_sha256(f"{spec['unitId']}\n{spec['text']}"),
+            )
+        )
+        unit_number += 1
+
+    def flush_document_batch() -> None:
+        nonlocal current_documents, current_raw_parts, current_sections, current_chars
+        if not current_documents:
+            return
+        if len(current_documents) == 1:
+            document = current_documents[0]
+            text = current_raw_parts[0]
+            spec = {
+                "unitId": f"unit:{unit_number}:document:{document.documentIndex}:part:1",
+                "documentIndex": document.documentIndex,
+                "fileName": document.fileName,
+                "documentKind": document.documentKind,
+                "partIndex": 1,
+                "partTotal": 1,
+                "text": text,
+            }
+        else:
+            indexes = "-".join(str(document.documentIndex) for document in current_documents)
+            file_names = "; ".join(document.fileName for document in current_documents)
+            spec = {
+                "unitId": f"unit:{unit_number}:documents:{indexes}",
+                "documentIndex": None,
+                "fileName": file_names,
+                "documentKind": "document_batch",
+                "partIndex": 1,
+                "partTotal": 1,
+                "text": "\n\n".join(current_sections).strip(),
+            }
+        add_document_unit(spec)
+        current_documents = []
+        current_raw_parts = []
+        current_sections = []
+        current_chars = 0
+
     for document in documents:
         if document.spreadsheetTables and not skip_spreadsheet_candidate_units:
+            flush_document_batch()
             document_positions = [
                 position
                 for position in deterministic_positions
@@ -197,22 +279,34 @@ def build_document_analysis_units(
         text_parts = _split_text_source(document.text, max_chars)
         total = max(1, len(text_parts))
         for index, text_part in enumerate(text_parts, start=1):
-            unit_id = f"unit:{unit_number}:document:{document.documentIndex}:part:{index}"
-            units.append(
-                DocumentAnalysisUnit(
-                    unitId=unit_id,
-                    sourceType="document",
-                    documentIndex=document.documentIndex,
-                    fileName=document.fileName,
-                    documentKind=document.documentKind,
-                    partIndex=index,
-                    partTotal=total,
-                    text=text_part,
-                    inputSha256=_sha256(f"{unit_id}\n{text_part}"),
+            section = document_section(document, text_part, index, total)
+            section_chars = len(section)
+            can_batch_whole_document = total == 1 and section_chars <= max_chars
+            if not can_batch_whole_document:
+                flush_document_batch()
+                add_document_unit(
+                    {
+                        "unitId": f"unit:{unit_number}:document:{document.documentIndex}:part:{index}",
+                        "documentIndex": document.documentIndex,
+                        "fileName": document.fileName,
+                        "documentKind": document.documentKind,
+                        "partIndex": index,
+                        "partTotal": total,
+                        "text": text_part,
+                    }
                 )
-            )
-            unit_number += 1
+                continue
+            if current_documents and (
+                len(current_documents) >= documents_per_unit
+                or current_chars + section_chars > max_chars
+            ):
+                flush_document_batch()
+            current_documents.append(document)
+            current_raw_parts.append(text_part)
+            current_sections.append(section)
+            current_chars += section_chars
 
+    flush_document_batch()
     if len(units) > max_units:
         warnings.append(
             f"Document Analysis units limited: {len(units)} -> {max_units}; remaining units marked incomplete."
