@@ -99,13 +99,26 @@ def test_document_analysis_units_are_capped_with_warning() -> None:
 def test_document_analysis_batches_two_small_documents_by_default() -> None:
     documents = [
         ParsedDocument(
-            documentIndex=index,
-            fileName=f"doc-{index}.txt",
+            documentIndex=1,
+            fileName="doc-1.pdf",
             documentKind="technical",
-            text=f"document {index}",
+            text="document 1",
             textQualityOk=True,
-        )
-        for index in range(1, 4)
+        ),
+        ParsedDocument(
+            documentIndex=2,
+            fileName="doc-2.docx",
+            documentKind="contract",
+            text="document 2",
+            textQualityOk=True,
+        ),
+        ParsedDocument(
+            documentIndex=3,
+            fileName="doc-3.txt",
+            documentKind="technical",
+            text="document 3",
+            textQualityOk=True,
+        ),
     ]
 
     units, warnings = build_document_analysis_units(
@@ -119,12 +132,57 @@ def test_document_analysis_batches_two_small_documents_by_default() -> None:
     assert len(units) == 2
     assert units[0].unitId == "unit:1:documents:1-2"
     assert units[0].documentIndex is None
-    assert units[0].fileName == "doc-1.txt; doc-2.txt"
+    assert units[0].fileName == "doc-1.pdf; doc-2.docx"
     assert units[0].documentKind == "document_batch"
     assert "--- DOCUMENT 1 ---" in units[0].text
     assert "--- DOCUMENT 2 ---" in units[0].text
     assert units[1].documentIndex == 3
+    assert units[0].batchedDocumentUnits
+    assert [child.fileName for child in units[0].batchedDocumentUnits] == ["doc-1.pdf", "doc-2.docx"]
+    assert "batchedDocumentUnits" not in units[0].model_dump(mode="json")
     assert units[1].text == "document 3"
+
+
+
+def test_document_analysis_keeps_spreadsheet_text_fallback_out_of_document_batches() -> None:
+    documents = [
+        ParsedDocument(
+            documentIndex=1,
+            fileName="terms.docx",
+            documentKind="contract",
+            text="terms",
+            textQualityOk=True,
+        ),
+        ParsedDocument(
+            documentIndex=2,
+            fileName="spec.xlsx",
+            fileExtension=".xlsx",
+            documentKind="specification",
+            text="spreadsheet text fallback",
+            textQualityOk=True,
+        ),
+        ParsedDocument(
+            documentIndex=3,
+            fileName="more.pdf",
+            documentKind="technical",
+            text="more terms",
+            textQualityOk=True,
+        ),
+    ]
+
+    units, warnings = build_document_analysis_units(
+        "",
+        documents,
+        [],
+        _settings(),
+        skip_spreadsheet_candidate_units=True,
+    )
+
+    assert not warnings
+    assert len(units) == 3
+    assert [unit.documentIndex for unit in units] == [1, 2, 3]
+    assert all(";" not in unit.fileName for unit in units)
+    assert all(not unit.batchedDocumentUnits for unit in units)
 
 
 def test_document_analysis_does_not_batch_documents_above_unit_limit() -> None:

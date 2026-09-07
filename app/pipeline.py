@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from pydantic import ValidationError
+
 from app.config import Settings
 from app.logging import stage
 from app.models import DocumentAnalysisResult, JobClaim, ParsedDocument, TenderPositionsResponse, TenderResult
@@ -29,7 +31,7 @@ from app.services.documents import (
     build_combined_text as build_deterministic_text,
     document_processing_context,
 )
-from app.services.llm import LlmClient, LlmResponseTruncatedError
+from app.services.llm import LlmClient, LlmResponseTruncatedError, LlmWallTimeoutError
 from app.services.normalization import deduplicate_strings, normalize_job_payload
 from app.services.product_validation import (
     review_spreadsheet_candidate_positions,
@@ -270,30 +272,54 @@ class TenderPipeline:
                 document_analysis_results: list[DocumentAnalysisResult] = []
                 incomplete_document_unit_ids: list[str] = []
 
-                def analyze_unit_safely(unit: Any) -> DocumentAnalysisResult:
+                def incomplete_result(unit: Any, warning: str) -> DocumentAnalysisResult:
+                    self.warnings.append(warning)
+                    incomplete_document_unit_ids.append(unit.unitId)
+                    return DocumentAnalysisResult(
+                        unitId=unit.unitId,
+                        inputSha256=unit.inputSha256,
+                        sourceType=unit.sourceType,
+                        fileName=unit.fileName,
+                        partIndex=unit.partIndex,
+                        partTotal=unit.partTotal,
+                        analysisIncomplete=True,
+                        warnings=[warning],
+                    )
+
+                def analyze_unit_safely(unit: Any) -> list[DocumentAnalysisResult]:
                     try:
-                        return result_from_unit(unit, llm.analyze_document_unit(unit))
+                        return [result_from_unit(unit, llm.analyze_document_unit(unit))]
                     except LlmResponseTruncatedError as exc:
                         warning = (
                             f"Document Analysis unit {unit.unitId} "
                             f"({unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}) "
                             f"returned a truncated LLM response and was marked incomplete: {exc}"
                         )
-                        self.warnings.append(warning)
-                        incomplete_document_unit_ids.append(unit.unitId)
-                        return DocumentAnalysisResult(
-                            unitId=unit.unitId,
-                            inputSha256=unit.inputSha256,
-                            sourceType=unit.sourceType,
-                            fileName=unit.fileName,
-                            partIndex=unit.partIndex,
-                            partTotal=unit.partTotal,
-                            analysisIncomplete=True,
-                            warnings=[warning],
+                        return [incomplete_result(unit, warning)]
+                    except (ValidationError, LlmWallTimeoutError) as exc:
+                        child_units = list(getattr(unit, "batchedDocumentUnits", []) or [])
+                        if not child_units:
+                            raise
+                        warning = (
+                            f"Document Analysis batched unit {unit.unitId} "
+                            f"({unit.fileName or unit.sourceType}) failed with {type(exc).__name__}; "
+                            f"retrying {len(child_units)} documents individually."
                         )
+                        self.warnings.append(warning)
+                        retry_results: list[DocumentAnalysisResult] = []
+                        for child_unit in child_units:
+                            retry_results.extend(
+                                self._run_stage(
+                                    f"Analyze Document Unit Retry: "
+                                    f"{child_unit.fileName or child_unit.sourceType} "
+                                    f"{child_unit.partIndex}/{child_unit.partTotal}",
+                                    lambda child_unit=child_unit: analyze_unit_safely(child_unit),
+                                )
+                            )
+                        return retry_results
 
                 for unit in document_analysis_units:
-                    document_analysis_results.append(
+                    document_analysis_results.extend(
                         self._run_stage(
                             f"Analyze Document Unit: {unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}",
                             lambda unit=unit: analyze_unit_safely(unit),

@@ -194,6 +194,44 @@ class FakeLlmClient:
         raise AssertionError("legacy audit_product_candidates must not be called in DocumentAnalysis pipeline")
 
 
+class TwoTextDocumentProcessor(FakeDocumentProcessor):
+    def process_all(self, *_: object) -> tuple[list[ParsedDocument], list[str]]:
+        return [
+            ParsedDocument(
+                documentIndex=1,
+                fileName="terms.pdf",
+                documentKind="technical",
+                text="first document product",
+                textQualityOk=True,
+            ),
+            ParsedDocument(
+                documentIndex=2,
+                fileName="contract.docx",
+                documentKind="contract",
+                text="second document delivery",
+                textQualityOk=True,
+            ),
+        ], []
+
+
+class BatchValidationFakeLlmClient(FakeLlmClient):
+    def analyze_document_unit(self, unit: object) -> DocumentAnalysisResponse:
+        file_name = str(getattr(unit, "fileName", ""))
+        self.calls.append(f"analyze:{file_name}")
+        if getattr(unit, "batchedDocumentUnits", []):
+            DocumentAnalysisResponse.model_validate({"products": "not-a-list"})
+        return DocumentAnalysisResponse(
+            products=[
+                TenderPosition(
+                    product=file_name or "product",
+                    productQuery=file_name or "product",
+                    quantity=1,
+                    unit="pcs",
+                )
+            ]
+        )
+
+
 LAST_LLM: FakeLlmClient | None = None
 
 
@@ -253,6 +291,51 @@ class TruncatingDocumentFakeLlmClient(FakeLlmClient):
                 "LLM response was truncated by provider: finish_reason=length"
             )
         return super().analyze_document_unit(unit)
+
+
+def test_document_analysis_pipeline_retries_batched_unit_as_single_documents(monkeypatch, tmp_path) -> None:
+    import app.pipeline as pipeline_module
+
+    def make_llm(*args: object, **kwargs: object) -> BatchValidationFakeLlmClient:
+        global LAST_LLM
+        LAST_LLM = BatchValidationFakeLlmClient(*args, **kwargs)
+        return LAST_LLM
+
+    monkeypatch.setattr(pipeline_module, "SeldonClient", FakeSeldonClient)
+    monkeypatch.setattr(pipeline_module, "DocumentProcessor", TwoTextDocumentProcessor)
+    monkeypatch.setattr(pipeline_module, "IProClient", FakeIProClient)
+    monkeypatch.setattr(pipeline_module, "CatalogMatcher", FakeCatalogMatcher)
+    monkeypatch.setattr(pipeline_module, "LlmClient", make_llm)
+
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        llm_api_key="test",
+        enable_document_analysis_pipeline=True,
+    )
+    claim = JobClaim(
+        record_key="record-1",
+        batch_id="batch-1",
+        attempt=1,
+        report_id=1,
+        seldon_id="123",
+        report_fields={"Код ТО": "ТО1", "Код ФЗ": "223"},
+        input_json={
+            "reportId": 1,
+            "seldonId": "123",
+            "toCode": "ТО1",
+            "lawCode": "223",
+        },
+    )
+
+    result = TenderPipeline(settings, tmp_path).run(claim)
+
+    assert LAST_LLM is not None
+    assert "analyze:terms.pdf; contract.docx" in LAST_LLM.calls
+    assert "analyze:terms.pdf" in LAST_LLM.calls
+    assert "analyze:contract.docx" in LAST_LLM.calls
+    assert result["debug"]["documentAnalysis"]["unitCount"] == 2
+    assert result["debug"]["documentAnalysis"]["resultCount"] == 3
+    assert any("retrying 2 documents individually" in warning for warning in result["warnings"])
 
 
 def test_document_analysis_pipeline_marks_truncated_unit_incomplete(monkeypatch, tmp_path) -> None:

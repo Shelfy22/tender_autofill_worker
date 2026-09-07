@@ -365,6 +365,7 @@ class DocumentAnalysisUnit(BaseModel):
     partTotal: int = Field(default=1, ge=1)
     text: str = ""
     spreadsheetCandidates: list[dict[str, Any]] = Field(default_factory=list)
+    batchedDocumentUnits: list["DocumentAnalysisUnit"] = Field(default_factory=list, exclude=True)
     inputSha256: str = ""
 
 

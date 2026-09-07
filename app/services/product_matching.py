@@ -6,13 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from app.config import Settings
 from app.models import DocumentAnalysisResult, ParsedDocument, TenderPositionsResponse
 from app.services.catalog import CatalogMatcher
 from app.services.coverage import summarize_product_coverage
 from app.services.document_analysis import build_document_analysis_units, result_from_unit
 from app.services.documents import DocumentProcessor, build_combined_text, safe_filename
-from app.services.llm import LlmClient, LlmResponseTruncatedError
+from app.services.llm import LlmClient, LlmResponseTruncatedError, LlmWallTimeoutError
 from app.services.products import extract_deterministic_positions, merge_positions
 
 
@@ -86,27 +88,43 @@ def run_product_matching_from_files(
 
             analysis_results: list[DocumentAnalysisResult] = []
             incomplete_unit_ids: list[str] = []
-            for unit in units:
+
+            def incomplete_result(unit: Any, warning: str) -> DocumentAnalysisResult:
+                incomplete_unit_ids.append(unit.unitId)
+                warnings.append(warning)
+                return DocumentAnalysisResult(
+                    unitId=unit.unitId,
+                    inputSha256=unit.inputSha256,
+                    sourceType=unit.sourceType,
+                    fileName=unit.fileName,
+                    partIndex=unit.partIndex,
+                    partTotal=unit.partTotal,
+                    analysisIncomplete=True,
+                    warnings=[warning],
+                )
+
+            def analyze_unit_safely(unit: Any) -> list[DocumentAnalysisResult]:
                 try:
                     response = llm.analyze_document_unit(unit)
-                    analysis_results.append(result_from_unit(unit, response))
+                    return [result_from_unit(unit, response)]
                 except LlmResponseTruncatedError as exc:
-                    incomplete_unit_ids.append(unit.unitId)
+                    warning = f"{unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}: {exc}"
+                    return [incomplete_result(unit, warning)]
+                except (ValidationError, LlmWallTimeoutError) as exc:
+                    child_units = list(getattr(unit, "batchedDocumentUnits", []) or [])
+                    if not child_units:
+                        raise
                     warnings.append(
-                        f"{unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}: {exc}"
+                        f"{unit.fileName or unit.sourceType}: batched analysis failed with "
+                        f"{type(exc).__name__}; retrying {len(child_units)} documents individually."
                     )
-                    analysis_results.append(
-                        DocumentAnalysisResult(
-                            unitId=unit.unitId,
-                            inputSha256=unit.inputSha256,
-                            sourceType=unit.sourceType,
-                            fileName=unit.fileName,
-                            partIndex=unit.partIndex,
-                            partTotal=unit.partTotal,
-                            analysisIncomplete=True,
-                            warnings=[str(exc)],
-                        )
-                    )
+                    retry_results: list[DocumentAnalysisResult] = []
+                    for child_unit in child_units:
+                        retry_results.extend(analyze_unit_safely(child_unit))
+                    return retry_results
+
+            for unit in units:
+                analysis_results.extend(analyze_unit_safely(unit))
 
             consolidation = llm.consolidate_document_analysis(
                 [result.model_dump(mode="json") for result in analysis_results]

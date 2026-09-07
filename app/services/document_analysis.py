@@ -134,6 +134,24 @@ def _spreadsheet_units_for_document(
     return units, unit_number
 
 
+_SPREADSHEET_TEXT_EXTENSIONS = {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods", ".csv"}
+
+
+def _document_extension(document: ParsedDocument) -> str:
+    extension = str(document.fileExtension or "").strip().lower()
+    if extension and not extension.startswith("."):
+        extension = f".{extension}"
+    if not extension:
+        file_name = str(document.fileName or "").strip().lower()
+        if "." in file_name:
+            extension = f".{file_name.rsplit('.', 1)[-1]}"
+    return extension
+
+
+def _is_spreadsheet_text_fallback(document: ParsedDocument) -> bool:
+    return bool(document.spreadsheetTables) or _document_extension(document) in _SPREADSHEET_TEXT_EXTENSIONS
+
+
 def build_document_analysis_units(
     page_text: str,
     documents: list[ParsedDocument],
@@ -202,52 +220,85 @@ def build_document_analysis_units(
             if section is not None
         ).strip()
 
-    def add_document_unit(spec: dict[str, Any]) -> None:
-        nonlocal unit_number
-        units.append(
-            DocumentAnalysisUnit(
-                unitId=spec["unitId"],
-                sourceType="document",
-                documentIndex=spec["documentIndex"],
-                fileName=spec["fileName"],
-                documentKind=spec["documentKind"],
-                partIndex=spec["partIndex"],
-                partTotal=spec["partTotal"],
-                text=spec["text"],
-                inputSha256=_sha256(f"{spec['unitId']}\n{spec['text']}"),
-            )
+    def make_document_unit(
+        *,
+        unit_id: str,
+        document_index: int | None,
+        file_name: str,
+        document_kind: str,
+        part_index: int,
+        part_total: int,
+        text: str,
+        batched_document_units: list[DocumentAnalysisUnit] | None = None,
+    ) -> DocumentAnalysisUnit:
+        return DocumentAnalysisUnit(
+            unitId=unit_id,
+            sourceType="document",
+            documentIndex=document_index,
+            fileName=file_name,
+            documentKind=document_kind,
+            partIndex=part_index,
+            partTotal=part_total,
+            text=text,
+            batchedDocumentUnits=batched_document_units or [],
+            inputSha256=_sha256(f"{unit_id}\n{text}"),
         )
+
+    def add_document_unit(unit: DocumentAnalysisUnit) -> None:
+        nonlocal unit_number
+        units.append(unit)
         unit_number += 1
+
+    def make_single_unit(
+        document: ParsedDocument,
+        text_part: str,
+        *,
+        part_index: int = 1,
+        part_total: int = 1,
+        unit_id: str | None = None,
+    ) -> DocumentAnalysisUnit:
+        actual_unit_id = unit_id or f"unit:{unit_number}:document:{document.documentIndex}:part:{part_index}"
+        return make_document_unit(
+            unit_id=actual_unit_id,
+            document_index=document.documentIndex,
+            file_name=document.fileName,
+            document_kind=document.documentKind,
+            part_index=part_index,
+            part_total=part_total,
+            text=text_part,
+        )
 
     def flush_document_batch() -> None:
         nonlocal current_documents, current_raw_parts, current_sections, current_chars
         if not current_documents:
             return
         if len(current_documents) == 1:
-            document = current_documents[0]
-            text = current_raw_parts[0]
-            spec = {
-                "unitId": f"unit:{unit_number}:document:{document.documentIndex}:part:1",
-                "documentIndex": document.documentIndex,
-                "fileName": document.fileName,
-                "documentKind": document.documentKind,
-                "partIndex": 1,
-                "partTotal": 1,
-                "text": text,
-            }
+            add_document_unit(make_single_unit(current_documents[0], current_raw_parts[0]))
         else:
             indexes = "-".join(str(document.documentIndex) for document in current_documents)
+            unit_id = f"unit:{unit_number}:documents:{indexes}"
             file_names = "; ".join(document.fileName for document in current_documents)
-            spec = {
-                "unitId": f"unit:{unit_number}:documents:{indexes}",
-                "documentIndex": None,
-                "fileName": file_names,
-                "documentKind": "document_batch",
-                "partIndex": 1,
-                "partTotal": 1,
-                "text": "\n\n".join(current_sections).strip(),
-            }
-        add_document_unit(spec)
+            text = "\n\n".join(current_sections).strip()
+            child_units = [
+                make_single_unit(
+                    document,
+                    text_part,
+                    unit_id=f"{unit_id}:document:{document.documentIndex}",
+                )
+                for document, text_part in zip(current_documents, current_raw_parts)
+            ]
+            add_document_unit(
+                make_document_unit(
+                    unit_id=unit_id,
+                    document_index=None,
+                    file_name=file_names,
+                    document_kind="document_batch",
+                    part_index=1,
+                    part_total=1,
+                    text=text,
+                    batched_document_units=child_units,
+                )
+            )
         current_documents = []
         current_raw_parts = []
         current_sections = []
@@ -282,19 +333,10 @@ def build_document_analysis_units(
             section = document_section(document, text_part, index, total)
             section_chars = len(section)
             can_batch_whole_document = total == 1 and section_chars <= max_chars
-            if not can_batch_whole_document:
+            can_batch_document = can_batch_whole_document and not _is_spreadsheet_text_fallback(document)
+            if not can_batch_document:
                 flush_document_batch()
-                add_document_unit(
-                    {
-                        "unitId": f"unit:{unit_number}:document:{document.documentIndex}:part:{index}",
-                        "documentIndex": document.documentIndex,
-                        "fileName": document.fileName,
-                        "documentKind": document.documentKind,
-                        "partIndex": index,
-                        "partTotal": total,
-                        "text": text_part,
-                    }
-                )
+                add_document_unit(make_single_unit(document, text_part, part_index=index, part_total=total))
                 continue
             if current_documents and (
                 len(current_documents) >= documents_per_unit
