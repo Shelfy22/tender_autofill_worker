@@ -265,6 +265,30 @@ def test_document_analysis_default_splits_only_above_context_limit() -> None:
     assert len(units[1].text) == 1
 
 
+def test_document_analysis_splits_spreadsheet_text_fallback_at_100k_chars() -> None:
+    document = ParsedDocument(
+        documentIndex=1,
+        fileName='large-spec.xlsx',
+        fileExtension='.xlsx',
+        documentKind='specification',
+        text='A' * 250_001,
+        textQualityOk=True,
+    )
+
+    units, warnings = build_document_analysis_units(
+        '',
+        [document],
+        [],
+        _settings(),
+        skip_spreadsheet_candidate_units=True,
+    )
+
+    assert not warnings
+    assert [unit.partIndex for unit in units] == [1, 2, 3]
+    assert [unit.partTotal for unit in units] == [3, 3, 3]
+    assert [len(unit.text) for unit in units] == [100_000, 100_000, 50_001]
+
+
 def test_spreadsheet_document_analysis_default_keeps_candidates_in_one_unit() -> None:
     document = ParsedDocument(
         documentIndex=2,

@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     max_decision_text_chars: int = Field(default=220_000, ge=1_000)
     enable_document_analysis_pipeline: bool = True
     document_analysis_unit_max_chars: int = Field(default=1_000_000, ge=5_000)
+    document_analysis_spreadsheet_max_chars: int = Field(default=100_000, ge=5_000)
     document_analysis_max_units: int = Field(default=100, ge=1, le=500)
     document_analysis_documents_per_unit: int = Field(default=2, ge=1, le=10)
     spreadsheet_candidate_review_max_rows: int = Field(default=100_000, ge=5, le=1_000_000)

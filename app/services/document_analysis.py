@@ -186,7 +186,13 @@ def _spreadsheet_units_for_document(
     unit_number: int,
 ) -> tuple[list[DocumentAnalysisUnit], int]:
     max_rows = max(1, int(settings.spreadsheet_candidate_review_max_rows))
-    max_chars = max(1_000, int(settings.spreadsheet_candidate_review_max_chars))
+    max_chars = max(
+        1_000,
+        min(
+            int(settings.spreadsheet_candidate_review_max_chars),
+            int(settings.document_analysis_spreadsheet_max_chars),
+        ),
+    )
     candidates = [_candidate_payload(position) for position in positions]
     if not candidates:
         return [], unit_number
@@ -424,7 +430,12 @@ def build_document_analysis_units(
                 "falling back to bounded document text analysis."
             )
 
-        text_parts = _split_text_source(document.text, max_chars)
+        document_max_chars = (
+            max(5_000, int(settings.document_analysis_spreadsheet_max_chars))
+            if _is_spreadsheet_text_fallback(document)
+            else max_chars
+        )
+        text_parts = _split_text_source(document.text, document_max_chars)
         total = max(1, len(text_parts))
         for index, text_part in enumerate(text_parts, start=1):
             section = document_section(document, text_part, index, total)
