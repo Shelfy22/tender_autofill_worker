@@ -1360,6 +1360,36 @@ def test_223_without_documents_rejects_by_documentation_not_market_research() ->
     assert MARKET_RESEARCH_REASON not in reason_names
 
 
+def test_223_marketing_research_filename_overrides_missing_documentation_reason() -> None:
+    reasons, checks = calculate_hard_reasons(
+        job(report_id=1),
+        {},
+        product_check(total=1),
+        "",
+        document_context={
+            "documentsFound": 1,
+            "documentationMissing": True,
+            "documentationNote": "Пригодный текст документации не получен.",
+            "marketingResearchFiles": ["Маркетинговые исследования.pdf"],
+        },
+    )
+
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=1),
+        hard_reasons=reasons,
+        counterparty_lookup={"status": "matched"},
+        llm_decision=None,
+        report_id=1,
+    )
+
+    assert checks["marketResearchCheck"]["detectedInFileName"] is True
+    assert fields["tenderStatus"] == "Отказано КУ ЦП"
+    assert fields["tenderStatusReason"] == MARKET_RESEARCH_REASON
+    assert decision["marketResearchReasonSuppressed"] is False
+
+
 def test_llm_cannot_restore_market_research_reason_for_223_or_44_fz() -> None:
     llm_decision = LlmDecision(
         decision="reject",

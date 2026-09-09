@@ -58,6 +58,11 @@ PAYMENT_DEPENDENCY_REASON = (
 )
 ORGANIZER_CANCELLATION_REASON = "Оргвопросы. Отказ организатора от проведения тендера"
 
+_MARKET_RESEARCH_FILENAME_PATTERN = re.compile(
+    r"(?:^|[\s_.-])маркетингов(?:ое|ые)\s+исследовани(?:е|я)(?:[\s_.-]|$)",
+    re.IGNORECASE,
+)
+
 _REPAIR_KIT_PRODUCT_PATTERN = re.compile(
     r"^\s*(?:(?:комплект|набор)\s+(?:зип\b|запасн[а-яё]*\s+част[а-яё]*\b)|"
     r"зип\b(?:\s|:|-|$)|ремкомплект[а-яё]*\b|"
@@ -683,6 +688,19 @@ def _field(fields: dict[str, Any], name: str) -> Any:
     return unwrap(fields.get(name))
 
 
+def _find_market_research_filename(
+    document_context: dict[str, Any],
+) -> str | None:
+    file_names = document_context.get("marketingResearchFiles")
+    if not isinstance(file_names, list):
+        return None
+    for value in file_names:
+        file_name = str(value or "").strip()
+        if _MARKET_RESEARCH_FILENAME_PATTERN.search(file_name):
+            return file_name
+    return None
+
+
 def calculate_hard_reasons(
     job: NormalizedJob,
     fields: dict[str, Any],
@@ -822,11 +840,20 @@ def calculate_hard_reasons(
         all_text,
         re.I,
     )
-    if job.report_id == 3 and market_research_match:
+    market_research_file_name = _find_market_research_filename(document_context)
+    market_research_triggered = bool(
+        market_research_file_name
+        or (job.report_id == 3 and market_research_match)
+    )
+    if market_research_triggered:
         _add(
             reasons,
             MARKET_RESEARCH_REASON,
-            _snippet(all_text, market_research_match),
+            (
+                f"Название документа: {market_research_file_name}"
+                if market_research_file_name
+                else _snippet(all_text, market_research_match)
+            ),
             18,
         )
 
@@ -976,8 +1003,11 @@ def calculate_hard_reasons(
             "reportId": job.report_id,
             "commercialOnly": True,
             "detectedInText": market_research_match is not None,
-            "rejectionApplicable": job.report_id == 3,
-            "triggered": job.report_id == 3 and market_research_match is not None,
+            "detectedInFileName": market_research_file_name is not None,
+            "fileName": market_research_file_name,
+            "fileNameOverride": True,
+            "rejectionApplicable": job.report_id == 3 or market_research_file_name is not None,
+            "triggered": market_research_triggered,
         },
         "deliveryDeadlineCheck": {
             "createdDate": created.isoformat(),
@@ -1003,7 +1033,12 @@ def apply_final_decision(
     fields = dict(fields)
     meta = dict(meta)
     counterparty_requires_work = counterparty_lookup.get("status") != "matched"
-    market_research_suppressed = report_id in {1, 2}
+    deterministic_market_research = any(
+        item.reason == MARKET_RESEARCH_REASON for item in hard_reasons
+    )
+    market_research_suppressed = (
+        report_id in {1, 2} and not deterministic_market_research
+    )
     product_validation = product_check.get("validation")
     validation_requires_review = bool(
         isinstance(product_validation, dict)
@@ -1428,7 +1463,14 @@ def build_decision_prompt(
     product_check: dict[str, Any], all_text: str, maximum_text_chars: int,
     report_id: int | None = None,
 ) -> str:
-    market_research_suppressed = report_id in {1, 2}
+    market_research_check = checks.get("marketResearchCheck")
+    market_research_filename_override = bool(
+        isinstance(market_research_check, dict)
+        and market_research_check.get("detectedInFileName") is True
+    )
+    market_research_suppressed = (
+        report_id in {1, 2} and not market_research_filename_override
+    )
     llm_reasons = [
         reason
         for reason in REASONS
@@ -1537,9 +1579,10 @@ def build_decision_prompt(
 - Удалённые территории: Калининград/Калининградская область, Республика Дагестан и
   Республика Саха (Якутия).
 - Ошибка парсинга не равна отсутствию документации.
-- Причина «{MARKET_RESEARCH_REASON}» применяется только для коммерческих закупок (reportId=3).
-  Для 223-ФЗ (reportId=1) и 44/94-ФЗ (reportId=2) маркетинговое исследование само по себе
-  не является причиной отказа и не должно возвращаться в primaryReason/detectedReasons.
+- Причина «{MARKET_RESEARCH_REASON}» по тексту применяется только для коммерческих закупок (reportId=3).
+  Для 223-ФЗ (reportId=1) и 44/94-ФЗ (reportId=2) она применяется только при детерминированно
+  подтверждённом имени файла «Маркетинговые исследования» (marketResearchCheck.detectedInFileName=true).
+  Простое упоминание маркетингового исследования в тексте для reportId=1/2 причиной отказа не является.
   Если документы отсутствуют, действует отдельная детерминированная причина отсутствия документации.
 
 - Если context содержит documentReasonHits, это уже проверенные Document Analyzer semantic факты.
