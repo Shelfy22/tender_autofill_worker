@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import unicodedata
 from typing import Any
 
 from app.config import Settings
@@ -79,6 +81,101 @@ def _candidate_payload(position: TenderPosition) -> dict[str, Any]:
         ),
         "sourceCells": position.sourceCells,
         "evidence": position.evidence[:300],
+    }
+
+
+def _normalized_product_identity(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.casefold().replace("\u0451", "\u0435")
+    return re.sub(r"[\W_]+", " ", text, flags=re.UNICODE).strip()
+
+
+def _product_payloads_compatible(
+    first: dict[str, Any],
+    second: dict[str, Any],
+) -> bool:
+    first_quantity = first.get("quantity")
+    second_quantity = second.get("quantity")
+    if first_quantity is not None and second_quantity is not None:
+        if abs(float(first_quantity) - float(second_quantity)) > 1e-9:
+            return False
+
+    first_unit = _normalized_product_identity(first.get("unit"))
+    second_unit = _normalized_product_identity(second.get("unit"))
+    return not first_unit or not second_unit or first_unit == second_unit
+
+
+def _merge_product_payload(
+    target: dict[str, Any],
+    duplicate: dict[str, Any],
+) -> None:
+    for field in (
+        "productQuery",
+        "brand",
+        "article",
+        "quantity",
+        "unit",
+        "analogsAllowed",
+        "evidence",
+        "requirements",
+        "documentUnitPriceRub",
+        "documentLineTotalRub",
+        "documentCurrency",
+        "documentPriceEvidence",
+        "documentPriceSource",
+        "sourceReference",
+        "sourceCells",
+    ):
+        current = target.get(field)
+        replacement = duplicate.get(field)
+        if current in (None, "", {}, []) and replacement not in (None, "", {}, []):
+            target[field] = replacement
+
+
+def compact_document_analysis_results(
+    results: list[DocumentAnalysisResult],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Remove repeated cross-document products before LLM consolidation."""
+
+    compact_results: list[dict[str, Any]] = []
+    representatives: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    input_product_count = 0
+    duplicate_count = 0
+
+    for result in results:
+        payload = result.model_dump(mode="json")
+        source_id = (
+            _normalized_product_identity(result.fileName)
+            or _normalized_product_identity(result.unitId)
+        )
+        unique_products: list[dict[str, Any]] = []
+        for candidate in payload.get("products", []):
+            input_product_count += 1
+            key = _normalized_product_identity(
+                candidate.get("productQuery") or candidate.get("product")
+            )
+            duplicate_of: dict[str, Any] | None = None
+            if key:
+                for existing_source, existing in representatives.get(key, []):
+                    if existing_source == source_id:
+                        continue
+                    if _product_payloads_compatible(existing, candidate):
+                        duplicate_of = existing
+                        break
+            if duplicate_of is not None:
+                _merge_product_payload(duplicate_of, candidate)
+                duplicate_count += 1
+                continue
+            unique_products.append(candidate)
+            if key:
+                representatives.setdefault(key, []).append((source_id, candidate))
+        payload["products"] = unique_products
+        compact_results.append(payload)
+
+    return compact_results, {
+        "inputProductCount": input_product_count,
+        "uniqueProductCount": input_product_count - duplicate_count,
+        "removedDuplicateCount": duplicate_count,
     }
 
 

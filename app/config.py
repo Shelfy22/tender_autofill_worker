@@ -93,12 +93,21 @@ class Settings(BaseSettings):
     # default for structured JSON calls; stage-specific values override it only
     # where a stage genuinely needs a different output budget.
     llm_max_completion_tokens: int | None = Field(default=24_000, ge=256)
-    document_analysis_max_completion_tokens: int | None = Field(default=24_000, ge=256)
+    document_analysis_max_completion_tokens: int | None = Field(default=384_000, ge=256)
+    consolidation_max_completion_tokens: int | None = Field(default=384_000, ge=256)
     product_extraction_max_completion_tokens: int | None = Field(default=24_000, ge=256)
     catalog_selection_max_completion_tokens: int | None = Field(default=4_000, ge=256)
     final_decision_max_completion_tokens: int | None = Field(default=4_000, ge=256)
     ocr_max_completion_tokens: int | None = Field(default=24_000, ge=256)
     llm_rate_limit_backoff_seconds: float = Field(default=5, ge=0, le=60)
+    llm_model_max_completion_tokens: dict[str, int] = Field(
+        default_factory=lambda: {
+            "deepseek/deepseek-v4-flash-0731": 384_000,
+            "qwen/qwen3.7-flash": 131_072,
+            "qwen/qwen3.5-flash-02-23": 65_536,
+        }
+    )
+
     llm_structured_output_mode: str = "json_schema"
     llm_json_schema_strict: bool = True
     llm_enable_response_healing: bool = True
@@ -215,7 +224,7 @@ class Settings(BaseSettings):
             dict.fromkeys([self.ocr_model, *self._model_list(self.ocr_fallback_models)])
         )
 
-    def max_completion_tokens_for(self, operation: str) -> int:
+    def max_completion_tokens_for(self, operation: str, model: str | None = None) -> int:
         """Return the configured completion-token budget for an LLM stage.
 
         llm_max_output_tokens remains a backward-compatible fallback for old
@@ -225,16 +234,23 @@ class Settings(BaseSettings):
         base = self.llm_max_completion_tokens or self.llm_max_output_tokens
         normalized = (operation or "").strip().lower()
         if normalized in {"ocr_pdf", "ocr"}:
-            return self.ocr_max_completion_tokens or base
-        if normalized in {"catalog_product_selection", "select_catalog_product"}:
-            return self.catalog_selection_max_completion_tokens or base
-        if normalized in {"final_decision", "apply_final_decision", "decide_tender_status"}:
-            return self.final_decision_max_completion_tokens or base
-        if normalized in {"extract_tender_products", "audit_product_candidates"}:
-            return self.product_extraction_max_completion_tokens or base
-        if normalized.startswith("analyze_document"):
-            return self.document_analysis_max_completion_tokens or base
-        return base
+            budget = self.ocr_max_completion_tokens or base
+        elif normalized in {"catalog_product_selection", "select_catalog_product"}:
+            budget = self.catalog_selection_max_completion_tokens or base
+        elif normalized in {"final_decision", "apply_final_decision", "decide_tender_status"}:
+            budget = self.final_decision_max_completion_tokens or base
+        elif normalized in {"extract_tender_products", "audit_product_candidates"}:
+            budget = self.product_extraction_max_completion_tokens or base
+        elif normalized in {"consolidate_tender_analysis", "consolidate_document_analysis"}:
+            budget = self.consolidation_max_completion_tokens or base
+        elif normalized.startswith("analyze_document"):
+            budget = self.document_analysis_max_completion_tokens or base
+        else:
+            budget = base
+
+        normalized_model = str(model or "").strip().lower()
+        model_limit = self.llm_model_max_completion_tokens.get(normalized_model)
+        return min(budget, model_limit) if model_limit else budget
 
     def timeout_for(self, operation: str) -> float | None:
         normalized = (operation or "").strip().lower()

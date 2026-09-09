@@ -12,7 +12,11 @@ from app.config import Settings
 from app.models import DocumentAnalysisResult, ParsedDocument, TenderPositionsResponse
 from app.services.catalog import CatalogMatcher
 from app.services.coverage import summarize_product_coverage
-from app.services.document_analysis import build_document_analysis_units, result_from_unit
+from app.services.document_analysis import (
+    build_document_analysis_units,
+    compact_document_analysis_results,
+    result_from_unit,
+)
 from app.services.documents import DocumentProcessor, build_combined_text, safe_filename
 from app.services.llm import LlmClient, LlmResponseTruncatedError, LlmWallTimeoutError
 from app.services.products import extract_deterministic_positions, merge_positions
@@ -126,8 +130,11 @@ def run_product_matching_from_files(
             for unit in units:
                 analysis_results.extend(analyze_unit_safely(unit))
 
+            consolidation_payload, consolidation_dedup_debug = (
+                compact_document_analysis_results(analysis_results)
+            )
             consolidation = llm.consolidate_document_analysis(
-                [result.model_dump(mode="json") for result in analysis_results]
+                consolidation_payload
             )
             warnings.extend(consolidation.warnings)
             for unit_id in incomplete_unit_ids:
@@ -162,6 +169,7 @@ def run_product_matching_from_files(
                 "documentTextLengths": document_lengths,
                 "documentAnalysisUnits": len(units),
                 "documentAnalysisResults": len(analysis_results),
+                "preConsolidationDeduplication": consolidation_dedup_debug,
                 "incompleteUnitIds": consolidation.incompleteUnitIds,
                 "deterministicProductCount": len(deterministic_positions),
                 "consolidatedProductCount": len(consolidation.products),

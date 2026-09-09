@@ -568,7 +568,6 @@ class LlmClient:
         model_chain: list[str] | None = None,
     ) -> T:
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
-        max_completion_tokens = self.settings.max_completion_tokens_for(operation)
         request_timeout = self.settings.timeout_for(operation) or self.settings.llm_timeout_seconds
         thinking_hint = "/no_think\n" if self.settings.llm_reasoning_effort == "none" else ""
         request_payload = f"{system}\n\n{thinking_hint}{prompt}\n\nJSON Schema:\n{schema_json}"
@@ -583,6 +582,7 @@ class LlmClient:
         models = list(model_chain or self.model_chain or [self.model])[:max_attempts]
         primary_model = models[0]
         for index, model in enumerate(models):
+            max_completion_tokens = self.settings.max_completion_tokens_for(operation, model)
             started = time.monotonic()
             physical_call_index = index + 1
             retry_hint = (
@@ -937,7 +937,7 @@ Candidates:
 
 Ограничения:
 - Не принимай финальное решение по тендеру.
-- Верни не более 25 products, 20 reasonHits и 30 fieldCandidates для одного unit.
+- Верни все уникальные products (не более 1000), до 20 reasonHits и 30 fieldCandidates для одного unit.
 - Если фактов больше, выбери самые важные, поставь analysisIncomplete=true и добавь короткое warning.
 - Evidence держи коротким: только фрагмент-доказательство, не копируй большие абзацы.
 - Не считай инструкцию/руководство/документацию по монтажу, наладке или пуску работами.

@@ -272,7 +272,7 @@ class TenderPosition(BaseModel):
 
 
 class TenderPositionsResponse(BaseModel):
-    products: list[TenderPosition] = Field(default_factory=list, max_length=100)
+    products: list[TenderPosition] = Field(default_factory=list, max_length=1000)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -326,7 +326,7 @@ class SpreadsheetCandidateDecision(BaseModel):
 
 
 class SpreadsheetCandidateReviewResponse(BaseModel):
-    decisions: list[SpreadsheetCandidateDecision] = Field(default_factory=list, max_length=150)
+    decisions: list[SpreadsheetCandidateDecision] = Field(default_factory=list, max_length=1000)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -370,7 +370,7 @@ class DocumentAnalysisUnit(BaseModel):
 
 
 class DocumentAnalysisResponse(BaseModel):
-    products: list[TenderPosition] = Field(default_factory=list, max_length=100)
+    products: list[TenderPosition] = Field(default_factory=list, max_length=1000)
     reasonHits: list[DocumentReasonHit] = Field(default_factory=list, max_length=50)
     fieldCandidates: list[DocumentFieldCandidate] = Field(default_factory=list, max_length=80)
     analysisIncomplete: bool = False
@@ -387,7 +387,7 @@ class DocumentAnalysisResult(DocumentAnalysisResponse):
 
 
 class TenderConsolidationResponse(BaseModel):
-    products: list[TenderPosition] = Field(default_factory=list, max_length=100)
+    products: list[TenderPosition] = Field(default_factory=list, max_length=1000)
     reasonHits: list[DocumentReasonHit] = Field(default_factory=list, max_length=80)
     fieldCandidates: list[DocumentFieldCandidate] = Field(default_factory=list, max_length=120)
     incompleteUnitIds: list[str] = Field(default_factory=list)

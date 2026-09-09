@@ -23,6 +23,7 @@ from app.services.decision import (
 )
 from app.services.document_analysis import (
     build_document_analysis_units,
+    compact_document_analysis_results,
     fields_from_consolidation,
     result_from_unit,
 )
@@ -325,10 +326,14 @@ class TenderPipeline:
                             lambda unit=unit: analyze_unit_safely(unit),
                         )
                     )
+                consolidation_payload, consolidation_dedup_debug = self._run_stage(
+                    "Deduplicate Document Analysis Products",
+                    lambda: compact_document_analysis_results(document_analysis_results),
+                )
                 document_consolidation = self._run_stage(
                     "Consolidate Tender Analysis",
                     lambda: llm.consolidate_document_analysis(
-                        [result.model_dump(mode="json") for result in document_analysis_results]
+                        consolidation_payload
                     ),
                 )
                 if incomplete_document_unit_ids:
@@ -358,6 +363,7 @@ class TenderPipeline:
                     {
                         "unitCount": len(document_analysis_units),
                         "resultCount": len(document_analysis_results),
+                        "preConsolidationDeduplication": consolidation_dedup_debug,
                         "consolidatedProductCount": len(document_consolidation.products),
                         "reasonHitCount": len(document_consolidation.reasonHits),
                         "fieldCandidateCount": len(document_consolidation.fieldCandidates),

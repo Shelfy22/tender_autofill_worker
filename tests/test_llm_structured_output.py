@@ -547,3 +547,53 @@ def test_duplicate_fields_keep_first_value_deterministically() -> None:
         }
     )
     assert response.fields["dateCreated"].value == "2026-08-17"
+
+
+def test_document_analysis_uses_each_fallback_models_output_limit() -> None:
+    client = LlmClient(
+        Settings(
+            postgres_dsn="postgresql://user:pass@localhost/db",
+            llm_api_key="test",
+            llm_model_attempt_1="deepseek/deepseek-v4-flash-0731",
+            llm_model_attempt_2="qwen/qwen3.7-flash",
+            llm_model_attempt_3="qwen/qwen3.5-flash-02-23",
+        ),
+        attempt=1,
+    )
+    calls: list[tuple[str, int]] = []
+
+    def create(**kwargs: object) -> SimpleNamespace:
+        model = str(kwargs["model"])
+        calls.append((model, int(kwargs["max_tokens"])))
+        content = (
+            '{"fields":{},"warnings":[]}'
+            if model == "qwen/qwen3.5-flash-02-23"
+            else "invalid json"
+        )
+        return SimpleNamespace(
+            model=model,
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=content),
+                )
+            ],
+            usage=None,
+        )
+
+    client.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    client.json_call(
+        system="test",
+        prompt="test",
+        schema=ExtractedFieldsResponse,
+        operation="analyze_document: spec.xlsx part 1/1",
+    )
+
+    assert calls == [
+        ("deepseek/deepseek-v4-flash-0731", 384_000),
+        ("qwen/qwen3.7-flash", 131_072),
+        ("qwen/qwen3.5-flash-02-23", 65_536),
+    ]

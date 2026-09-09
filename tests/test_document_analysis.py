@@ -1,6 +1,14 @@
 from app.config import Settings
-from app.models import ParsedDocument, ProductSourceReference, TenderPosition
-from app.services.document_analysis import build_document_analysis_units
+from app.models import (
+    DocumentAnalysisResult,
+    ParsedDocument,
+    ProductSourceReference,
+    TenderPosition,
+)
+from app.services.document_analysis import (
+    build_document_analysis_units,
+    compact_document_analysis_results,
+)
 
 
 def _settings(**overrides: object) -> Settings:
@@ -298,3 +306,44 @@ def test_spreadsheet_document_analysis_default_keeps_candidates_in_one_unit() ->
     assert len(units) == 1
     assert units[0].sourceType == "spreadsheet"
     assert len(units[0].spreadsheetCandidates) == 130
+
+
+def test_document_analysis_products_are_deduplicated_across_documents() -> None:
+    results = [
+        DocumentAnalysisResult(
+            unitId="unit-1",
+            fileName="spec.xlsx",
+            products=[
+                TenderPosition(
+                    product="Torque wrench",
+                    quantity=2,
+                    unit="pcs",
+                    evidence="specification",
+                )
+            ],
+        ),
+        DocumentAnalysisResult(
+            unitId="unit-2",
+            fileName="price.xlsx",
+            products=[
+                TenderPosition(
+                    product="Torque wrench",
+                    article="TW-1",
+                    quantity=2,
+                    unit="pcs",
+                ),
+                TenderPosition(product="Torque wrench", quantity=3, unit="pcs"),
+                TenderPosition(product="Pressure gauge", quantity=1, unit="pcs"),
+            ],
+        ),
+    ]
+
+    compact, debug = compact_document_analysis_results(results)
+
+    assert debug == {
+        "inputProductCount": 4,
+        "uniqueProductCount": 3,
+        "removedDuplicateCount": 1,
+    }
+    assert [len(result["products"]) for result in compact] == [1, 2]
+    assert compact[0]["products"][0]["article"] == "TW-1"
