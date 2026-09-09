@@ -92,8 +92,27 @@ def test_participant_refusal_from_postqualification_is_not_organizer_cancellatio
     assert ORGANIZER_CANCELLATION_REASON not in _reason_names(reasons)
 
 
+def test_standard_cancellation_right_is_not_organizer_cancellation() -> None:
+    texts = [
+        'Заказчик вправе отменить его проведение до наступления даты и времени окончания срока подачи заявок.',
+        'В случае отказа заказчика от проведения закупки участники не вправе требовать возмещения убытков.',
+    ]
+
+    for text in texts:
+        reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
+        assert ORGANIZER_CANCELLATION_REASON not in _reason_names(reasons)
+
+
 def test_explicit_procurement_cancellation_is_detected() -> None:
     text = "Организатор отказался от проведения закупки."
+
+    reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
+
+    assert ORGANIZER_CANCELLATION_REASON in _reason_names(reasons)
+
+
+def test_short_procurement_cancelled_phrase_is_detected() -> None:
+    text = 'Закупка отменена.'
 
     reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
 

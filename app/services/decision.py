@@ -462,8 +462,18 @@ def _find_payment_dependency_evidence(text: str) -> str | None:
 
 
 def _find_organizer_cancellation_evidence(text: str) -> str | None:
-    match = _ORGANIZER_CANCELLATION_PATTERN.search(text or "")
-    return _snippet(text, match) if match else None
+    source = text or ''
+    for match in _ORGANIZER_CANCELLATION_PATTERN.finditer(source):
+        context = _work_context(source, match, maximum_length=1000)
+        if re.search(
+            r'\b(?:вправе|имеет\s+право|может|в\s+случае|при\s+условии)\b|'
+            r'\bдо\s+(?:наступления\s+)?(?:даты\s+и\s+времени\s+)?окончания\s+срока\s+подачи\s+заявок\b',
+            context,
+            re.IGNORECASE,
+        ):
+            continue
+        return context
+    return None
 
 
 def _find_consignment_evidence(text: str) -> str | None:
