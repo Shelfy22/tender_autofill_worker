@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     llm_max_attempts_per_unit: int = Field(default=3, ge=1, le=3)
     # Optional per-stage HTTP timeouts. None means use llm_timeout_seconds from the client.
     document_analysis_timeout_seconds: float | None = Field(default=120, gt=0)
-    consolidation_timeout_seconds: float | None = Field(default=60, gt=0)
+    consolidation_timeout_seconds: float | None = Field(default=180, gt=0)
     product_extraction_timeout_seconds: float | None = Field(default=90, gt=0)
     catalog_selection_timeout_seconds: float | None = Field(default=45, gt=0)
     final_decision_timeout_seconds: float | None = Field(default=60, gt=0)

@@ -94,7 +94,7 @@ def test_catalog_selection_model_fallback_can_be_disabled() -> None:
 def test_stage_timeouts_and_full_model_fallback_defaults() -> None:
     configured = settings()
 
-    assert configured.timeout_for("consolidate_tender_analysis") == 60
+    assert configured.timeout_for("consolidate_tender_analysis") == 180
     assert configured.timeout_for("ocr_pdf") == 360
     assert configured.llm_max_attempts_per_unit == 3
     assert configured.models_for_attempt(1) == ["model-a", "model-b", "model-c"]
