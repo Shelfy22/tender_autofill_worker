@@ -122,6 +122,32 @@ def test_spreadsheet_candidate_review_is_row_aware_batched() -> None:
     assert [len(call) for call in calls] == [3, 3, 1]
 
 
+def test_large_spreadsheet_bypasses_llm_review_and_preserves_positions() -> None:
+    positions = [
+        _excel_position(f"xlsx:spec.xlsx:Лист1:{row}", f"Товар {row}", row)
+        for row in range(2, 7)
+    ]
+
+    class LlmMustNotRun:
+        settings = SimpleNamespace(spreadsheet_llm_max_positions=4)
+
+        def review_spreadsheet_candidates(
+            self,
+            batch: list[TenderPosition],
+        ) -> SpreadsheetCandidateReviewResponse:
+            raise AssertionError("large spreadsheet must bypass LLM review")
+
+    reviewed, warnings, debug = review_spreadsheet_candidate_positions(
+        LlmMustNotRun(),  # type: ignore[arg-type]
+        positions,
+    )
+
+    assert reviewed == positions
+    assert debug["skipped"] == "large_spreadsheet_deterministic_fallback"
+    assert debug["spreadsheetPositionCount"] == 5
+    assert any("deterministic Excel позиции сохранены" in warning for warning in warnings)
+
+
 def test_high_confidence_characteristic_is_removed_before_catalog() -> None:
     positions = [
         _position("3640400.1.1", quantity=220),

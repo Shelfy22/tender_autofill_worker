@@ -262,6 +262,7 @@ def _currency_from_price_cells(*values: Any) -> str | None:
 def extract_deterministic_positions(
     text: str,
     spreadsheet_tables: list[SpreadsheetTable] | None = None,
+    max_positions: int = 5_000,
 ) -> list[TenderPosition]:
     normalized = _clean(text)
     patterns = [
@@ -434,7 +435,7 @@ def extract_deterministic_positions(
                 ),
                 source_cells=cells,
             )
-            if len(result) >= 100:
+            if len(result) >= max_positions:
                 return result
 
     # Header-aware extraction for text emitted by the XLS/XLSX/CSV parser.
@@ -536,7 +537,7 @@ def extract_deterministic_positions(
                 extractionMethod="excel_deterministic",
             ),
         )
-        if len(result) >= 100:
+        if len(result) >= max_positions:
             return result
 
     # Structured row emitted by the spreadsheet parser:
@@ -568,7 +569,7 @@ def extract_deterministic_positions(
             )
             if name:
                 add(name, part, quantity, row_match.group(0))
-            if len(result) >= 100:
+            if len(result) >= max_positions:
                 return result
 
     for pattern_index, pattern in enumerate(patterns):
@@ -578,7 +579,7 @@ def extract_deterministic_positions(
             else:
                 name, unit, raw_quantity = match.group(1), match.group(2), match.group(3)
             add(name, unit, raw_quantity, match.group(0))
-            if len(result) >= 100:
+            if len(result) >= max_positions:
                 return result
     return result
 
@@ -729,6 +730,7 @@ def merge_positions(
     deterministic: list[TenderPosition],
     llm_response: TenderPositionsResponse | None,
     seldon: list[TenderPosition] | None = None,
+    max_positions: int = 5_000,
 ) -> tuple[list[TenderPosition], list[str]]:
     seldon = list(seldon or [])
     combined = list(llm_response.products if llm_response else []) + seldon + deterministic
@@ -852,6 +854,6 @@ def merge_positions(
                 if not _missing(excel_value):
                     update[field] = excel_value
         result.append(position.model_copy(update=update))
-        if len(result) >= 100:
+        if len(result) >= max_positions:
             break
     return result, warnings

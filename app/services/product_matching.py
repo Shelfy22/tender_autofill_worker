@@ -15,6 +15,7 @@ from app.services.coverage import summarize_product_coverage
 from app.services.document_analysis import (
     build_document_analysis_units,
     compact_document_analysis_results,
+    fallback_document_consolidation,
     result_from_unit,
 )
 from app.services.documents import DocumentProcessor, build_combined_text, safe_filename
@@ -79,6 +80,7 @@ def run_product_matching_from_files(
             deterministic_positions = extract_deterministic_positions(
                 combined_text,
                 spreadsheet_tables,
+                settings.max_tender_positions,
             )
 
             units, unit_warnings = build_document_analysis_units(
@@ -117,7 +119,13 @@ def run_product_matching_from_files(
                 except (ValidationError, LlmWallTimeoutError) as exc:
                     child_units = list(getattr(unit, "batchedDocumentUnits", []) or [])
                     if not child_units:
-                        raise
+                        warning = (
+                            f"{unit.fileName or unit.sourceType} "
+                            f"{unit.partIndex}/{unit.partTotal}: "
+                            f"{type(exc).__name__}; unit marked incomplete and "
+                            "deterministic positions preserved."
+                        )
+                        return [incomplete_result(unit, warning)]
                     warnings.append(
                         f"{unit.fileName or unit.sourceType}: batched analysis failed with "
                         f"{type(exc).__name__}; retrying {len(child_units)} documents individually."
@@ -133,9 +141,24 @@ def run_product_matching_from_files(
             consolidation_payload, consolidation_dedup_debug = (
                 compact_document_analysis_results(analysis_results)
             )
-            consolidation = llm.consolidate_document_analysis(
-                consolidation_payload
-            )
+            try:
+                consolidation = llm.consolidate_document_analysis(
+                    consolidation_payload
+                )
+            except (
+                ValidationError,
+                LlmResponseTruncatedError,
+                LlmWallTimeoutError,
+            ) as exc:
+                warning = (
+                    "LLM consolidation failed; structured results were consolidated "
+                    f"locally: {type(exc).__name__}: {exc}"
+                )
+                warnings.append(warning)
+                consolidation = fallback_document_consolidation(
+                    consolidation_payload,
+                    warning,
+                )
             warnings.extend(consolidation.warnings)
             for unit_id in incomplete_unit_ids:
                 if unit_id not in consolidation.incompleteUnitIds:
@@ -148,6 +171,7 @@ def run_product_matching_from_files(
                     warnings=consolidation.warnings,
                 ),
                 [],
+                settings.max_tender_positions,
             )
             warnings.extend(position_warnings)
 

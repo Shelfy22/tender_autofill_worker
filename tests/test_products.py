@@ -410,3 +410,42 @@ def test_initial_tender_price_is_not_kept_as_position_price() -> None:
     assert merged[0].documentUnitPriceRub is None
     assert merged[0].documentLineTotalRub is None
     assert merged[0].documentPriceEvidence == ""
+
+
+def test_deterministic_excel_and_merge_preserve_2500_positions() -> None:
+    rows = [
+        {
+            "row": 1,
+            "cells": {
+                "A": "Наименование товара",
+                "B": "Ед. изм.",
+                "C": "Количество",
+            },
+        }
+    ]
+    rows.extend(
+        {
+            "row": index + 1,
+            "cells": {
+                "A": f"Уникальный товар {index}",
+                "B": "шт",
+                "C": "1",
+            },
+        }
+        for index in range(1, 2501)
+    )
+
+    deterministic = extract_deterministic_positions(
+        "",
+        [{"fileName": "large.xlsx", "sheet": "Лист1", "rows": rows}],
+        max_positions=5_000,
+    )
+    merged, _ = merge_positions(
+        deterministic,
+        TenderPositionsResponse(),
+        max_positions=5_000,
+    )
+
+    assert len(deterministic) == 2500
+    assert len(merged) == 2500
+    assert merged[-1].product == "Уникальный товар 2500"

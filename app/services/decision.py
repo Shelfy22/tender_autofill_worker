@@ -1576,10 +1576,16 @@ def build_decision_prompt(
         }
         and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
     ]
+    prompt_product_check = dict(product_check)
+    product_details = product_check.get("details")
+    if isinstance(product_details, list) and len(product_details) > 40:
+        prompt_product_check["details"] = product_details[:40]
+        prompt_product_check["detailsTotal"] = len(product_details)
+        prompt_product_check["detailsTruncatedForLlm"] = True
     context = {
         "rulesVersion": "2026-06 / пользовательский справочник причин",
         "reasonOptions": available_reasons,
-        "productCheck": product_check,
+        "productCheck": prompt_product_check,
         "hardReasons": [reason.as_dict() for reason in hard_reasons],
         **checks,
     }

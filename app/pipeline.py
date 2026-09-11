@@ -24,6 +24,7 @@ from app.services.decision import (
 from app.services.document_analysis import (
     build_document_analysis_units,
     compact_document_analysis_results,
+    fallback_document_consolidation,
     fields_from_consolidation,
     result_from_unit,
 )
@@ -247,6 +248,7 @@ class TenderPipeline:
                 lambda: extract_deterministic_positions(
                     deterministic_text,
                     spreadsheet_tables,
+                    self.settings.max_tender_positions,
                 ),
             )
 
@@ -264,7 +266,7 @@ class TenderPipeline:
                     lambda: build_document_analysis_units(
                         page_text,
                         parsed_documents,
-                        [],
+                        deterministic_positions,
                         self.settings,
                         skip_spreadsheet_candidate_units=True,
                     ),
@@ -300,7 +302,13 @@ class TenderPipeline:
                     except (ValidationError, LlmWallTimeoutError) as exc:
                         child_units = list(getattr(unit, "batchedDocumentUnits", []) or [])
                         if not child_units:
-                            raise
+                            warning = (
+                                f"Document Analysis unit {unit.unitId} "
+                                f"({unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}) "
+                                f"failed with {type(exc).__name__} and was marked incomplete; "
+                                "deterministic extraction remains authoritative."
+                            )
+                            return [incomplete_result(unit, warning)]
                         warning = (
                             f"Document Analysis batched unit {unit.unitId} "
                             f"({unit.fileName or unit.sourceType}) failed with {type(exc).__name__}; "
@@ -330,12 +338,27 @@ class TenderPipeline:
                     "Deduplicate Document Analysis Products",
                     lambda: compact_document_analysis_results(document_analysis_results),
                 )
-                document_consolidation = self._run_stage(
-                    "Consolidate Tender Analysis",
-                    lambda: llm.consolidate_document_analysis(
-                        consolidation_payload
-                    ),
-                )
+                try:
+                    document_consolidation = self._run_stage(
+                        "Consolidate Tender Analysis",
+                        lambda: llm.consolidate_document_analysis(
+                            consolidation_payload
+                        ),
+                    )
+                except (
+                    ValidationError,
+                    LlmResponseTruncatedError,
+                    LlmWallTimeoutError,
+                ) as exc:
+                    warning = (
+                        "Tender Analysis LLM consolidation failed; compact structured "
+                        f"results were consolidated locally: {type(exc).__name__}: {exc}"
+                    )
+                    self.warnings.append(warning)
+                    document_consolidation = fallback_document_consolidation(
+                        consolidation_payload,
+                        warning,
+                    )
                 if incomplete_document_unit_ids:
                     incomplete_ids = list(document_consolidation.incompleteUnitIds)
                     for unit_id in incomplete_document_unit_ids:
@@ -426,6 +449,7 @@ class TenderPipeline:
                     deterministic_positions,
                     llm_positions,
                     seldon_positions,
+                    self.settings.max_tender_positions,
                 ),
             )
             self.warnings.extend(position_warnings)
@@ -493,7 +517,19 @@ class TenderPipeline:
                 all_text=(
                     json.dumps(
                         {
-                            "documentAnalysis": document_consolidation.model_dump(mode="json"),
+                            "documentAnalysis": {
+                                "productCount": len(document_consolidation.products),
+                                "reasonHits": [
+                                    reason.model_dump(mode="json")
+                                    for reason in document_consolidation.reasonHits
+                                ],
+                                "fieldCandidates": [
+                                    candidate.model_dump(mode="json")
+                                    for candidate in document_consolidation.fieldCandidates
+                                ],
+                                "incompleteUnitIds": document_consolidation.incompleteUnitIds,
+                                "warnings": document_consolidation.warnings,
+                            },
                             "note": "Compact structured analysis; raw tender text is not passed to final decision.",
                         },
                         ensure_ascii=False,

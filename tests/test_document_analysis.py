@@ -8,6 +8,7 @@ from app.models import (
 from app.services.document_analysis import (
     build_document_analysis_units,
     compact_document_analysis_results,
+    fallback_document_consolidation,
 )
 
 
@@ -371,3 +372,60 @@ def test_document_analysis_products_are_deduplicated_across_documents() -> None:
     }
     assert [len(result["products"]) for result in compact] == [1, 2]
     assert compact[0]["products"][0]["article"] == "TW-1"
+
+
+def test_large_spreadsheet_is_skipped_by_document_analysis() -> None:
+    document = ParsedDocument(
+        documentIndex=1,
+        fileName="large.xlsx",
+        text="large spreadsheet fallback text",
+        textQualityOk=True,
+        spreadsheetTables=[{"sheet": "Лист1", "rows": []}],
+    )
+    positions = [
+        TenderPosition(
+            candidateId=f"xlsx:large.xlsx:Лист1:{row}",
+            product=f"Товар {row}",
+            productQuery=f"Товар {row}",
+            sourceReference=ProductSourceReference(
+                fileName="large.xlsx",
+                sheet="Лист1",
+                row=row,
+                productColumn="B",
+                extractionMethod="excel_deterministic",
+            ),
+        )
+        for row in range(2, 7)
+    ]
+
+    units, warnings = build_document_analysis_units(
+        "",
+        [document],
+        positions,
+        _settings(spreadsheet_llm_max_positions=4),
+        skip_spreadsheet_candidate_units=True,
+    )
+
+    assert units == []
+    assert any("5 deterministic positions exceed LLM limit 4" in item for item in warnings)
+
+
+def test_fallback_document_consolidation_preserves_structured_results() -> None:
+    results = [
+        DocumentAnalysisResult(
+            unitId="unit-1",
+            products=[TenderPosition(product="Кабель", productQuery="Кабель")],
+            analysisIncomplete=True,
+            warnings=["unit timeout"],
+        ).model_dump(mode="json")
+    ]
+
+    consolidation = fallback_document_consolidation(
+        results,
+        "LLM consolidation timeout",
+    )
+
+    assert [item.product for item in consolidation.products] == ["Кабель"]
+    assert consolidation.incompleteUnitIds == ["unit-1"]
+    assert "LLM consolidation timeout" in consolidation.warnings
+    assert "unit timeout" in consolidation.warnings

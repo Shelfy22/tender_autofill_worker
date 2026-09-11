@@ -1303,6 +1303,29 @@ def test_decision_prompt_uses_document_reason_hits_as_compact_semantic_facts() -
     assert "documentAnalysisIncomplete=true" in prompt
 
 
+def test_decision_prompt_compacts_large_product_details_without_changing_result() -> None:
+    check = product_check(total=2500)
+    check["details"] = [
+        {"positionIndex": index, "product": f"PRODUCT-{index}"}
+        for index in range(1, 2501)
+    ]
+
+    prompt = build_decision_prompt(
+        fields={},
+        hard_reasons=[],
+        checks={},
+        product_check=check,
+        all_text="Compact structured analysis",
+        maximum_text_chars=10_000,
+    )
+
+    assert "'detailsTotal': 2500" in prompt
+    assert "'detailsTruncatedForLlm': True" in prompt
+    assert "PRODUCT-40" in prompt
+    assert "PRODUCT-41" not in prompt
+    assert len(check["details"]) == 2500
+
+
 def test_decision_prompt_excludes_actual_cost_reason_from_llm_options() -> None:
     prompt = build_decision_prompt(
         fields={"initialPrice": 1_300_000},

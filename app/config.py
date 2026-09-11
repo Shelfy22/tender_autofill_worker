@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     max_combined_text_chars: int = Field(default=1_000_000, ge=1_000)
     max_product_text_chars: int = Field(default=1_000_000, ge=1_000)
     max_decision_text_chars: int = Field(default=220_000, ge=1_000)
+    max_tender_positions: int = Field(default=5_000, ge=100, le=100_000)
     enable_document_analysis_pipeline: bool = True
     document_analysis_unit_max_chars: int = Field(default=1_000_000, ge=5_000)
     document_analysis_spreadsheet_max_chars: int = Field(default=100_000, ge=5_000)
@@ -62,6 +63,7 @@ class Settings(BaseSettings):
     document_analysis_documents_per_unit: int = Field(default=2, ge=1, le=10)
     spreadsheet_candidate_review_max_rows: int = Field(default=100_000, ge=5, le=1_000_000)
     spreadsheet_candidate_review_max_chars: int = Field(default=1_000_000, ge=5_000)
+    spreadsheet_llm_max_positions: int = Field(default=500, ge=1, le=100_000)
     pdf_ocr_max_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
 
     seldon_base_url: str = "https://apitorgi.myseldon.com"

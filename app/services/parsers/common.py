@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 MAGIC_TYPES: list[tuple[bytes, str]] = [
     (b"%PDF", "pdf"),
+    (b"{\\rtf", "rtf"),
     (b"PK\x03\x04", "zip"),
     (b"PK\x05\x06", "zip"),
     (b"PK\x07\x08", "zip"),
@@ -82,6 +83,11 @@ def parse_file(path: Path, file_type: str, settings: Settings, llm: "LlmClient |
 
         text, status, word_warnings = extract_word_text(path, kind, settings)
         warnings.extend(word_warnings)
+    elif kind == "rtf":
+        from app.services.parsers.rtf import extract_rtf_text
+
+        text, status, rtf_warnings = extract_rtf_text(path)
+        warnings.extend(rtf_warnings)
     elif kind in {"xls", "xlsx", "csv"}:
         from app.services.parsers.spreadsheets import extract_spreadsheet_text
 

@@ -567,6 +567,25 @@ def review_spreadsheet_candidate_positions(
             "validatedPositionCount": len(positions),
         }
 
+    max_positions = max(
+        1,
+        int(getattr(llm.settings, "spreadsheet_llm_max_positions", 500)),
+    )
+    if len(spreadsheet_positions) > max_positions:
+        warning = (
+            "Excel candidate review пропущен: "
+            f"{len(spreadsheet_positions)} позиций превышают безопасный LLM-лимит "
+            f"{max_positions}; deterministic Excel позиции сохранены."
+        )
+        return positions, [warning], {
+            "reviewRequested": False,
+            "skipped": "large_spreadsheet_deterministic_fallback",
+            "positionLimit": max_positions,
+            "originalPositionCount": len(positions),
+            "spreadsheetPositionCount": len(spreadsheet_positions),
+            "validatedPositionCount": len(positions),
+        }
+
     current_by_id = {position.candidateId: position for position in positions if position.candidateId}
     all_warnings: list[str] = []
     combined_debug: dict[str, Any] = {

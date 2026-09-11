@@ -179,6 +179,54 @@ def compact_document_analysis_results(
     }
 
 
+def fallback_document_consolidation(
+    results: list[dict[str, Any]],
+    warning: str,
+) -> TenderConsolidationResponse:
+    """Combine bounded structured results locally when LLM consolidation is unavailable."""
+
+    products: list[dict[str, Any]] = []
+    reason_hits: list[dict[str, Any]] = []
+    field_candidates: list[dict[str, Any]] = []
+    incomplete_unit_ids: list[str] = []
+    warnings = [warning]
+    seen_reasons: set[tuple[str, str]] = set()
+
+    for result in results:
+        products.extend(result.get("products", []))
+        for reason in result.get("reasonHits", []):
+            key = (
+                str(reason.get("reason") or "").casefold(),
+                str(reason.get("evidence") or "").casefold(),
+            )
+            if key in seen_reasons:
+                continue
+            seen_reasons.add(key)
+            reason_hits.append(reason)
+        field_candidates.extend(result.get("fieldCandidates", []))
+        warnings.extend(str(item) for item in result.get("warnings", []) if item)
+        if result.get("analysisIncomplete") is True:
+            unit_id = str(result.get("unitId") or "").strip()
+            if unit_id:
+                incomplete_unit_ids.append(unit_id)
+
+    if len(products) > 1000:
+        warnings.append(
+            f"Local consolidation limited LLM-derived products: {len(products)} -> 1000; "
+            "deterministic spreadsheet positions remain available for merge."
+        )
+
+    return TenderConsolidationResponse.model_validate(
+        {
+            "products": products[:1000],
+            "reasonHits": reason_hits[:80],
+            "fieldCandidates": field_candidates[:120],
+            "incompleteUnitIds": list(dict.fromkeys(incomplete_unit_ids)),
+            "warnings": list(dict.fromkeys(warnings)),
+        }
+    )
+
+
 def _spreadsheet_units_for_document(
     document: ParsedDocument,
     positions: list[TenderPosition],
@@ -301,6 +349,11 @@ def build_document_analysis_units(
     current_raw_parts: list[str] = []
     current_sections: list[str] = []
     current_chars = 0
+    spreadsheet_position_total = sum(
+        1
+        for position in deterministic_positions
+        if position.candidateId.startswith("xlsx:")
+    )
 
     def document_section(document: ParsedDocument, text_part: str, index: int, total: int) -> str:
         return "\n".join(
@@ -408,14 +461,32 @@ def build_document_analysis_units(
         current_chars = 0
 
     for document in documents:
-        if document.spreadsheetTables and not skip_spreadsheet_candidate_units:
-            flush_document_batch()
+        if document.spreadsheetTables:
             document_positions = [
                 position
                 for position in deterministic_positions
                 if position.sourceReference is not None
                 and position.sourceReference.fileName == document.fileName
             ]
+            spreadsheet_position_limit = max(
+                1,
+                int(settings.spreadsheet_llm_max_positions),
+            )
+            spreadsheet_scope_count = max(
+                len(document_positions),
+                spreadsheet_position_total,
+            )
+            if spreadsheet_scope_count > spreadsheet_position_limit:
+                flush_document_batch()
+                warnings.append(
+                    f"Large spreadsheet {document.fileName} skipped by Document Analysis: "
+                    f"{spreadsheet_scope_count} deterministic positions exceed LLM limit "
+                    f"{spreadsheet_position_limit}; positions remain in deterministic pipeline."
+                )
+                continue
+
+        if document.spreadsheetTables and not skip_spreadsheet_candidate_units:
+            flush_document_batch()
             spreadsheet_units, unit_number = _spreadsheet_units_for_document(
                 document,
                 document_positions,

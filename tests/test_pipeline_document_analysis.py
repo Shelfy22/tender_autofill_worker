@@ -17,7 +17,7 @@ from app.models import (
 from app.pipeline import TenderPipeline
 from app.services.customer import ActualCustomerResponse
 from app.services.decision import REPAIR_KIT_REASON
-from app.services.llm import LlmResponseTruncatedError
+from app.services.llm import LlmResponseTruncatedError, LlmWallTimeoutError
 
 
 class FakeSeldonDocuments:
@@ -293,6 +293,15 @@ class TruncatingDocumentFakeLlmClient(FakeLlmClient):
         return super().analyze_document_unit(unit)
 
 
+class ConsolidationTimeoutFakeLlmClient(FakeLlmClient):
+    def consolidate_document_analysis(
+        self,
+        results: list[dict[str, object]],
+    ) -> TenderConsolidationResponse:
+        self.calls.append("consolidate_document_analysis")
+        raise LlmWallTimeoutError("consolidation timeout")
+
+
 def test_document_analysis_pipeline_retries_batched_unit_as_single_documents(monkeypatch, tmp_path) -> None:
     import app.pipeline as pipeline_module
 
@@ -382,3 +391,49 @@ def test_document_analysis_pipeline_marks_truncated_unit_incomplete(monkeypatch,
     assert result["debug"]["documentAnalysis"]["resultCount"] == 2
     assert any("truncated LLM response" in warning for warning in result["warnings"])
     assert any("Document Analysis completed with incomplete units" in warning for warning in result["warnings"])
+
+
+def test_document_analysis_pipeline_falls_back_when_consolidation_times_out(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import app.pipeline as pipeline_module
+
+    def make_llm(*args: object, **kwargs: object) -> ConsolidationTimeoutFakeLlmClient:
+        global LAST_LLM
+        LAST_LLM = ConsolidationTimeoutFakeLlmClient(*args, **kwargs)
+        return LAST_LLM
+
+    monkeypatch.setattr(pipeline_module, "SeldonClient", FakeSeldonClient)
+    monkeypatch.setattr(pipeline_module, "DocumentProcessor", FakeDocumentProcessor)
+    monkeypatch.setattr(pipeline_module, "IProClient", FakeIProClient)
+    monkeypatch.setattr(pipeline_module, "CatalogMatcher", FakeCatalogMatcher)
+    monkeypatch.setattr(pipeline_module, "LlmClient", make_llm)
+
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        llm_api_key="test",
+        enable_document_analysis_pipeline=True,
+    )
+    claim = JobClaim(
+        record_key="record-1",
+        batch_id="batch-1",
+        attempt=1,
+        report_id=1,
+        seldon_id="123",
+        report_fields={"Код ТО": "ТО1", "Код ФЗ": "223"},
+        input_json={
+            "reportId": 1,
+            "seldonId": "123",
+            "toCode": "ТО1",
+            "lawCode": "223",
+        },
+    )
+
+    result = TenderPipeline(settings, tmp_path).run(claim)
+
+    assert LAST_LLM is not None
+    assert LAST_LLM.calls.count("consolidate_document_analysis") == 1
+    assert LAST_LLM.calls.count("decide") == 1
+    assert result["debug"]["documentAnalysis"]["consolidatedProductCount"] == 1
+    assert any("consolidated locally" in warning for warning in result["warnings"])
