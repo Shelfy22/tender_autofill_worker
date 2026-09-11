@@ -520,10 +520,18 @@ class DecisionReason(BaseModel):
     confidence: Literal["low", "medium", "high"] = "low"
 
 
+class HardReasonReview(BaseModel):
+    reason: str
+    verdict: Literal["confirm", "dismiss"]
+    rationale: str
+    confidence: Literal["low", "medium", "high"] = "medium"
+
+
 class LlmDecision(BaseModel):
     decision: Literal["approve", "reject"]
     primaryReason: str | None = None
     detectedReasons: list[DecisionReason] = Field(default_factory=list)
+    hardReasonReviews: list[HardReasonReview] = Field(default_factory=list)
     note: str = ""
     confidence: Literal["low", "medium", "high"] = "medium"
 

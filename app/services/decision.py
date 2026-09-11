@@ -98,6 +98,11 @@ _REQUIRED_ZIP_SUPPLY_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
+        rf"{_REQUIRED_ZIP_TERM}[\s\S]{{0,360}}?"
+        r"(?:наличи[ея]|обязательн[а-яё]*|требуется|предусмотрен[а-яё]*)",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"(?:должен|должна|должно|должны|обязан[а-яё]*|требуется)"
         r"[\s\S]{0,300}?(?:поставить|предоставить|передать|включать|содержать|"
         rf"комплектовать)[\s\S]{{0,220}}?{_REQUIRED_ZIP_TERM}",
@@ -116,12 +121,21 @@ _REQUIRED_ZIP_SUPPLY_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+_REQUIRED_ZIP_COMPONENTS_PATTERN = _REQUIRED_ZIP_SUPPLY_PATTERNS[4]
 _ZIP_NON_MANDATORY_PATTERN = re.compile(
     r"(?:при\s+необходимости|по\s+запросу|по\s+согласованию|опциональн[а-яё]*|"
     r"по\s+отдельн[а-яё]*\s+заказ[а-яё]*|за\s+отдельн[а-яё]*\s+плат[а-яё]*|"
     r"не\s+(?:входит|включен[а-яё]*|требуется|поставля[ею]тс[яь])|"
     r"может\s+(?:быть\s+)?(?:поставлен[а-яё]*|включен[а-яё]*|"
     r"скомплектован[а-яё]*))",
+    re.IGNORECASE,
+)
+_ZIP_PROHIBITED_OR_ABSENT_PATTERN = re.compile(
+    rf"(?:запрещ[а-яё]*|не\s+допуска[а-яё]*|не\s+предусмотрен[а-яё]*|"
+    rf"исключа[а-яё]*|без)[^.!?\n|]{{0,240}}?{_REQUIRED_ZIP_TERM}|"
+    rf"{_REQUIRED_ZIP_TERM}[^.!?\n|]{{0,180}}?"
+    r"(?:не\s+допуска[а-яё]*|не\s+предусмотрен[а-яё]*|не\s+требуется|"
+    r"не\s+поставля[ею]тс[яь]|отсутству[ею]т|запрещ[а-яё]*)",
     re.IGNORECASE,
 )
 _ZIP_DOCUMENTATION_ONLY_PATTERN = re.compile(
@@ -522,11 +536,17 @@ def _find_required_zip_supply_evidence(text: str) -> str | None:
     for pattern in _REQUIRED_ZIP_SUPPLY_PATTERNS:
         for match in pattern.finditer(source):
             context = _work_context(source, match, maximum_length=1400)
+            prefix = source[max(0, match.start() - 240):match.start()]
+            same_clause_prefix = re.split(r"[.!?\n|]", prefix)[-1]
+            if _ZIP_PROHIBITED_OR_ABSENT_PATTERN.search(
+                same_clause_prefix + match.group(0)
+            ):
+                continue
             if _ZIP_NON_MANDATORY_PATTERN.search(context):
                 continue
             if (
                 _ZIP_DOCUMENTATION_ONLY_PATTERN.search(context)
-                and not _REQUIRED_ZIP_SUPPLY_PATTERNS[3].search(context)
+                and not _REQUIRED_ZIP_COMPONENTS_PATTERN.search(context)
             ):
                 continue
             return context[:1200]
@@ -1065,8 +1085,38 @@ def apply_final_decision(
         ),
         key=lambda item: item.priority,
     )
-    confirmed_repair_kit_evidence = _find_repair_kit_product_evidence(product_check)
-    if confirmed_repair_kit_evidence is None:
+    zip_review = next(
+        (
+            review
+            for review in (llm_decision.hardReasonReviews if llm_decision else [])
+            if review.reason == REPAIR_KIT_REASON
+        ),
+        None,
+    )
+    has_deterministic_zip_reason = any(
+        item.reason == REPAIR_KIT_REASON for item in hard
+    )
+    zip_hard_reason_dismissed = bool(
+        has_deterministic_zip_reason
+        and zip_review
+        and zip_review.verdict == "dismiss"
+        and zip_review.confidence == "high"
+        and zip_review.rationale.strip()
+    )
+    dismissed_hard_reasons = (
+        [item for item in hard if item.reason == REPAIR_KIT_REASON]
+        if zip_hard_reason_dismissed
+        else []
+    )
+    if dismissed_hard_reasons:
+        hard = [item for item in hard if item.reason != REPAIR_KIT_REASON]
+
+    confirmed_repair_kit_evidence = (
+        None
+        if zip_hard_reason_dismissed
+        else _find_repair_kit_product_evidence(product_check)
+    )
+    if confirmed_repair_kit_evidence is None and not zip_hard_reason_dismissed:
         confirmed_repair_kit_evidence = next(
             (
                 item.evidence
@@ -1075,7 +1125,11 @@ def apply_final_decision(
             ),
             None,
         )
-    if confirmed_repair_kit_evidence is None and llm_decision:
+    if (
+        confirmed_repair_kit_evidence is None
+        and not zip_hard_reason_dismissed
+        and llm_decision
+    ):
         for detected_reason in llm_decision.detectedReasons:
             if detected_reason.reason != REPAIR_KIT_REASON:
                 continue
@@ -1272,6 +1326,11 @@ def apply_final_decision(
 
     preferred_llm_alternative = llm_reason_candidates[0] if llm_reason_candidates else None
     note_parts: list[str] = []
+    if dismissed_hard_reasons and zip_review:
+        note_parts.append(
+            "LLM отклонила детерминированную причину ЗИП после проверки evidence: "
+            + zip_review.rationale.strip()
+        )
     summary = re.sub(r"\s+", " ", str(product_check.get("summary") or "")).strip()
     if summary:
         note_parts.append(summary)
@@ -1456,6 +1515,12 @@ def apply_final_decision(
         "counterpartyRequiresWork": counterparty_requires_work,
         "counterpartyAdvisoryOnly": counterparty_advisory_only,
         "hardReasons": [item.as_dict() for item in hard],
+        "dismissedHardReasons": [item.as_dict() for item in dismissed_hard_reasons],
+        "hardReasonReviews": (
+            [review.model_dump() for review in llm_decision.hardReasonReviews]
+            if llm_decision
+            else []
+        ),
         # Keep the historical JSON key for Finalizer compatibility. Its value now
         # means deterministic reasons other than the coverage/lot reason.
         "hardNonAssortmentReasons": [item.as_dict() for item in hard_non_coverage],
@@ -1525,7 +1590,17 @@ def build_decision_prompt(
 Правила:
 - Проверь каждый пункт справочника по тексту документации и извлечённым фактам.
 - Не придумывай основание; каждое основание требует evidence.
-- hardReasons рассчитаны кодом и не могут быть отменены; их можно только дополнить.
+- hardReasons рассчитаны кодом. Все причины, кроме «{REPAIR_KIT_REASON}», не могут быть
+  отменены; их можно только дополнить.
+- Если hardReasons содержит «{REPAIR_KIT_REASON}», обязательно проверь переданное evidence
+  по смыслу и верни ровно одно ревью этой причины в hardReasonReviews.
+- Для hardReasonReviews используй verdict=confirm, только если evidence подтверждает обязанность
+  поставить физический ЗИП/ремкомплект/запасные части или сама закупаемая позиция является ими.
+- Используй verdict=dismiss с confidence=high, если слова о ЗИП/запасных частях относятся к запрету,
+  отсутствию, исключению, опциональной поставке, документации или иной фразе без обязанности поставки.
+  В rationale кратко объясни смысл всей фразы, а не совпадение отдельных слов.
+- Только ZIP hard reason с явным verdict=dismiss и confidence=high может быть снят кодом.
+  Остальные hardReasons неизменяемы. При снятии единственной причины ЗИП верни decision=approve.
 - Наличие hardReasons не означает, что анализ можно закончить. Даже если уже есть обязательный отказ
   по комплектованию лота, обязательно проверь все остальные причины справочника.
 - detectedReasons должен содержать полный список всех подтверждённых недетерминированных причин,
@@ -1595,8 +1670,9 @@ def build_decision_prompt(
   Простое упоминание маркетингового исследования в тексте для reportId=1/2 причиной отказа не является.
   Если документы отсутствуют, действует отдельная детерминированная причина отсутствия документации.
 
-- Если context содержит documentReasonHits, это уже проверенные Document Analyzer semantic факты.
-  Используй их для detectedReasons и не требуй повторного чтения raw документации.
+- Если context содержит documentReasonHits, используй их как компактные semantic facts.
+  ZIP reasonHit всё равно перепроверь по смыслу evidence через hardReasonReviews; для остальных
+  причин не требуй повторного чтения raw документации.
 - Если ниже в поле «Текст / structured facts» передан JSON documentAnalysis, это компактные факты,
   а не сырой текст тендера. Не проси исходный документ и не делай выводов вне evidence.
 - Если documentAnalysisIncomplete=true, не утверждай, что причина отсутствует; просто не добавляй её

@@ -614,6 +614,27 @@ def test_zip_as_part_of_product_completeness_triggers_repair_kit_reason() -> Non
     assert checks["repairKitCheck"]["triggered"] is True
 
 
+def test_zip_presence_requirement_in_table_triggers_repair_kit_reason() -> None:
+    text = (
+        "Комплект ЗИП (в том числе, масла, жидкости, материалы и комплектующие "
+        "для ТО-1, ТО-2) | наличие | Значение характеристики не может изменяться "
+        "участником закупки"
+    )
+
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(total=1),
+        text,
+    )
+
+    matching = [reason for reason in reasons if reason.reason == REPAIR_KIT_REASON]
+    assert len(matching) == 1
+    assert "ЗИП" in matching[0].evidence
+    assert "наличие" in matching[0].evidence
+    assert checks["repairKitCheck"]["triggered"] is True
+
+
 def test_zip_documentation_without_physical_supply_does_not_trigger_reason() -> None:
     text = (
         "Поставщик должен предоставить документацию и руководство по эксплуатации "
@@ -644,6 +665,28 @@ def test_optional_zip_mention_does_not_trigger_reason() -> None:
 
     assert REPAIR_KIT_REASON not in [reason.reason for reason in reasons]
     assert checks["repairKitCheck"]["triggered"] is False
+
+
+def test_prohibited_or_absent_spare_parts_do_not_trigger_repair_kit_reason() -> None:
+    texts = (
+        "Комплектность товара предусматривает упаковку. Запрещается поставка Товара "
+        "с какими-либо не предусмотренными Договором деталями, запасными частями, "
+        "материалами и иными вложениями.",
+        "Запасные части не допускаются к поставке. Комплектность предусмотрена договором.",
+        "Поставка товара осуществляется без запасных частей. Наличие документов обязательно.",
+        "Не предусмотренные договором запасные части запрещено включать в поставку.",
+    )
+
+    for text in texts:
+        reasons, checks = calculate_hard_reasons(
+            job(),
+            {"initialPrice": 2_000_000},
+            product_check(total=1),
+            text,
+        )
+
+        assert REPAIR_KIT_REASON not in [reason.reason for reason in reasons], text
+        assert checks["repairKitCheck"]["triggered"] is False
 
 
 def test_repair_kit_product_position_triggers_reason() -> None:
@@ -736,6 +779,86 @@ def test_llm_zip_reason_is_accepted_for_required_main_product_completeness() -> 
     assert fields["tenderStatus"] == "Отказано КУ ЦП"
     assert fields["tenderStatusReason"] == REPAIR_KIT_REASON
     assert decision["llmReasonCandidates"][0]["reason"] == REPAIR_KIT_REASON
+
+
+def test_llm_cannot_reintroduce_zip_from_prohibited_spare_parts() -> None:
+    evidence = (
+        "Запрещается поставка Товара с какими-либо не предусмотренными Договором "
+        "деталями, запасными частями, материалами и иными вложениями."
+    )
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=1),
+        hard_reasons=[],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(
+            decision="reject",
+            primaryReason=REPAIR_KIT_REASON,
+            detectedReasons=[
+                DecisionReason(
+                    reason=REPAIR_KIT_REASON,
+                    evidence=evidence,
+                    confidence="high",
+                )
+            ],
+            confidence="high",
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert fields.get("tenderStatusReason") is None
+    assert decision["llmReasonCandidates"] == []
+
+
+def test_llm_can_dismiss_deterministic_zip_reason_after_evidence_review() -> None:
+    evidence = (
+        "Запрещается поставка Товара с какими-либо не предусмотренными Договором "
+        "деталями, запасными частями и иными вложениями."
+    )
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=1),
+        hard_reasons=[HardReason(REPAIR_KIT_REASON, evidence, 65)],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(
+            decision="approve",
+            hardReasonReviews=[
+                {
+                    "reason": REPAIR_KIT_REASON,
+                    "verdict": "dismiss",
+                    "rationale": (
+                        "Пункт запрещает несогласованные вложения и не требует "
+                        "поставки запасных частей."
+                    ),
+                    "confidence": "high",
+                }
+            ],
+            confidence="high",
+        ),
+    )
+
+    assert fields["tenderStatus"] == "Согласовано КУ ЦП"
+    assert decision["hardReasons"] == []
+    assert decision["dismissedHardReasons"][0]["reason"] == REPAIR_KIT_REASON
+    assert "не требует поставки" in decision["note"]
+
+
+def test_deterministic_zip_reason_remains_without_explicit_high_confidence_review() -> None:
+    evidence = "Комплект ЗИП | наличие | Значение не может изменяться"
+    fields, _, decision = apply_final_decision(
+        fields={},
+        meta={},
+        product_check=product_check(total=1),
+        hard_reasons=[HardReason(REPAIR_KIT_REASON, evidence, 65)],
+        counterparty_lookup={"status": "matched"},
+        llm_decision=LlmDecision(decision="approve", confidence="high"),
+    )
+
+    assert fields["tenderStatus"] == "Отказано КУ ЦП"
+    assert decision["hardReasons"][0]["reason"] == REPAIR_KIT_REASON
+    assert decision["dismissedHardReasons"] == []
 
 
 def test_llm_cannot_reintroduce_delivery_deadline_without_validated_date() -> None:
