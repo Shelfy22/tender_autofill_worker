@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.models import DocumentAnalysisResult, ParsedDocument, TenderPositionsResponse
-from app.services.catalog import CatalogMatcher
+from app.services.catalog import CatalogMatcher, limit_catalog_positions
 from app.services.coverage import summarize_product_coverage
 from app.services.document_analysis import (
     build_document_analysis_units,
@@ -175,12 +175,19 @@ def run_product_matching_from_files(
             )
             warnings.extend(position_warnings)
 
-            match_items, catalog_warnings = catalog.match_all(positions)
+            catalog_positions, catalog_limit_warnings = limit_catalog_positions(
+                positions,
+                settings.catalog_match_max_positions,
+            )
+            warnings.extend(catalog_limit_warnings)
+            match_items, catalog_warnings = catalog.match_all(catalog_positions)
             warnings.extend(catalog_warnings)
             product_check = summarize_product_coverage(
                 match_items,
                 supply_value_threshold_enabled=False,
                 lot_divisible=None,
+                source_position_count=len(positions),
+                position_limit=settings.catalog_match_max_positions,
             )
 
             from app.services.product_matching_export import build_product_matching_workbook
@@ -197,7 +204,12 @@ def run_product_matching_from_files(
                 "incompleteUnitIds": consolidation.incompleteUnitIds,
                 "deterministicProductCount": len(deterministic_positions),
                 "consolidatedProductCount": len(consolidation.products),
+                "extractedProductCount": len(positions),
                 "matchedProductCount": product_check.get("total"),
+                "catalogPositionLimit": settings.catalog_match_max_positions,
+                "catalogPositionLimitApplied": product_check.get(
+                    "catalogPositionLimitApplied"
+                ),
                 "warnings": list(dict.fromkeys(warnings)),
             }
             return workbook, debug

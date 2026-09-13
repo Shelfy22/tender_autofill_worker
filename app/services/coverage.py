@@ -47,6 +47,8 @@ def summarize_product_coverage(
     *,
     lot_divisible: Any = None,
     supply_value_threshold_enabled: bool = True,
+    source_position_count: int | None = None,
+    position_limit: int | None = None,
 ) -> dict[str, Any]:
     normalized = [item if isinstance(item, ProductMatchItem) else ProductMatchItem.model_validate(item) for item in items]
     details: list[dict[str, Any]] = []
@@ -180,6 +182,12 @@ def summarize_product_coverage(
         )
 
     total = len(details)
+    source_total = (
+        max(total, source_position_count)
+        if isinstance(source_position_count, int) and not isinstance(source_position_count, bool)
+        else total
+    )
+    position_limit_applied = source_total > total
     supplied_details = [detail for detail in details if detail["supplied"]]
     supplied_count = len(supplied_details)
     full_match_count = sum(bool(detail["fullMatch"]) for detail in details)
@@ -207,7 +215,10 @@ def summarize_product_coverage(
     median_complete = supplied_count > 0 and priced_count == supplied_count
     price_complete = supplied_count > 0 and fully_calculated_count == supplied_count
     threshold_applicable = (
-        supply_value_threshold_enabled and coverage_approved and price_complete
+        supply_value_threshold_enabled
+        and not position_limit_applied
+        and coverage_approved
+        and price_complete
     )
     value_reject = threshold_applicable and quantity_total < 1_000_000
     document_priced_count = sum(
@@ -294,6 +305,16 @@ def summarize_product_coverage(
             f"не закрыто {total - supplied_count}. {rule_summary}"
         )
 
+    if position_limit_applied:
+        coverage_summary += (
+            f" Coverage рассчитан по первым {total} из {source_total} товарных позиций."
+        )
+        if supply_value_threshold_enabled:
+            price_summary += (
+                " Порог расчётной стоимости 1 млн руб. не применяется: "
+                "Qdrant обработал только ограниченную выборку позиций."
+            )
+
     if document_priced_count:
         document_price_summary = (
             f"Цена из документа извлечена для {document_priced_count} из {total} позиций "
@@ -310,12 +331,19 @@ def summarize_product_coverage(
 
     return {
         "supplyValueEvaluationMode": (
-            "commercial_calculated_total"
+            "sampled_catalog_positions"
+            if position_limit_applied
+            else "commercial_calculated_total"
             if supply_value_threshold_enabled
             else "informational_only_223_44"
         ),
         "status": "evaluated" if total else "not_evaluated",
         "total": total,
+        "sourcePositionCount": source_total,
+        "evaluatedPositionCount": total,
+        "catalogPositionLimit": position_limit,
+        "catalogPositionLimitApplied": position_limit_applied,
+        "coverageScope": "first_positions_sample" if position_limit_applied else "all_positions",
         "suppliedCount": supplied_count,
         "fullMatchCount": full_match_count,
         "analogMatchCount": analog_count,

@@ -13,7 +13,7 @@ from app.config import Settings
 from app.logging import stage
 from app.models import DocumentAnalysisResult, JobClaim, ParsedDocument, TenderPositionsResponse, TenderResult
 from app.observability import RunObserver
-from app.services.catalog import CatalogMatcher
+from app.services.catalog import CatalogMatcher, limit_catalog_positions
 from app.services.coverage import summarize_product_coverage
 from app.services.customer import IProClient, resolve_actual_customer
 from app.services.decision import (
@@ -470,9 +470,14 @@ class TenderPipeline:
                     "hierarchy": {},
                 }
 
+            catalog_positions, catalog_limit_warnings = limit_catalog_positions(
+                positions,
+                self.settings.catalog_match_max_positions,
+            )
+            self.warnings.extend(catalog_limit_warnings)
             match_items, catalog_warnings = self._run_stage(
                 "Поиск товаров в каталоге/Qdrant",
-                lambda: catalog.match_all(positions),
+                lambda: catalog.match_all(catalog_positions),
             )
             self.warnings.extend(catalog_warnings)
             product_check = self._run_stage(
@@ -481,6 +486,8 @@ class TenderPipeline:
                     match_items,
                     supply_value_threshold_enabled=job.report_id == 3,
                     lot_divisible=fields.get("lotDivisible"),
+                    source_position_count=len(positions),
+                    position_limit=self.settings.catalog_match_max_positions,
                 ),
             )
             product_check["validation"] = validation_debug

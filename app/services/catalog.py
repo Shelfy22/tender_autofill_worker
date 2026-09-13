@@ -32,6 +32,19 @@ NOT_FOUND = ProductMatch(
 )
 
 
+def limit_catalog_positions(
+    positions: list[TenderPosition], maximum: int
+) -> tuple[list[TenderPosition], list[str]]:
+    limit = max(1, int(maximum))
+    if len(positions) <= limit:
+        return positions, []
+    warning = (
+        f"Большой тендер: поиск в каталоге/Qdrant ограничен первыми {limit} "
+        f"позициями из {len(positions)}; coverage рассчитан только по этой выборке."
+    )
+    return positions[:limit], [warning]
+
+
 PRICE_FIELD_NAMES = (
     "price",
     "Медианная цена",

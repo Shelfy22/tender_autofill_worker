@@ -9,6 +9,7 @@ from app.models import CatalogSelection, TenderPosition
 from app.services.catalog import (
     CatalogMatcher,
     hydrate_catalog_selection,
+    limit_catalog_positions,
     normalize_qdrant_candidates,
 )
 
@@ -40,6 +41,21 @@ class DummyObserver:
 
     def event(self, **values: object) -> None:
         self.events.append(values)
+
+
+def test_large_tender_catalog_scope_is_limited_to_first_130_positions() -> None:
+    positions = [
+        TenderPosition(product=f"PRODUCT-{index}")
+        for index in range(1, 1001)
+    ]
+
+    selected, warnings = limit_catalog_positions(positions, 130)
+
+    assert len(selected) == 130
+    assert selected[0].product == "PRODUCT-1"
+    assert selected[-1].product == "PRODUCT-130"
+    assert positions[130].product == "PRODUCT-131"
+    assert any("130" in warning and "1000" in warning for warning in warnings)
 
 
 def make_matcher(

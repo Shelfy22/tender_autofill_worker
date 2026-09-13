@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     max_product_text_chars: int = Field(default=1_000_000, ge=1_000)
     max_decision_text_chars: int = Field(default=220_000, ge=1_000)
     max_tender_positions: int = Field(default=5_000, ge=100, le=100_000)
+    catalog_match_max_positions: int = Field(default=130, ge=1, le=10_000)
     enable_document_analysis_pipeline: bool = True
     document_analysis_unit_max_chars: int = Field(default=1_000_000, ge=5_000)
     document_analysis_spreadsheet_max_chars: int = Field(default=100_000, ge=5_000)

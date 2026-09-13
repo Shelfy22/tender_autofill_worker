@@ -150,6 +150,37 @@ def test_price_threshold_and_incomplete_evaluation() -> None:
     assert incomplete["supplyValueHardReject"] is False
 
 
+def test_large_tender_coverage_uses_limited_sample_without_price_rejection() -> None:
+    sampled_items = [
+        item(
+            index,
+            "Полное соответствие" if index <= 104 else "Товар не найден",
+            quantity=1,
+            price=1_000,
+        )
+        for index in range(1, 131)
+    ]
+
+    result = summarize_product_coverage(
+        sampled_items,
+        source_position_count=1_000,
+        position_limit=130,
+    )
+
+    assert result["total"] == 130
+    assert result["sourcePositionCount"] == 1_000
+    assert result["evaluatedPositionCount"] == 130
+    assert result["catalogPositionLimit"] == 130
+    assert result["catalogPositionLimitApplied"] is True
+    assert result["coverageScope"] == "first_positions_sample"
+    assert result["coveragePercent"] == 80.0
+    assert result["coverageApproved"] is True
+    assert result["supplyValueThresholdApplicable"] is False
+    assert result["supplyValueHardReject"] is False
+    assert result["supplyValueEvaluationMode"] == "sampled_catalog_positions"
+    assert "первым 130 из 1000" in result["summary"]
+
+
 def test_calculated_price_can_be_kept_as_information_without_threshold() -> None:
     result = summarize_product_coverage(
         [item(1, "Полное соответствие", quantity=1, price=13_830.33)],
