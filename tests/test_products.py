@@ -46,6 +46,49 @@ def test_equivalent_suffix_and_missing_quantity_are_merged() -> None:
     assert merged[0].quantity == 12
 
 
+def test_llm_category_without_quantity_is_skipped_when_structured_rows_exist() -> None:
+    deterministic = [
+        TenderPosition(
+            product="Cable APvBShp 4x25",
+            productQuery="Cable APvBShp 4x25",
+            quantity=559,
+            unit="m",
+            source="excel_table_deterministic",
+        )
+    ]
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product="Power cables with aluminum conductors up to 1 kV",
+                quantity=None,
+                unit="",
+            )
+        ]
+    )
+
+    merged, warnings = merge_positions(deterministic, llm)
+
+    assert [item.product for item in merged] == ["Cable APvBShp 4x25"]
+    assert any("without quantity" in warning for warning in warnings)
+
+
+def test_merge_filters_tender_conditions_misread_as_products() -> None:
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(product="Согласно Техническому заданию", quantity=26, unit="шт"),
+            TenderPosition(product="не менее 12 месяцев", quantity=26, unit="шт"),
+            TenderPosition(product="Аналоги рассматриваются. Допуск габаритов ±5%", quantity=12, unit="шт"),
+            TenderPosition(product="Аналоги рассматриваются. Допуск по толщине ±15%", quantity=10, unit="шт"),
+            TenderPosition(product="Кабель АПвБШп 4х25 мм2", quantity=559, unit="м"),
+        ]
+    )
+
+    merged, warnings = merge_positions([], llm)
+
+    assert [item.product for item in merged] == ["Кабель АПвБШп 4х25 мм2"]
+    assert len([warning for warning in warnings if "служебная строка" in warning]) == 4
+
+
 def test_excel_like_position_extraction_preserves_quantity() -> None:
     positions = extract_deterministic_positions(
         "№ п/п Наименование товара Ед. изм. Кол-во 1 Моноблок штука 16 тип моноблок"

@@ -20,6 +20,7 @@ from app.services.document_analysis import (
 )
 from app.services.documents import DocumentProcessor, build_combined_text, safe_filename
 from app.services.llm import LlmClient, LlmResponseTruncatedError, LlmWallTimeoutError
+from app.services.product_validation import validate_product_candidates
 from app.services.products import extract_deterministic_positions, merge_positions
 
 
@@ -180,6 +181,13 @@ def run_product_matching_from_files(
                 settings.catalog_match_max_positions,
             )
             warnings.extend(catalog_limit_warnings)
+            catalog_positions, validation_warnings, validation_debug = validate_product_candidates(
+                llm,
+                catalog_positions,
+            )
+            warnings.extend(validation_warnings)
+            validation_debug["sourcePositionCount"] = len(positions)
+            validation_debug["catalogPositionLimit"] = settings.catalog_match_max_positions
             match_items, catalog_warnings = catalog.match_all(catalog_positions)
             warnings.extend(catalog_warnings)
             product_check = summarize_product_coverage(
@@ -202,6 +210,7 @@ def run_product_matching_from_files(
                 "documentAnalysisResults": len(analysis_results),
                 "preConsolidationDeduplication": consolidation_dedup_debug,
                 "incompleteUnitIds": consolidation.incompleteUnitIds,
+                "productCandidateValidation": validation_debug,
                 "deterministicProductCount": len(deterministic_positions),
                 "consolidatedProductCount": len(consolidation.products),
                 "extractedProductCount": len(positions),

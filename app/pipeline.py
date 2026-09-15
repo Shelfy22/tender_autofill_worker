@@ -454,27 +454,26 @@ class TenderPipeline:
             )
             self.warnings.extend(position_warnings)
 
-            if document_consolidation is None:
-                positions, validation_warnings, validation_debug = self._run_stage(
-                    "Validate Product Candidates",
-                    lambda: validate_product_candidates(llm, positions),
-                )
-                self.warnings.extend(validation_warnings)
-            else:
-                validation_debug = {
-                    "reviewRequested": False,
-                    "skipped": "Tender Consolidator already performed product candidate cleanup.",
-                    "originalPositionCount": len(positions),
-                    "validatedPositionCount": len(positions),
-                    "requiresManualReview": bool(document_consolidation.incompleteUnitIds),
-                    "hierarchy": {},
-                }
-
             catalog_positions, catalog_limit_warnings = limit_catalog_positions(
                 positions,
                 self.settings.catalog_match_max_positions,
             )
             self.warnings.extend(catalog_limit_warnings)
+            catalog_positions, validation_warnings, validation_debug = self._run_stage(
+                "Validate Product Candidates",
+                lambda: validate_product_candidates(llm, catalog_positions),
+            )
+            self.warnings.extend(validation_warnings)
+            validation_debug["sourcePositionCount"] = len(positions)
+            validation_debug["catalogPositionLimit"] = self.settings.catalog_match_max_positions
+            if document_consolidation is not None:
+                validation_debug["consolidationIncompleteUnitIds"] = list(
+                    document_consolidation.incompleteUnitIds
+                )
+                validation_debug["requiresManualReview"] = bool(
+                    validation_debug.get("requiresManualReview")
+                    or document_consolidation.incompleteUnitIds
+                )
             match_items, catalog_warnings = self._run_stage(
                 "Поиск товаров в каталоге/Qdrant",
                 lambda: catalog.match_all(catalog_positions),

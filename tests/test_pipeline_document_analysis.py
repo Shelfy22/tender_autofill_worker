@@ -9,6 +9,8 @@ from app.models import (
     JobClaim,
     LlmDecision,
     ParsedDocument,
+    ProductCandidateAssignment,
+    ProductCandidateAuditResponse,
     ProductMatch,
     ProductMatchItem,
     TenderConsolidationResponse,
@@ -190,8 +192,19 @@ class FakeLlmClient:
     def extract_products(self, *_: object, **__: object) -> object:
         raise AssertionError("legacy extract_products must not be called in DocumentAnalysis pipeline")
 
-    def audit_product_candidates(self, *_: object) -> object:
-        raise AssertionError("legacy audit_product_candidates must not be called in DocumentAnalysis pipeline")
+    def audit_product_candidates(self, positions: list[TenderPosition]) -> ProductCandidateAuditResponse:
+        self.calls.append("audit_product_candidates")
+        return ProductCandidateAuditResponse(
+            assignments=[
+                ProductCandidateAssignment(
+                    positionIndex=index,
+                    role="purchase_item",
+                    confidence=0.95,
+                    rationale="test keeps extracted product",
+                )
+                for index, _position in enumerate(positions, start=1)
+            ]
+        )
 
 
 class TwoTextDocumentProcessor(FakeDocumentProcessor):
@@ -278,7 +291,8 @@ def test_document_analysis_pipeline_uses_units_consolidator_and_no_legacy_llm(mo
     steps = [entry["step"] for entry in result["logs"]]
     assert "AI Agent - Extract Tender Fields2" not in steps
     assert "AI Agent - Extract Tender Positions" not in steps
-    assert "Validate Product Candidates" not in steps
+    assert "Validate Product Candidates" in steps
+    assert LAST_LLM.calls.count("audit_product_candidates") == 1
     assert "Build Fields From Document Analysis" in steps
     assert result["debug"]["llmTextLength"] == 0
 

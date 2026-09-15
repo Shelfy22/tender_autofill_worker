@@ -311,7 +311,7 @@ class ProductCandidateAssignment(BaseModel):
 class ProductCandidateAuditResponse(BaseModel):
     assignments: list[ProductCandidateAssignment] = Field(
         default_factory=list,
-        max_length=100,
+        max_length=200,
     )
     warnings: list[str] = Field(default_factory=list)
 

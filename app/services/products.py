@@ -43,6 +43,17 @@ _ADDRESS_OR_RECIPIENT_PATTERN = re.compile(
     r"\b(?:филиал|предприятие)\b.{0,160}(?:\bг\.|\bгород\b|\bул\.|\bулица\b))",
     re.IGNORECASE,
 )
+_CONDITION_POSITION_PATTERN = re.compile(
+    r"^\s*(?:"
+    r"аналоги?\s+рассматрива(?:ются|ется)(?:\s*[.!;:]?\s*допуск(?:\s+по)?\s+[а-яё\s]+\s*[±+\-]?\s*\d+(?:[,.]\d+)?\s*%)?|"
+    r"эквиваленты?\s+(?:допуска(?:ются|ется)|разрешены?)|"
+    r"аналог\s+допуска(?:ется|ются)|без\s+аналогов|"
+    r"допуск(?:\s+по)?\s+(?:габарит[а-яё]*|толщин[а-яё]*|размер[а-яё]*)\s*[±+\-]?\s*\d+(?:[,.]\d+)?\s*%|"
+    r"согласно\s+(?:техническому\s+задани[юя]|тз)|"
+    r"(?:не\s+менее|не\s+более|не\s+хуже|до|от)\s+\d+(?:[,.]\d+)?\s*(?:месяц[а-яё]*|мес\.?|дн(?:ей|я)?|сут(?:ок|ки)?|лет|год[а-яё]*|%)"
+    r")\s*[.!;:]*\s*$",
+    re.IGNORECASE,
+)
 _PRODUCT_DESCRIPTION_SEPARATOR_PATTERN = re.compile(
     r"^(.{3,300}?):\s*((?:назначение|технические\s+характеристики|"
     r"характеристики|описание)\s*:?.*)$",
@@ -80,6 +91,7 @@ def _is_noise_position(position: TenderPosition) -> bool:
         or _ONLY_AUXILIARY_CODE_PATTERN.fullmatch(product)
         or _EXAMPLE_POSITION_PATTERN.fullmatch(product)
         or _SERVICE_POSITION_PATTERN.search(product)
+        or _CONDITION_POSITION_PATTERN.fullmatch(product)
         or _ADDRESS_OR_RECIPIENT_PATTERN.search(product)
     )
 
@@ -733,7 +745,9 @@ def merge_positions(
     max_positions: int = 5_000,
 ) -> tuple[list[TenderPosition], list[str]]:
     seldon = list(seldon or [])
-    combined = list(llm_response.products if llm_response else []) + seldon + deterministic
+    llm_products = list(llm_response.products if llm_response else [])
+    llm_product_ids = {id(position) for position in llm_products}
+    combined = llm_products + seldon + deterministic
     warnings = list(llm_response.warnings if llm_response else [])
     seldon_by_name = {_position_name_key(position): position for position in seldon}
     excel_by_name = {_position_name_key(position): position for position in deterministic}
@@ -769,6 +783,18 @@ def merge_positions(
         name_key = _position_name_key(position)
         seldon_match = seldon_by_name.get(name_key)
         excel_match = excel_by_name.get(name_key)
+        if (
+            id(raw_position) in llm_product_ids
+            and position.quantity is None
+            and (deterministic or seldon)
+            and seldon_match is None
+            and excel_match is None
+        ):
+            warnings.append(
+                "Skipped LLM product without quantity that was not confirmed by structured product rows: "
+                f"{_clean(position.product)[:200]}"
+            )
+            continue
         quantity = (
             seldon_match.quantity
             if seldon_match is not None and seldon_match.quantity is not None
