@@ -285,7 +285,7 @@ class ProductHierarchyAssignment(BaseModel):
 
 
 class ProductHierarchyResponse(BaseModel):
-    assignments: list[ProductHierarchyAssignment] = Field(default_factory=list, max_length=100)
+    assignments: list[ProductHierarchyAssignment] = Field(default_factory=list, max_length=200)
     warnings: list[str] = Field(default_factory=list)
 
 

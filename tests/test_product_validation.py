@@ -54,6 +54,27 @@ def _excel_position(candidate_id: str, product: str, row: int) -> TenderPosition
     )
 
 
+def test_product_candidate_audit_accepts_catalog_limit_batch_size() -> None:
+    positions = [_position(f"Product {index}") for index in range(1, 131)]
+    response = ProductCandidateAuditResponse(
+        assignments=[
+            ProductCandidateAssignment(
+                positionIndex=index,
+                role="purchase_item",
+                confidence=0.95,
+                rationale="real product",
+            )
+            for index in range(1, 131)
+        ]
+    )
+
+    validated, warnings, debug = apply_product_candidate_audit(positions, response)
+
+    assert len(validated) == 130
+    assert debug["validatedPositionCount"] == 130
+    assert not warnings
+
+
 def test_spreadsheet_candidate_review_removes_and_corrects_without_touching_metadata() -> None:
     positions = [
         _excel_position("xlsx:spec.xlsx:Лист1:2", "10", 2),
