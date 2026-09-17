@@ -528,7 +528,7 @@ def extract_deterministic_positions(
             header_columns = {}
             header_labels = {}
             continue
-        if line.startswith("Таблица Word "):
+        if line.startswith(("Таблица Word ", "Таблица PDF ")):
             current_sheet = line.strip()
             header_columns = {}
             header_labels = {}
