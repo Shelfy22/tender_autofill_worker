@@ -8,6 +8,15 @@ from docx import Document
 from app.config import Settings
 
 
+def _column_name(index: int) -> str:
+    name = ""
+    while index >= 0:
+        index, remainder = divmod(index, 26)
+        name = chr(ord("A") + remainder) + name
+        index -= 1
+    return name
+
+
 def _convert(path: Path, target_extension: str, settings: Settings) -> Path:
     output_dir = path.parent / "converted"
     output_dir.mkdir(exist_ok=True)
@@ -43,11 +52,18 @@ def extract_word_text(path: Path, file_type: str, settings: Settings) -> tuple[s
         text = paragraph.text.strip()
         if text:
             parts.append(text)
-    for table in document.tables:
-        for row in table.rows:
+    for table_index, table in enumerate(document.tables, start=1):
+        parts.append(f"Таблица Word {table_index}")
+        for row_index, row in enumerate(table.rows, start=1):
             values = [cell.text.replace("\n", " ").strip() for cell in row.cells]
             if any(values):
-                parts.append(" | ".join(values))
+                parts.append(
+                    f"Строка {row_index}: "
+                    + " | ".join(
+                        f"{_column_name(index)}: {value}"
+                        for index, value in enumerate(values)
+                    )
+                )
     text = "\n".join(parts).strip()
     quality = len(text) >= 500 and any(char.isalnum() for char in text)
     if not quality:

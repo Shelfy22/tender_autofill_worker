@@ -116,6 +116,44 @@ def test_characteristic_labels_do_not_replace_excel_header_columns() -> None:
     ]
 
 
+def test_word_table_quantity_unit_header_extracts_positions() -> None:
+    positions = extract_deterministic_positions(
+        "\n".join(
+            (
+                "Строка 1: A: № | B: Наименование | C: Кол-во/шт. | D: Поставщик №1",
+                "Строка 2: A: 1 | B: Выключатель автоматический модульный ВА 47-60М 1п 3А С | C: 1 | D: 157,69",
+                "Строка 3: A: 2 | B: Выключатель автоматический модульный ВА 47-60М3п 25А С | C: 1 | D: 547,81",
+            )
+        )
+    )
+
+    assert [(item.product, item.quantity, item.unit) for item in positions] == [
+        ("Выключатель автоматический модульный ВА 47-60М 1п 3А С", 1.0, "шт"),
+        ("Выключатель автоматический модульный ВА 47-60М3п 25А С", 1.0, "шт"),
+    ]
+
+
+def test_word_duplicate_spec_and_price_tables_are_merged() -> None:
+    positions = extract_deterministic_positions(
+        "\n".join(
+            (
+                "Таблица Word 1",
+                "Строка 1: A: № | B: Наименование товара/ Код ОКПД2 | C: Кол-во, шт.",
+                "Строка 2: A: 1 | B: Выключатель автоматический ВА 47-60М 1п 3А С или эквивалент Код ОКПД2: 27.12.23.190 | C: 1",
+                "Таблица Word 2",
+                "Строка 1: A: № | B: Наименование | C: Кол-во/шт. | D: Цена за ед., руб. | E: Сумма, руб.",
+                "Строка 2: A: 1 | B: Выключатель автоматический ВА 47-60М 1п 3А С | C: 1 | D: 274,01 | E: 274,01",
+            )
+        )
+    )
+
+    assert len(positions) == 1
+    assert positions[0].product == "Выключатель автоматический ВА 47-60М 1п 3А С"
+    assert positions[0].quantity == 1
+    assert positions[0].unit == "шт"
+    assert positions[0].documentUnitPriceRub == "274,01"
+
+
 def test_invalid_structured_table_falls_back_to_text_extraction() -> None:
     text = chr(10).join(
         (

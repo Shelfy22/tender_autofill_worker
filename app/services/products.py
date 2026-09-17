@@ -43,6 +43,14 @@ _ADDRESS_OR_RECIPIENT_PATTERN = re.compile(
     r"\b(?:филиал|предприятие)\b.{0,160}(?:\bг\.|\bгород\b|\bул\.|\bулица\b))",
     re.IGNORECASE,
 )
+_CLASSIFIER_SUFFIX_PATTERN = re.compile(
+    r"\s*(?:код\s+)?(?:окпд2?|ктру|тн\s+вэд)\s*:?\s*\d{2}(?:[.\s-]\d{1,3}){2,}\s*$",
+    re.IGNORECASE,
+)
+_EQUIVALENT_SUFFIX_PATTERN = re.compile(
+    r"\s*[([]?\s*(?:или\s+)?(?:аналог|эквивалент)\s*[)\]]?\s*$",
+    re.IGNORECASE,
+)
 _CONDITION_POSITION_PATTERN = re.compile(
     r"^\s*(?:"
     r"аналоги?\s+рассматрива(?:ются|ется)(?:\s*[.!;:]?\s*допуск(?:\s+по)?\s+[а-яё\s]+\s*[±+\-]?\s*\d+(?:[,.]\d+)?\s*%)?|"
@@ -76,6 +84,15 @@ UNITS = r"штука|штук|шт\.?|комплект|компл\.?|набор|
 
 def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").replace("undefined", " ")).strip()
+
+
+def _strip_classifier_suffix(value: str) -> str:
+    return _clean(_CLASSIFIER_SUFFIX_PATTERN.sub("", value))
+
+
+def _normalize_extracted_product_name(value: str) -> str:
+    value = _strip_classifier_suffix(_clean(value))
+    return _clean(_EQUIVALENT_SUFFIX_PATTERN.sub("", value))
 
 
 def _missing(value: Any) -> bool:
@@ -174,6 +191,8 @@ def _header_role(value: Any) -> str | None:
         header,
     ):
         return "quantity"
+    if re.search(r"(?:количество|кол\s+во|кол)\s+(?:шт|штук|ед|м|кг|л)\b", header):
+        return "quantity"
     if re.search(r"единица\s+измерения|ед\s+изм", header):
         return "unit"
     if re.search(
@@ -182,6 +201,36 @@ def _header_role(value: Any) -> str | None:
     ):
         return "product"
     return None
+
+
+def _unit_from_quantity_header(value: Any) -> str:
+    header = _normalize_header(value)
+    if not header:
+        return ""
+    unit_aliases = (
+        ("шт", r"шт|штук|штука|штуки"),
+        ("ед", r"ед|единиц[а-я]*"),
+        ("комплект", r"комплект[а-я]*"),
+        ("м", r"м|метр[а-я]*"),
+        ("кг", r"кг|килограмм[а-я]*"),
+        ("л", r"л|литр[а-я]*"),
+    )
+    for unit, pattern in unit_aliases:
+        if re.search(rf"(?:^|\s)(?:{pattern})(?:\s|$)", header):
+            return unit
+    return ""
+
+
+def _table_unit(
+    cells: dict[str, str],
+    header_columns: dict[str, str],
+    header_labels: dict[str, str],
+) -> tuple[str, str]:
+    unit_column = header_columns.get("unit", "")
+    unit = cells.get(unit_column, "") if unit_column else ""
+    if not unit:
+        unit = _unit_from_quantity_header(header_labels.get("quantity", ""))
+    return unit, unit_column
 
 
 def infer_spreadsheet_headers(
@@ -219,6 +268,15 @@ def _parse_structured_cells(value: str) -> dict[str, str]:
         if match and match.group(2):
             cells[match.group(1)] = match.group(2)
     return cells
+
+
+def _looks_like_structured_row(value: str) -> bool:
+    head, separator, tail = value.partition(":")
+    return bool(
+        separator
+        and re.search(r"\d", head)
+        and re.search(r"(?:^|\|)\s*[A-Z]{1,3}\s*:", tail)
+    )
 
 
 def _excel_column_number(value: str) -> int:
@@ -304,9 +362,14 @@ def extract_deterministic_positions(
         source_reference: ProductSourceReference | None = None,
         source_cells: dict[str, str] | None = None,
     ) -> None:
-        name, unit = _clean(name), _clean(unit)
+        name, unit = _normalize_extracted_product_name(name), _clean(unit)
         quantity = parse_quantity(raw_quantity)
-        if quantity is None or re.search(r"наименование\s+товара|кол-?во", name, re.I):
+        if (
+            quantity is None
+            or _ONLY_ROW_NUMBER_PATTERN.fullmatch(name)
+            or _ONLY_CLASSIFIER_CODE_PATTERN.fullmatch(name)
+            or re.search(r"наименование\s+товара|кол-?во", name, re.I)
+        ):
             return
         key = (name.lower().replace("ё", "е"), unit.lower(), quantity)
         if key in seen:
@@ -382,11 +445,13 @@ def extract_deterministic_positions(
                     header_columns[role] = column
                     header_labels[role] = label
                 continue
-            if not {"product", "unit", "quantity"}.issubset(header_columns):
+            if not {"product", "quantity"}.issubset(header_columns):
                 continue
-            name = cells.get(header_columns["product"], "")
-            unit = cells.get(header_columns["unit"], "")
-            raw_quantity = cells.get(header_columns["quantity"])
+            product_column = header_columns["product"]
+            quantity_column = header_columns["quantity"]
+            unit, unit_column = _table_unit(cells, header_columns, header_labels)
+            name = cells.get(product_column, "")
+            raw_quantity = cells.get(quantity_column)
             if not name or not unit or raw_quantity is None:
                 continue
             unit_price_column = header_columns.get("unit_price", "")
@@ -437,9 +502,9 @@ def extract_deterministic_positions(
                     fileName=table.fileName,
                     sheet=table.sheet,
                     row=row.row,
-                    productColumn=header_columns["product"],
-                    quantityColumn=header_columns["quantity"],
-                    unitColumn=header_columns["unit"],
+                    productColumn=product_column,
+                    quantityColumn=quantity_column,
+                    unitColumn=unit_column,
                     productHeader=header_labels.get("product", ""),
                     quantityHeader=header_labels.get("quantity", ""),
                     unitHeader=header_labels.get("unit", ""),
@@ -460,6 +525,11 @@ def extract_deterministic_positions(
         if line.startswith("--- ДОКУМЕНТ "):
             current_file = ""
             current_sheet = ""
+            header_columns = {}
+            header_labels = {}
+            continue
+        if line.startswith("Таблица Word "):
+            current_sheet = line.strip()
             header_columns = {}
             header_labels = {}
             continue
@@ -496,11 +566,13 @@ def extract_deterministic_positions(
                 header_columns[role] = column
                 header_labels[role] = label
             continue
-        if not {"product", "unit", "quantity"}.issubset(header_columns):
+        if not {"product", "quantity"}.issubset(header_columns):
             continue
-        name = cells.get(header_columns["product"], "")
-        unit = cells.get(header_columns["unit"], "")
-        raw_quantity = cells.get(header_columns["quantity"])
+        product_column = header_columns["product"]
+        quantity_column = header_columns["quantity"]
+        unit, unit_column = _table_unit(cells, header_columns, header_labels)
+        name = cells.get(product_column, "")
+        raw_quantity = cells.get(quantity_column)
         if not name or not unit or raw_quantity is None:
             continue
         unit_price_column = header_columns.get("unit_price", "")
@@ -540,9 +612,9 @@ def extract_deterministic_positions(
                 fileName=current_file,
                 sheet=current_sheet,
                 row=row_number,
-                productColumn=header_columns["product"],
-                quantityColumn=header_columns["quantity"],
-                unitColumn=header_columns["unit"],
+                productColumn=product_column,
+                quantityColumn=quantity_column,
+                unitColumn=unit_column,
                 productHeader=header_labels.get("product", ""),
                 quantityHeader=header_labels.get("quantity", ""),
                 unitHeader=header_labels.get("unit", ""),
@@ -584,8 +656,14 @@ def extract_deterministic_positions(
             if len(result) >= max_positions:
                 return result
 
+    fallback_text = "\n".join(
+        line
+        for line in text.splitlines()
+        if not _looks_like_structured_row(line)
+    )
+    fallback_normalized = _clean(fallback_text)
     for pattern_index, pattern in enumerate(patterns):
-        for match in pattern.finditer(normalized if pattern_index == 0 else text):
+        for match in pattern.finditer(fallback_normalized if pattern_index == 0 else fallback_text):
             if pattern_index == 0:
                 name, unit, raw_quantity = match.group(2), match.group(3), match.group(4)
             else:
