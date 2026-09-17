@@ -19,6 +19,15 @@ _CONTROL_TEXT = {
 }
 
 
+def _column_name(index: int) -> str:
+    name = ""
+    while index >= 0:
+        index, remainder = divmod(index, 26)
+        name = chr(ord("A") + remainder) + name
+        index -= 1
+    return name
+
+
 def _codec(codepage: int, fallback: str) -> str:
     candidate = f"cp{codepage}"
     try:
@@ -130,11 +139,40 @@ def _plain_text(data: bytes) -> str:
     return "\n".join(lines)
 
 
+def _with_structured_tables(text: str) -> str:
+    result: list[str] = []
+    table_index = 0
+    row_index = 0
+    in_table = False
+    for line in text.splitlines():
+        result.append(line)
+        cells = [cell.strip() for cell in line.split("|")]
+        is_table_row = len(cells) >= 2 and any(cells)
+        if not is_table_row:
+            in_table = False
+            continue
+        if not in_table:
+            table_index += 1
+            row_index = 1
+            in_table = True
+            result.append(f"Таблица RTF {table_index}")
+        else:
+            row_index += 1
+        result.append(
+            f"Строка {row_index}: "
+            + " | ".join(
+                f"{_column_name(index)}: {value}"
+                for index, value in enumerate(cells)
+            )
+        )
+    return "\n".join(result)
+
+
 def extract_rtf_text(path: Path) -> tuple[str, str, list[str]]:
     data = path.read_bytes()
     if not data.lstrip().startswith(b"{\\rtf"):
         return "", "rtf_invalid", ["Файл не содержит сигнатуру RTF."]
-    text = _plain_text(data)
+    text = _with_structured_tables(_plain_text(data))
     if len(text) < 80 or not any(char.isalnum() for char in text):
         return "", "rtf_quality_failed", [f"RTF не дал полезный текст: длина {len(text)}."]
     return text, "ok", []
