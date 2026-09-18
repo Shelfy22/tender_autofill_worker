@@ -885,6 +885,10 @@ documentLineTotalRub (сумма/стоимость всей строки), то
             if position.candidateId
         ]
         prompt = f"""
+Each input product is a separate purchase position. Never merge, remove, or
+sum products solely because their titles, quantities, units, models, or
+articles match. Products with different candidateId or sourceReference are
+always separate and must be returned separately.
 Проверь deterministic Excel candidates. Верни только JSON.
 
 Твоя задача — не извлекать таблицу заново и не переписывать числа/цены/координаты.
@@ -975,6 +979,12 @@ Spreadsheet candidates, если есть:
         results: list[dict[str, Any]],
     ) -> TenderConsolidationResponse:
         compact = json.dumps(results, ensure_ascii=False, separators=(",", ":"))
+        position_policy = (
+            "Each input product is a separate purchase position. Never merge, "
+            "remove, or sum products solely because titles, quantities, units, "
+            "models, or articles match. Different candidateId or sourceReference "
+            "means different output positions."
+        )
         prompt = f"""
 Сконсолидируй результаты Document Analysis. Только JSON.
 
@@ -988,6 +998,8 @@ Spreadsheet candidates, если есть:
 - не считать coverage, Qdrant selection, final status или причины по каталогу.
 
 DocumentAnalysisResults:
+{position_policy}
+
 {compact}
 """.strip()
         return self.json_call(

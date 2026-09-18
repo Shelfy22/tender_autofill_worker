@@ -333,7 +333,7 @@ def test_spreadsheet_document_analysis_default_keeps_candidates_in_one_unit() ->
     assert len(units[0].spreadsheetCandidates) == 130
 
 
-def test_document_analysis_products_are_deduplicated_across_documents() -> None:
+def test_document_analysis_preserves_same_named_positions_across_documents() -> None:
     results = [
         DocumentAnalysisResult(
             unitId="unit-1",
@@ -367,11 +367,11 @@ def test_document_analysis_products_are_deduplicated_across_documents() -> None:
 
     assert debug == {
         "inputProductCount": 4,
-        "uniqueProductCount": 3,
-        "removedDuplicateCount": 1,
+            "uniqueProductCount": 4,
+            "removedDuplicateCount": 0,
     }
-    assert [len(result["products"]) for result in compact] == [1, 2]
-    assert compact[0]["products"][0]["article"] == "TW-1"
+    assert [len(result["products"]) for result in compact] == [1, 3]
+    assert compact[1]["products"][0]["article"] == "TW-1"
 
 
 def test_large_spreadsheet_is_skipped_by_document_analysis() -> None:

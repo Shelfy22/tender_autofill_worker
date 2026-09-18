@@ -135,7 +135,17 @@ def _merge_product_payload(
 def compact_document_analysis_results(
     results: list[DocumentAnalysisResult],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Remove repeated cross-document products before LLM consolidation."""
+    """Keep every extracted purchase position for consolidation."""
+
+    input_product_count = sum(len(result.products) for result in results)
+    return (
+        [result.model_dump(mode="json") for result in results],
+        {
+            "inputProductCount": input_product_count,
+            "uniqueProductCount": input_product_count,
+            "removedDuplicateCount": 0,
+        },
+    )
 
     compact_results: list[dict[str, Any]] = []
     representatives: dict[str, list[tuple[str, dict[str, Any]]]] = {}

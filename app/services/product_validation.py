@@ -298,6 +298,10 @@ def apply_product_candidate_audit(
         if assignment.role == "ambiguous":
             require_review(index, assignment.rationale or "Роль позиции неоднозначна")
             continue
+        # Equal titles can be independent rows in the source table. Never
+        # remove a candidate merely because the model calls it a duplicate.
+        if assignment.role == "duplicate":
+            continue
         if assignment.role == "purchase_item":
             if assignment.confidence < AUDIT_REVIEW_CONFIDENCE:
                 require_review(index, "Низкая уверенность, что строка является товаром")

@@ -398,7 +398,6 @@ def extract_deterministic_positions(
         ),
     ]
     result: list[TenderPosition] = []
-    seen: dict[tuple[str, str, float], int] = {}
     structured_spreadsheet_rows: set[str] = set()
 
     def add(
@@ -425,22 +424,6 @@ def extract_deterministic_positions(
         ):
             return
         key = (name.lower().replace("ё", "е"), unit.lower(), quantity)
-        if key in seen:
-            current = result[seen[key]]
-            updates: dict[str, Any] = {}
-            for field, value in (
-                ("documentUnitPriceRub", document_unit_price),
-                ("documentLineTotalRub", document_line_total),
-                ("documentCurrency", document_currency),
-                ("documentPriceSource", document_price_source),
-            ):
-                if _missing(getattr(current, field)) and not _missing(value):
-                    updates[field] = value
-            if updates:
-                updates["documentPriceEvidence"] = _clean(evidence)[:500]
-                result[seen[key]] = current.model_copy(update=updates)
-            return
-        seen[key] = len(result)
         result.append(
             TenderPosition(
                 candidateId=candidate_id,
@@ -654,11 +637,15 @@ def extract_deterministic_positions(
             if has_document_price
             else None
         )
+        structured_spreadsheet_rows.add(_clean(line))
         add(
             name,
             unit,
             raw_quantity,
             line,
+            candidate_id=(
+                f"table:{current_file}:{current_sheet}:{row_number}:{product_column}"
+            ),
             document_unit_price=raw_unit_price,
             document_line_total=raw_line_total,
             document_currency=_currency_from_price_cells(
@@ -761,7 +748,6 @@ def extract_seldon_positions(purchase: dict[str, Any]) -> list[TenderPosition]:
     containers: list[dict[str, Any]] = [purchase]
     containers.extend(lot for lot in lots if isinstance(lot, dict))
     result: list[TenderPosition] = []
-    seen: set[tuple[str, float | None, str]] = set()
 
     for container in containers:
         products = _first_value(
@@ -841,9 +827,8 @@ def extract_seldon_positions(purchase: dict[str, Any]) -> list[TenderPosition]:
                 quantity,
                 unit.lower(),
             )
-            if not key[0] or key in seen:
+            if not key[0]:
                 continue
-            seen.add(key)
             evidence = json.dumps(raw_product, ensure_ascii=False, default=str)[:500]
             result.append(
                 TenderPosition(
@@ -878,6 +863,23 @@ def _position_name_key(position: TenderPosition) -> str:
     return re.sub(r"[^a-zа-я0-9]+", " ", value).strip()
 
 
+def _position_source_key(position: TenderPosition) -> str:
+    if position.candidateId:
+        return f"candidate:{position.candidateId}"
+    reference = position.sourceReference
+    if reference is None or reference.row is None:
+        return ""
+    return ":".join(
+        (
+            "source",
+            reference.fileName,
+            reference.sheet,
+            str(reference.row),
+            reference.productColumn,
+        )
+    )
+
+
 def merge_positions(
     deterministic: list[TenderPosition],
     llm_response: TenderPositionsResponse | None,
@@ -889,14 +891,22 @@ def merge_positions(
     llm_product_ids = {id(position) for position in llm_products}
     combined = llm_products + seldon + deterministic
     warnings = list(llm_response.warnings if llm_response else [])
-    seldon_by_name = {_position_name_key(position): position for position in seldon}
-    excel_by_name = {_position_name_key(position): position for position in deterministic}
+    seldon_by_source = {
+        key: position
+        for position in seldon
+        if (key := _position_source_key(position))
+    }
+    excel_by_source = {
+        key: position
+        for position in deterministic
+        if (key := _position_source_key(position))
+    }
     if seldon and not any(position.quantity is not None for position in seldon):
         warnings.append(
             "Товарные позиции найдены в структурированных данных Seldon, но количество в них отсутствует."
         )
     result: list[TenderPosition] = []
-    seen: dict[tuple[str, float | None, str], int] = {}
+    seen: dict[str, int] = {}
     for raw_position in combined:
         position = _normalize_product_description(_clear_tender_level_price(raw_position))
         if _is_noise_position(position):
@@ -920,9 +930,9 @@ def merge_positions(
             )
             position = position.model_copy(update={"quantity": structured_quantity})
         query = _clean(position.productQuery or position.product)
-        name_key = _position_name_key(position)
-        seldon_match = seldon_by_name.get(name_key)
-        excel_match = excel_by_name.get(name_key)
+        source_key = _position_source_key(position)
+        seldon_match = seldon_by_source.get(source_key)
+        excel_match = excel_by_source.get(source_key)
         if (
             id(raw_position) in llm_product_ids
             and position.quantity is None
@@ -952,24 +962,10 @@ def merge_positions(
         product = _clean(position.product)
         if not product:
             continue
-        resolved_key = (name_key, quantity, unit.lower())
+        # Equal labels remain separate purchase positions unless they point to
+        # the same source row. This preserves the coverage denominator.
+        resolved_key = source_key or f"occurrence:{id(raw_position)}"
         existing_index = seen.get(resolved_key)
-        if existing_index is None:
-            for existing_key, candidate_index in list(seen.items()):
-                same_name = existing_key[0] == name_key
-                compatible_quantity = (
-                    existing_key[1] is None
-                    or quantity is None
-                    or existing_key[1] == quantity
-                )
-                compatible_unit = (
-                    not existing_key[2]
-                    or not unit
-                    or existing_key[2] == unit.lower()
-                )
-                if same_name and compatible_quantity and compatible_unit:
-                    existing_index = candidate_index
-                    break
         if existing_index is not None:
             existing = result[existing_index]
             updates: dict[str, Any] = {}
