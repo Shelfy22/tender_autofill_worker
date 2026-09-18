@@ -167,6 +167,15 @@ def _header_role(value: Any) -> str | None:
     header = _normalize_header(value)
     if not header:
         return None
+    # A price column frequently contains a suffix such as "руб./ед. изм.".
+    # Treat a cell as the unit column only when that is its own header, otherwise
+    # a secondary price-table header can overwrite the actual unit column.
+    unit_header = r"(?:\u0435\u0434\u0438\u043d\u0438\u0446\u0430\s+\u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f|\u0435\u0434\s+\u0438\u0437\u043c)(?:\s+(?:\u0442\u043e\u0432\u0430\u0440\u0430|\u043f\u0440\u043e\u0434\u0443\u043a\u0446\u0438\u0438|\u0438\u0437\u0434\u0435\u043b\u0438\u044f))?"
+    if re.search(r"\u0435\u0434\s+\u0438\u0437\u043c", header) and not re.fullmatch(
+        unit_header,
+        header,
+    ):
+        return None
     characteristic_only = bool(
         re.search(r"показател|параметр|характеристик", header)
         and not re.search(r"товар|продукц|оборудован|материал|издели|мтр", header)
@@ -233,31 +242,74 @@ def _table_unit(
     return unit, unit_column
 
 
+def _header_candidates(cells: dict[str, str]) -> list[tuple[str, str, str]]:
+    return [
+        (role, column, value)
+        for column, value in cells.items()
+        if (role := _header_role(value)) is not None
+    ]
+
+
+def _header_data_score(
+    role: str,
+    column: str,
+    row_index: int,
+    rows: list[SpreadsheetRow],
+) -> float:
+    """Score a header candidate by whether the following cells fit its role."""
+    values = [
+        _clean(row.cells.get(column))
+        for row in rows[row_index + 1 : row_index + 51]
+        if _clean(row.cells.get(column))
+    ]
+    if not values:
+        return 0.0
+    if role == "unit":
+        matches = sum(bool(re.fullmatch(UNITS, value, re.IGNORECASE)) for value in values)
+    elif role == "product":
+        matches = sum(
+            bool(re.search(r"[A-Za-z\u0410-\u044f]", value))
+            and _header_role(value) is None
+            for value in values
+        )
+    else:
+        matches = sum(
+            bool(re.fullmatch(r"[+-]?\d+(?:[.,]\d+)?", value.replace(" ", "")))
+            for value in values
+        )
+    return matches / len(values)
+
+
 def infer_spreadsheet_headers(
     rows: list[SpreadsheetRow],
 ) -> tuple[list[int], dict[str, str], dict[str, str]]:
     header_rows: list[int] = []
-    header_map: dict[str, str] = {}
-    header_labels: dict[str, str] = {}
-    for row in rows:
-        detected_headers = {
-            role: (column, value)
-            for column, value in row.cells.items()
-            if (role := _header_role(value)) is not None
-        }
-        core_header_roles = set(detected_headers) & {
+    candidates: dict[str, list[tuple[float, int, str, str]]] = {}
+    for row_index, row in enumerate(rows):
+        detected_headers = _header_candidates(row.cells)
+        core_header_roles = {role for role, _, _ in detected_headers} & {
             "product",
             "unit",
             "quantity",
             "unit_price",
             "line_total",
         }
-        if "product" not in detected_headers and len(core_header_roles) < 2:
+        if "product" not in core_header_roles and len(core_header_roles) < 2:
             continue
         header_rows.append(row.row)
-        for role, (column, label) in detected_headers.items():
-            header_map[role] = column
-            header_labels[role] = label
+        for role, column, label in detected_headers:
+            score = _header_data_score(role, column, row_index, rows)
+            candidates.setdefault(role, []).append((score, row.row, column, label))
+
+    header_map: dict[str, str] = {}
+    header_labels: dict[str, str] = {}
+    for role, options in candidates.items():
+        _, _, column, label = max(
+            options,
+            key=lambda item: (item[0], -item[1], -_excel_column_number(item[2])),
+        )
+        header_map[role] = column
+        header_labels[role] = label
     return header_rows, header_map, header_labels
 
 
@@ -347,6 +399,7 @@ def extract_deterministic_positions(
     ]
     result: list[TenderPosition] = []
     seen: dict[tuple[str, str, float], int] = {}
+    structured_spreadsheet_rows: set[str] = set()
 
     def add(
         name: str,
@@ -420,31 +473,37 @@ def extract_deterministic_positions(
             )
         except Exception:
             continue
-        header_columns: dict[str, str] = {}
-        header_labels: dict[str, str] = {}
+        header_columns = dict(table.headerMap)
+        header_labels = dict(table.headerLabels)
+        header_rows = set(table.headerRows)
+        use_precomputed_headers = {"product", "quantity"}.issubset(header_columns)
         for row in table.rows:
             cells = row.cells
-            detected_headers = {
-                role: (column, value)
-                for column, value in cells.items()
-                if (role := _header_role(value)) is not None
-            }
-            core_header_roles = set(detected_headers) & {
-                "product",
-                "unit",
-                "quantity",
-                "unit_price",
-                "line_total",
-            }
-            is_header_row = (
-                "product" in detected_headers
-                or len(core_header_roles) >= 2
-            )
-            if is_header_row:
-                for role, (column, label) in detected_headers.items():
-                    header_columns[role] = column
-                    header_labels[role] = label
-                continue
+            if use_precomputed_headers:
+                if row.row in header_rows:
+                    continue
+            else:
+                detected_headers = {
+                    role: (column, value)
+                    for column, value in cells.items()
+                    if (role := _header_role(value)) is not None
+                }
+                core_header_roles = set(detected_headers) & {
+                    "product",
+                    "unit",
+                    "quantity",
+                    "unit_price",
+                    "line_total",
+                }
+                is_header_row = (
+                    "product" in detected_headers
+                    or len(core_header_roles) >= 2
+                )
+                if is_header_row:
+                    for role, (column, label) in detected_headers.items():
+                        header_columns[role] = column
+                        header_labels[role] = label
+                    continue
             if not {"product", "quantity"}.issubset(header_columns):
                 continue
             product_column = header_columns["product"]
@@ -469,6 +528,7 @@ def extract_deterministic_positions(
                     for column, value in cells.items()
                 )
             )
+            structured_spreadsheet_rows.add(_clean(evidence))
             price_source = (
                 DocumentPriceSource(
                     fileName=table.fileName,
@@ -627,6 +687,8 @@ def extract_deterministic_positions(
     # Structured row emitted by the spreadsheet parser:
     # "Строка 2: A: 1 | B: Кабель | D: шт | E: 10".
     for row_match in re.finditer(r"^Строка\s+\d+\s*:\s*(.+)$", text, re.I | re.M):
+        if _clean(row_match.group(0)) in structured_spreadsheet_rows:
+            continue
         parts = []
         for raw_part in row_match.group(1).split("|"):
             part = raw_part.strip()

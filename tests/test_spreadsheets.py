@@ -98,6 +98,87 @@ def test_xlsx_structured_json_has_header_map_and_valid_rows(tmp_path: Path) -> N
     assert positions[0].sourceCells["E"] == "3"
 
 
+def test_xlsx_multiline_nmck_header_keeps_actual_unit_column(tmp_path: Path) -> None:
+    path = tmp_path / "nmck.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "NMCK"
+    sheet.append(
+        [
+            "No.",
+            "\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435 \u043f\u0440\u043e\u0434\u0443\u043a\u0446\u0438\u0438",
+            "\u0425\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0430",
+            "\u0415\u0434. \u0438\u0437\u043c.",
+            "\u041a\u043e\u043b-\u0432\u043e",
+            "\u0426\u0435\u043d\u0430 \u0438\u0437 \u043a\u043e\u043c\u043c\u0435\u0440\u0447\u0435\u0441\u043a\u043e\u0433\u043e \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044f",
+            "\u041f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044f \u043f\u043e\u0441\u0442\u0430\u0432\u0449\u0438\u043a\u043e\u0432 (\u0440\u0443\u0431./\u0435\u0434. \u0438\u0437\u043c.)",
+        ]
+    )
+    sheet.append([1, "\u0421\u0432\u0435\u0442\u0438\u043b\u044c\u043d\u0438\u043a \u043f\u0435\u0440\u0432\u044b\u0439", "\u0422\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435", "\u0448\u0442.", 6, 702.27, 652.58])
+    sheet.append([2, "\u0421\u0432\u0435\u0442\u0438\u043b\u044c\u043d\u0438\u043a \u0432\u0442\u043e\u0440\u043e\u0439", None, "\u0448\u0442.", 40, 654.15, None])
+    workbook.save(path)
+
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        max_text_chars_per_file=10_000,
+    )
+    text, status, warnings, tables = extract_spreadsheet_content(
+        path,
+        "xlsx",
+        settings,
+    )
+    positions = extract_deterministic_positions(text, tables)
+
+    assert status == "ok"
+    assert not warnings
+    assert tables[0].headerMap["unit"] == "D"
+    assert [(item.product, item.unit, item.quantity) for item in positions] == [
+        ("\u0421\u0432\u0435\u0442\u0438\u043b\u044c\u043d\u0438\u043a \u043f\u0435\u0440\u0432\u044b\u0439", "\u0448\u0442.", 6.0),
+        ("\u0421\u0432\u0435\u0442\u0438\u043b\u044c\u043d\u0438\u043a \u0432\u0442\u043e\u0440\u043e\u0439", "\u0448\u0442.", 40.0),
+    ]
+
+
+def test_xlsx_header_roles_are_detected_at_arbitrary_columns(tmp_path: Path) -> None:
+    path = tmp_path / "shifted_columns.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Shifted"
+    sheet.append(
+        [
+            "\u041a\u043e\u043b-\u0432\u043e",
+            "\u041f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044f (\u0440\u0443\u0431./\u0435\u0434. \u0438\u0437\u043c.)",
+            "\u041a\u043e\u0434",
+            None,
+            None,
+            "\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435 \u043f\u0440\u043e\u0434\u0443\u043a\u0446\u0438\u0438",
+            None,
+            None,
+            None,
+            "\u0415\u0434. \u0438\u0437\u043c.",
+        ]
+    )
+    sheet.append([12, 450.0, "01", None, None, "\u041a\u0430\u0431\u0435\u043b\u044c \u0441\u0438\u043b\u043e\u0432\u043e\u0439", None, None, None, "\u043c"])
+    sheet.append([8, 470.0, "02", None, None, "\u041a\u043e\u0440\u043e\u0431 \u043c\u043e\u043d\u0442\u0430\u0436\u043d\u044b\u0439", None, None, None, "\u0448\u0442."])
+    workbook.save(path)
+
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        max_text_chars_per_file=10_000,
+    )
+    text, _, _, tables = extract_spreadsheet_content(path, "xlsx", settings)
+    positions = extract_deterministic_positions(text, tables)
+
+    assert tables[0].headerMap == {
+        "quantity": "A",
+        "product": "F",
+        "unit": "J",
+    }
+    assert [(item.product, item.unit, item.quantity) for item in positions] == [
+        ("\u041a\u0430\u0431\u0435\u043b\u044c \u0441\u0438\u043b\u043e\u0432\u043e\u0439", "\u043c", 12.0),
+        ("\u041a\u043e\u0440\u043e\u0431 \u043c\u043e\u043d\u0442\u0430\u0436\u043d\u044b\u0439", "\u0448\u0442.", 8.0),
+    ]
+
+
 def test_document_processor_keeps_structured_tables_in_parsed_document(
     tmp_path: Path,
 ) -> None:
