@@ -40,6 +40,31 @@ def _convert(path: Path, target_extension: str, settings: Settings) -> Path:
     return converted
 
 
+def _iter_word_tables(tables: list[object]):
+    """Yield top-level and nested Word tables once, in document order."""
+    seen_elements: list[object] = []
+
+    def visit(table: object):
+        element = getattr(table, "_element", None)
+        if any(element is seen for seen in seen_elements):
+            return
+        seen_elements.append(element)
+        yield table
+
+        seen_cells: list[object] = []
+        for row in getattr(table, "rows", []):
+            for cell in row.cells:
+                cell_element = cell._tc
+                if any(cell_element is seen for seen in seen_cells):
+                    continue
+                seen_cells.append(cell_element)
+                for nested in cell.tables:
+                    yield from visit(nested)
+
+    for table in tables:
+        yield from visit(table)
+
+
 def extract_word_text(path: Path, file_type: str, settings: Settings) -> tuple[str, str, list[str]]:
     warnings: list[str] = []
     docx_path = path
@@ -52,7 +77,7 @@ def extract_word_text(path: Path, file_type: str, settings: Settings) -> tuple[s
         text = paragraph.text.strip()
         if text:
             parts.append(text)
-    for table_index, table in enumerate(document.tables, start=1):
+    for table_index, table in enumerate(_iter_word_tables(document.tables), start=1):
         parts.append(f"Таблица Word {table_index}")
         for row_index, row in enumerate(table.rows, start=1):
             values = [cell.text.replace("\n", " ").strip() for cell in row.cells]

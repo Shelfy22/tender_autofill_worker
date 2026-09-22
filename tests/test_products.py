@@ -153,6 +153,69 @@ def test_word_rows_with_same_name_remain_separate_positions() -> None:
     assert positions[1].documentUnitPriceRub == 274.01
 
 
+def test_word_companion_characteristics_enrich_catalog_query() -> None:
+    positions = extract_deterministic_positions(
+        "\n".join(
+            (
+                "\u0422\u0430\u0431\u043b\u0438\u0446\u0430 Word 1",
+                "\u0421\u0442\u0440\u043e\u043a\u0430 1: A: \u2116 \u043f/\u043f | B: \u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435 | C: \u0415\u0434. \u0438\u0437\u043c. | D: \u041a\u043e\u043b-\u0432\u043e",
+                "\u0421\u0442\u0440\u043e\u043a\u0430 2: A: 1 | B: \u042d\u043b\u0435\u043a\u0442\u0440\u043e\u0434\u044b \u0441\u0432\u0430\u0440\u043e\u0447\u043d\u044b\u0435 \u0442\u0438\u043f 1 | C: \u043a\u0433 | D: 10",
+                "\u0422\u0430\u0431\u043b\u0438\u0446\u0430 Word 2",
+                "\u0421\u0442\u0440\u043e\u043a\u0430 1: A: \u2116 \u043f/\u043f | B: \u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435 | C: \u0422\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0435 \u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0438",
+                "\u0421\u0442\u0440\u043e\u043a\u0430 2: A: 1 | B: \u042d\u043b\u0435\u043a\u0442\u0440\u043e\u0434\u044b \u0441\u0432\u0430\u0440\u043e\u0447\u043d\u044b\u0435 \u0442\u0438\u043f 1 | C: \u041c\u0430\u0440\u043a\u0430: \u042d42; \u0434\u0438\u0430\u043c\u0435\u0442\u0440: 3,0 \u043c\u043c; \u043f\u043e\u043a\u0440\u044b\u0442\u0438\u0435: \u0440\u0443\u0442\u0438\u043b\u043e\u0432\u043e\u0435",
+            )
+        )
+    )
+
+    assert len(positions) == 1
+    assert "\u041c\u0430\u0440\u043a\u0430: \u042d42" in positions[0].requirements
+    assert "\u0434\u0438\u0430\u043c\u0435\u0442\u0440: 3,0 \u043c\u043c" in positions[0].productQuery
+    assert "\u0422\u0430\u0431\u043b\u0438\u0446\u0430 Word 2" in positions[0].evidence
+
+
+def test_merge_drops_unreferenced_llm_clothing_size_breakdown() -> None:
+    deterministic = [
+        TenderPosition(
+            product=(
+                "\u041a\u043e\u0441\u0442\u044e\u043c \u043c\u0443\u0436\u0441\u043a\u043e\u0439 \u0437\u0438\u043c\u043d\u0438\u0439, "
+                "\u0442\u0435\u043c\u043d\u043e-\u0441\u0438\u043d\u0438\u0439"
+            ),
+            quantity=102,
+            sourceReference={
+                "fileName": "spec.doc",
+                "row": 2,
+                "productColumn": "A",
+                "extractionMethod": "llm",
+            },
+        )
+    ]
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product=(
+                    "\u041a\u043e\u0441\u0442\u044e\u043c\u044b \u0437\u0438\u043c\u043d\u0438\u0435 \u043c\u0443\u0436\u0441\u043a\u0438\u0435 "
+                    "\u0440\u0430\u0437\u043c\u0435\u0440 44-62"
+                ),
+                quantity=95,
+            ),
+            TenderPosition(
+                product=(
+                    "\u041a\u043e\u0441\u0442\u044e\u043c\u044b \u0437\u0438\u043c\u043d\u0438\u0435 \u043c\u0443\u0436\u0441\u043a\u0438\u0435 "
+                    "\u0440\u0430\u0437\u043c\u0435\u0440 64-70"
+                ),
+                quantity=7,
+            ),
+        ]
+    )
+
+    merged, warnings = merge_positions(deterministic, llm)
+
+    assert [(position.product, position.quantity) for position in merged] == [
+        (deterministic[0].product, 102)
+    ]
+    assert any("size breakdown" in warning for warning in warnings)
+
+
 def test_invalid_structured_table_falls_back_to_text_extraction() -> None:
     text = chr(10).join(
         (

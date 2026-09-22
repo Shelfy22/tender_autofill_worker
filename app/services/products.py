@@ -167,6 +167,8 @@ def _header_role(value: Any) -> str | None:
     header = _normalize_header(value)
     if not header:
         return None
+    if header == "\u043e\u0431\u044a\u0435\u043a\u0442 \u0437\u0430\u043a\u0443\u043f\u043a\u0438":
+        return "product"
     # A price column frequently contains a suffix such as "руб./ед. изм.".
     # Treat a cell as the unit column only when that is its own header, otherwise
     # a secondary price-table header can overwrite the actual unit column.
@@ -320,6 +322,146 @@ def _parse_structured_cells(value: str) -> dict[str, str]:
         if match and match.group(2):
             cells[match.group(1)] = match.group(2)
     return cells
+
+
+_STRUCTURED_TABLE_MARKER_PATTERN = re.compile(
+    r"^\s*\u0422\u0430\u0431\u043b\u0438\u0446\u0430\s+(Word|PDF|RTF)\s+(\d+)\s*$",
+    re.IGNORECASE,
+)
+_WORD_TABLE_ROW_PATTERN = re.compile(
+    r"^\s*\u0421\u0442\u0440\u043e\u043a\u0430\s+(\d+)\s*:\s*(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _word_table_key(value: Any) -> str:
+    return re.sub(
+        r"[^a-z\u0410-\u044f0-9]+",
+        " ",
+        _clean(value).casefold().replace("\u0451", "\u0435"),
+    ).strip()
+
+
+def _word_table_serial(cells: dict[str, str]) -> str:
+    for _, value in sorted(cells.items(), key=lambda item: _excel_column_number(item[0])):
+        match = re.fullmatch(r"\s*(\d{1,5})\s*[.)]?\s*", value)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _word_table_characteristic_columns(cells: dict[str, str]) -> tuple[str, list[str]]:
+    product_column = ""
+    characteristic_columns: list[str] = []
+    for column, label in cells.items():
+        normalized = _word_table_key(label)
+        if not normalized:
+            continue
+        if any(
+            marker in normalized
+            for marker in (
+                "\u0442\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a",
+                "\u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a",
+                "\u0442\u0440\u0435\u0431\u043e\u0432\u0430\u043d",
+                "\u043e\u043f\u0438\u0441\u0430\u043d",
+            )
+        ):
+            characteristic_columns.append(column)
+        if (
+            not product_column
+            and "\u043d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d" in normalized
+            and "\u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a" not in normalized
+        ):
+            product_column = column
+    return product_column, characteristic_columns
+
+
+def _enrich_structured_table_positions_with_characteristics(
+    text: str,
+    positions: list[TenderPosition],
+) -> list[TenderPosition]:
+    """Attach a companion table's requirements to its numbered product rows."""
+    tables: list[tuple[str, int, list[dict[str, str]]]] = []
+    current_type = ""
+    current_number: int | None = None
+    current_rows: list[dict[str, str]] = []
+    for line in text.splitlines():
+        marker = _STRUCTURED_TABLE_MARKER_PATTERN.match(line)
+        if marker:
+            if current_number is not None:
+                tables.append((current_type, current_number, current_rows))
+            current_type = marker.group(1)
+            current_number = int(marker.group(2))
+            current_rows = []
+            continue
+        row = _WORD_TABLE_ROW_PATTERN.match(line)
+        if current_number is not None and row:
+            cells = _parse_structured_cells(row.group(2))
+            if cells:
+                current_rows.append(cells)
+    if current_number is not None:
+        tables.append((current_type, current_number, current_rows))
+
+    requirements_by_key: dict[tuple[str, str], tuple[str, str]] = {}
+    requirements_by_name: dict[str, list[tuple[str, str]]] = {}
+    for table_type, table_number, rows in tables:
+        if len(rows) < 2:
+            continue
+        product_column, characteristic_columns = _word_table_characteristic_columns(rows[0])
+        if not product_column or not characteristic_columns:
+            continue
+        for cells in rows[1:]:
+            product = _clean(cells.get(product_column))
+            requirements = _clean(
+                " ".join(cells.get(column, "") for column in characteristic_columns)
+            )
+            serial = _word_table_serial(cells)
+            product_key = _word_table_key(product)
+            if not product_key or not requirements:
+                continue
+            source = (
+                f"\u0422\u0430\u0431\u043b\u0438\u0446\u0430 {table_type} {table_number}: "
+                f"{requirements}"
+            )
+            if serial:
+                requirements_by_key[(product_key, serial)] = (requirements, source)
+            requirements_by_name.setdefault(product_key, []).append((requirements, source))
+
+    if not requirements_by_key and not requirements_by_name:
+        return positions
+
+    enriched: list[TenderPosition] = []
+    for position in positions:
+        product_key = _word_table_key(position.product)
+        evidence_match = _WORD_TABLE_ROW_PATTERN.search(position.evidence)
+        serial = _word_table_serial(
+            _parse_structured_cells(evidence_match.group(2)) if evidence_match else {}
+        )
+        linked = requirements_by_key.get((product_key, serial)) if serial else None
+        name_matches = requirements_by_name.get(product_key, [])
+        if linked is None and len(name_matches) == 1:
+            linked = name_matches[0]
+        if linked is None:
+            enriched.append(position)
+            continue
+        requirements, source = linked
+        combined_requirements = _clean(" ".join((position.requirements, requirements)))
+        query = _clean(position.productQuery or position.product)
+        if requirements.casefold() not in query.casefold():
+            query = _clean(
+                f"{query}; \u0442\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0435 \u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0438: {requirements}"
+            )
+        evidence = _clean("\n".join((position.evidence, source)))[:500]
+        enriched.append(
+            position.model_copy(
+                update={
+                    "productQuery": query,
+                    "requirements": combined_requirements,
+                    "evidence": evidence,
+                }
+            )
+        )
+    return enriched
 
 
 def _looks_like_structured_row(value: str) -> bool:
@@ -720,7 +862,7 @@ def extract_deterministic_positions(
             add(name, unit, raw_quantity, match.group(0))
             if len(result) >= max_positions:
                 return result
-    return result
+    return _enrich_structured_table_positions_with_characteristics(text, result)
 
 
 def _first_value(mapping: dict[str, Any], *keys: str) -> Any:
@@ -880,6 +1022,70 @@ def _position_source_key(position: TenderPosition) -> str:
     )
 
 
+def _apparel_family_key(position: TenderPosition) -> str:
+    """Recognize a clothing family without treating its size grid as new goods."""
+    value = _word_table_key(position.productQuery or position.product)
+    if "\u043a\u043e\u0441\u0442\u044e\u043c" in value:
+        product_type = "suit"
+    elif "\u043a\u0443\u0440\u0442\u043a" in value:
+        product_type = "jacket"
+    else:
+        return ""
+    if "\u043c\u0443\u0436" in value:
+        gender = "male"
+    elif "\u0436\u0435\u043d" in value:
+        gender = "female"
+    else:
+        return ""
+    return f"{product_type}:{gender}:winter" if "\u0437\u0438\u043c" in value else ""
+
+
+def _drop_unconfirmed_llm_quantity_breakdowns(
+    llm_products: list[TenderPosition],
+    source_backed_positions: list[TenderPosition],
+) -> tuple[list[TenderPosition], list[str]]:
+    """Discard an LLM-only clothing size breakdown when a table already has its total."""
+    backed_by_family: dict[str, list[TenderPosition]] = {}
+    for position in source_backed_positions:
+        if not _position_source_key(position) or position.quantity is None:
+            continue
+        family = _apparel_family_key(position)
+        if family:
+            backed_by_family.setdefault(family, []).append(position)
+
+    unconfirmed_by_family: dict[str, list[TenderPosition]] = {}
+    for position in llm_products:
+        if _position_source_key(position) or position.quantity is None:
+            continue
+        family = _apparel_family_key(position)
+        if family:
+            unconfirmed_by_family.setdefault(family, []).append(position)
+
+    removed_ids: set[int] = set()
+    warnings: list[str] = []
+    for family, candidates in unconfirmed_by_family.items():
+        total = sum(float(position.quantity or 0) for position in candidates)
+        parent = next(
+            (
+                position
+                for position in backed_by_family.get(family, [])
+                if abs(float(position.quantity or 0) - total) < 1e-9
+            ),
+            None,
+        )
+        if parent is None or len(candidates) < 2:
+            continue
+        removed_ids.update(id(position) for position in candidates)
+        warnings.append(
+            "Skipped unreferenced LLM size breakdown of a source-backed position: "
+            f"{parent.product[:160]} ({parent.quantity:g} = {total:g})."
+        )
+    return (
+        [position for position in llm_products if id(position) not in removed_ids],
+        warnings,
+    )
+
+
 def merge_positions(
     deterministic: list[TenderPosition],
     llm_response: TenderPositionsResponse | None,
@@ -888,9 +1094,13 @@ def merge_positions(
 ) -> tuple[list[TenderPosition], list[str]]:
     seldon = list(seldon or [])
     llm_products = list(llm_response.products if llm_response else [])
+    llm_products, breakdown_warnings = _drop_unconfirmed_llm_quantity_breakdowns(
+        llm_products,
+        deterministic + seldon + llm_products,
+    )
     llm_product_ids = {id(position) for position in llm_products}
     combined = llm_products + seldon + deterministic
-    warnings = list(llm_response.warnings if llm_response else [])
+    warnings = list(llm_response.warnings if llm_response else []) + breakdown_warnings
     seldon_by_source = {
         key: position
         for position in seldon
