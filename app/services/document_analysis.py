@@ -90,6 +90,10 @@ def _normalized_product_identity(value: Any) -> str:
     return re.sub(r"[\W_]+", " ", text, flags=re.UNICODE).strip()
 
 
+def _is_nmck_source_name(value: Any) -> bool:
+    return "\u043d\u043c\u0446" in _normalized_product_identity(value)
+
+
 def _product_payloads_compatible(
     first: dict[str, Any],
     second: dict[str, Any],
@@ -135,32 +139,26 @@ def _merge_product_payload(
 def compact_document_analysis_results(
     results: list[DocumentAnalysisResult],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Keep every extracted purchase position for consolidation."""
-
-    input_product_count = sum(len(result.products) for result in results)
-    return (
-        [result.model_dump(mode="json") for result in results],
-        {
-            "inputProductCount": input_product_count,
-            "uniqueProductCount": input_product_count,
-            "removedDuplicateCount": 0,
-        },
-    )
-
     compact_results: list[dict[str, Any]] = []
     representatives: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     input_product_count = 0
     duplicate_count = 0
 
-    for result in results:
+    ordered_results = sorted(
+        enumerate(results),
+        key=lambda item: (not _is_nmck_source_name(item[1].fileName), item[0]),
+    )
+    for _, result in ordered_results:
         payload = result.model_dump(mode="json")
-        source_id = (
-            _normalized_product_identity(result.fileName)
-            or _normalized_product_identity(result.unitId)
-        )
         unique_products: list[dict[str, Any]] = []
         for candidate in payload.get("products", []):
             input_product_count += 1
+            reference = candidate.get("sourceReference") or {}
+            source_id = (
+                _normalized_product_identity(reference.get("fileName"))
+                or _normalized_product_identity(result.fileName)
+                or _normalized_product_identity(result.unitId)
+            )
             key = _normalized_product_identity(
                 candidate.get("productQuery") or candidate.get("product")
             )

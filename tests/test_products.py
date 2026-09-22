@@ -216,6 +216,54 @@ def test_merge_drops_unreferenced_llm_clothing_size_breakdown() -> None:
     assert any("size breakdown" in warning for warning in warnings)
 
 
+def test_merge_keeps_same_file_rows_and_prefers_nmck_copy_across_files() -> None:
+    contract_positions = [
+        TenderPosition(
+            product="\u0421\u0432\u0435\u0442\u0438\u043b\u044c\u043d\u0438\u043a \u043d\u0430\u0441\u0442\u0435\u043d\u043d\u044b\u0439",
+            quantity=1,
+            unit="\u0448\u0442",
+            sourceReference={
+                "fileName": "\u041f\u0440\u043e\u0435\u043a\u0442 \u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0430.docx",
+                "row": 2,
+                "productColumn": "A",
+            },
+        ),
+        TenderPosition(
+            product="\u0421\u0432\u0435\u0442\u0438\u043b\u044c\u043d\u0438\u043a \u043d\u0430\u0441\u0442\u0435\u043d\u043d\u044b\u0439",
+            quantity=1,
+            unit="\u0448\u0442",
+            sourceReference={
+                "fileName": "\u041f\u0440\u043e\u0435\u043a\u0442 \u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0430.docx",
+                "row": 3,
+                "productColumn": "A",
+            },
+        ),
+    ]
+    nmck_positions = [
+        TenderPosition(
+            product=position.product,
+            quantity=position.quantity,
+            unit=position.unit,
+            sourceReference={
+                    "fileName": "\u041e\u0431\u043e\u0441\u043d\u043e\u0432\u0430\u043d\u0438\u0435 \u041d\u041c\u0426\u0414.xlsx",
+                    "row": row,
+                    "productColumn": "B",
+            },
+        )
+        for row, position in enumerate(contract_positions, start=2)
+    ]
+
+    merged, warnings = merge_positions(contract_positions + nmck_positions, None)
+
+    assert len(merged) == 2
+    assert all(
+        position.sourceReference is not None
+        and "\u041d\u041c\u0426" in position.sourceReference.fileName
+        for position in merged
+    )
+    assert any("replicated product rows" in warning for warning in warnings)
+
+
 def test_invalid_structured_table_falls_back_to_text_extraction() -> None:
     text = chr(10).join(
         (

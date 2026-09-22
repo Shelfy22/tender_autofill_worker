@@ -1022,6 +1022,62 @@ def _position_source_key(position: TenderPosition) -> str:
     )
 
 
+def _is_nmck_source_name(value: Any) -> bool:
+    return "\u043d\u043c\u0446" in _word_table_key(value)
+
+
+def _cross_document_position_key(position: TenderPosition) -> tuple[str, str, float | None, str] | None:
+    reference = position.sourceReference
+    if reference is None or not _clean(reference.fileName):
+        return None
+    product = _position_name_key(position)
+    if not product:
+        return None
+    return (
+        product,
+        _word_table_key(position.requirements),
+        position.quantity,
+        _word_table_key(position.unit),
+    )
+
+
+def _deduplicate_cross_document_positions(
+    positions: list[TenderPosition],
+) -> tuple[list[TenderPosition], list[str]]:
+    """Keep every same-file row, but retain one document's copy of replicated rows."""
+    grouped: dict[tuple[str, str, float | None, str], list[tuple[int, TenderPosition]]] = {}
+    for index, position in enumerate(positions):
+        key = _cross_document_position_key(position)
+        if key is not None:
+            grouped.setdefault(key, []).append((index, position))
+
+    skipped_indexes: set[int] = set()
+    warnings: list[str] = []
+    for group in grouped.values():
+        by_file: dict[str, list[tuple[int, TenderPosition]]] = {}
+        for index, position in group:
+            file_name = _clean(position.sourceReference.fileName if position.sourceReference else "")
+            by_file.setdefault(file_name, []).append((index, position))
+        if len(by_file) < 2:
+            continue
+        canonical_file = min(
+            by_file,
+            key=lambda name: (not _is_nmck_source_name(name), min(index for index, _ in by_file[name])),
+        )
+        for file_name, copies in by_file.items():
+            if file_name == canonical_file:
+                continue
+            skipped_indexes.update(index for index, _ in copies)
+            warnings.append(
+                "Skipped replicated product rows from document "
+                f"{file_name}; retained {canonical_file}."
+            )
+    return (
+        [position for index, position in enumerate(positions) if index not in skipped_indexes],
+        list(dict.fromkeys(warnings)),
+    )
+
+
 def _apparel_family_key(position: TenderPosition) -> str:
     """Recognize a clothing family without treating its size grid as new goods."""
     value = _word_table_key(position.productQuery or position.product)
@@ -1228,4 +1284,5 @@ def merge_positions(
         result.append(position.model_copy(update=update))
         if len(result) >= max_positions:
             break
-    return result, warnings
+    result, cross_document_warnings = _deduplicate_cross_document_positions(result)
+    return result, warnings + cross_document_warnings
