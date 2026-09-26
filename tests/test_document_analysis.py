@@ -2,6 +2,7 @@ from app.config import Settings
 from app.models import (
     DocumentAnalysisResult,
     ParsedDocument,
+    ProductCharacteristic,
     ProductSourceReference,
     TenderPosition,
 )
@@ -372,6 +373,52 @@ def test_document_analysis_deduplicates_same_named_positions_across_documents() 
     }
     assert [len(result["products"]) for result in compact] == [1, 2]
     assert compact[0]["products"][0]["article"] == "TW-1"
+
+
+def test_document_analysis_merges_technical_characteristics_into_price_position() -> None:
+    results = [
+        DocumentAnalysisResult(
+            unitId="composite",
+            fileName="Извещение.doc",
+            products=[
+                TenderPosition(
+                    product="Светильник промышленный",
+                    quantity=2,
+                    unit="шт",
+                    sourceReference={
+                        "fileName": "Извещение.doc",
+                        "row": 20,
+                        "sectionRole": "technical_specification",
+                    },
+                    characteristics=[
+                        ProductCharacteristic(
+                            name="Мощность",
+                            value="40 Вт",
+                            associationMethod="same_row",
+                        )
+                    ],
+                ),
+                TenderPosition(
+                    product="Светильник промышленный",
+                    quantity=2,
+                    unit="шт",
+                    sourceReference={
+                        "fileName": "Извещение.doc",
+                        "row": 80,
+                        "sectionRole": "price_justification",
+                    },
+                ),
+            ],
+        )
+    ]
+
+    compact, debug = compact_document_analysis_results(results)
+
+    assert debug["removedDuplicateCount"] == 1
+    products = compact[0]["products"]
+    assert len(products) == 1
+    assert products[0]["sourceReference"]["sectionRole"] == "price_justification"
+    assert products[0]["characteristics"][0]["value"] == "40 Вт"
 
 
 def test_fallback_consolidation_attaches_characteristics_from_separate_document() -> None:

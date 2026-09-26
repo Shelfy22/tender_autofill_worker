@@ -20,6 +20,13 @@ from app.config import Settings
 from app.models import ParsedDocument
 from app.services.parsers.archives import UnsafeArchiveError, extract_archive
 from app.services.parsers.common import detect_file_type, parse_file
+from app.services.document_roles import (
+    COMPOSITE_ROLE,
+    CONTRACT_ROLE,
+    PRICE_ROLE,
+    TECHNICAL_ROLE,
+    classify_document_role,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +49,15 @@ def _classify_document_kind(original_name: str, resolved_name: str, text: str = 
         "\n".join((original_name, resolved_name, text[:2000]))
     ):
         return "marketing_research"
+    role = classify_document_role(original_name, resolved_name, text)
+    if role == TECHNICAL_ROLE:
+        return "technical"
+    if role == PRICE_ROLE:
+        return "price_justification"
+    if role == CONTRACT_ROLE:
+        return "contract"
+    if role == COMPOSITE_ROLE:
+        return "composite"
     return "document"
 
 

@@ -177,6 +177,7 @@ class ProductSourceReference(BaseModel):
     page: int | None = Field(default=None, ge=1)
     lotNumber: str = ""
     positionNumber: str = ""
+    sectionRole: str = "other"
     productColumn: str = ""
     quantityColumn: str = ""
     unitColumn: str = ""
@@ -201,6 +202,7 @@ class ProductSourceReference(BaseModel):
         "unitHeader",
         "lotNumber",
         "positionNumber",
+        "sectionRole",
         mode="before",
     )
     @classmethod

@@ -37,3 +37,29 @@ def test_word_parser_extracts_nested_procurement_table(tmp_path: Path) -> None:
     assert [(item.product, item.quantity, item.unit) for item in positions] == [
         ("\u0411\u043e\u043b\u0442 12x65", 1.0, "\u043a\u0433")
     ]
+
+
+def test_word_parser_preserves_section_and_table_order(tmp_path: Path) -> None:
+    document = Document()
+    document.add_paragraph("4. ТЕХНИЧЕСКОЕ ЗАДАНИЕ")
+    technical = document.add_table(rows=1, cols=1)
+    technical.cell(0, 0).text = "Характеристики товара"
+    document.add_paragraph("5. ОБОСНОВАНИЕ НАЧАЛЬНОЙ МАКСИМАЛЬНОЙ ЦЕНЫ")
+    price = document.add_table(rows=1, cols=1)
+    price.cell(0, 0).text = "Перечень товаров и цены"
+    document.add_paragraph("Техническая документация " * 30)
+    path = tmp_path / "composite.docx"
+    document.save(path)
+
+    text, status, _ = extract_word_text(
+        path,
+        "docx",
+        Settings(postgres_dsn="postgresql://user:pass@localhost/db"),
+    )
+
+    assert status == "ok"
+    assert text.index("4. ТЕХНИЧЕСКОЕ ЗАДАНИЕ") < text.index("Таблица Word 1")
+    assert text.index("Таблица Word 1") < text.index(
+        "5. ОБОСНОВАНИЕ НАЧАЛЬНОЙ МАКСИМАЛЬНОЙ ЦЕНЫ"
+    )
+    assert text.index("5. ОБОСНОВАНИЕ") < text.index("Таблица Word 2")

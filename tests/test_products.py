@@ -1,5 +1,6 @@
 from app.models import (
     DocumentPriceSource,
+    ProductCharacteristic,
     ProductMatchItem,
     TenderPosition,
     TenderPositionsResponse,
@@ -173,6 +174,63 @@ def test_word_companion_characteristics_enrich_catalog_query() -> None:
     assert "\u0422\u0430\u0431\u043b\u0438\u0446\u0430 Word 2" in positions[0].evidence
 
 
+def test_word_rows_align_from_right_and_split_companion_characteristics() -> None:
+    positions = extract_deterministic_positions(
+        "\n".join(
+            (
+                "Таблица Word 1",
+                "Строка 1: A: № п/п | B: ОКПД-2 | C: Ограничения | "
+                "D: Основание | E: Наименование продукции | "
+                "F: Предложение эквивалентного товара | G: Кол-во | H: Ед. изм.",
+                "Строка 2: A: 1 | B: 2 | C: 3 | D: 4 | E: 5 | F: 6 | G: 7",
+                "Строка 3: A:  | B: 27.33.13.110 | C: х | "
+                "D: Вилка промышленная 32А 380В IP44 или эквивалент | "
+                "E: допускается | F: 10 | G: шт.",
+                "Таблица Word 2",
+                "Строка 1: A: № п/п | B: Наименование продукции | "
+                "C: Технические характеристики",
+                "Строка 2: A: 1 | B: 2 | C: 4",
+                "Строка 3: A:  | "
+                "B: Вилка промышленная 32А 380В IP44 или эквивалент | "
+                "C: Номинальный ток: 32 А; Номинальное напряжение: 380 В; "
+                "Степень защиты: IP44",
+            )
+        )
+    )
+
+    assert len(positions) == 1
+    assert positions[0].product == "Вилка промышленная 32А 380В IP44"
+    assert positions[0].quantity == 10
+    assert positions[0].unit == "шт."
+    assert [(item.name, item.value) for item in positions[0].characteristics] == [
+        ("Номинальный ток", "32 А"),
+        ("Номинальное напряжение", "380 В"),
+        ("Степень защиты", "IP44"),
+    ]
+
+
+def test_word_companion_blank_name_uses_matching_source_row() -> None:
+    positions = extract_deterministic_positions(
+        "\n".join(
+            (
+                "Таблица Word 1",
+                "Строка 1: A: Наименование | B: Кол-во | C: Ед. изм.",
+                "Строка 2: A: Автомат 50А | B: 1 | C: шт",
+                "Строка 3: A: Автомат 63А | B: 1 | C: шт",
+                "Таблица Word 2",
+                "Строка 1: A: Наименование | B: Технические характеристики",
+                "Строка 2: A: Автомат 50А | B: Номинальный ток: 50 А",
+                "Строка 3: A:  | B: Номинальный ток: 63 А",
+            )
+        )
+    )
+
+    assert len(positions) == 2
+    assert positions[0].characteristics[0].value == "50 А"
+    assert positions[1].characteristics[0].value == "63 А"
+    assert positions[1].characteristics[0].associationMethod == "same_row"
+
+
 def test_merge_drops_unreferenced_llm_clothing_size_breakdown() -> None:
     deterministic = [
         TenderPosition(
@@ -262,6 +320,167 @@ def test_merge_keeps_same_file_rows_and_prefers_nmck_copy_across_files() -> None
         for position in merged
     )
     assert any("replicated product rows" in warning for warning in warnings)
+
+
+def test_merge_uses_price_list_and_adds_characteristics_from_technical_section() -> None:
+    technical = TenderPosition(
+        product="Светильник промышленный",
+        quantity=2,
+        unit="шт",
+        requirements="Мощность: 40 Вт",
+        characteristics=[
+            ProductCharacteristic(
+                name="Мощность",
+                value="40 Вт",
+                associationConfidence=0.98,
+                associationMethod="same_row",
+                associationStatus="confirmed",
+            )
+        ],
+        sourceReference={
+            "fileName": "Извещение.doc",
+            "row": 20,
+            "sectionRole": "technical_specification",
+        },
+    )
+    price = TenderPosition(
+        product="Светильник промышленный",
+        quantity=2,
+        unit="шт",
+        sourceReference={
+            "fileName": "Извещение.doc",
+            "row": 80,
+            "sectionRole": "price_justification",
+        },
+    )
+
+    merged, warnings = merge_positions([technical, price], None)
+
+    assert len(merged) == 1
+    assert merged[0].sourceReference is not None
+    assert merged[0].sourceReference.sectionRole == "price_justification"
+    assert [item.value for item in merged[0].characteristics] == ["40 Вт"]
+    assert any("replicated product rows" in warning for warning in warnings)
+
+
+def test_repeated_names_are_paired_between_price_and_technical_sections() -> None:
+    price_positions = [
+        TenderPosition(
+            product="Лампа настенная",
+            quantity=1,
+            unit="шт",
+            sourceReference={
+                "fileName": "Извещение.doc",
+                "row": row,
+                "sectionRole": "price_justification",
+            },
+        )
+        for row in (80, 81)
+    ]
+    technical_positions = [
+        TenderPosition(
+            product="Лампа настенная",
+            quantity=1,
+            unit="шт",
+            characteristics=[
+                ProductCharacteristic(
+                    name="Мощность",
+                    value=value,
+                    associationMethod="same_row",
+                )
+            ],
+            sourceReference={
+                "fileName": "Извещение.doc",
+                "row": row,
+                "sectionRole": "technical_specification",
+            },
+        )
+        for row, value in ((20, "20 Вт"), (21, "40 Вт"))
+    ]
+
+    merged, _ = merge_positions(technical_positions + price_positions, None)
+
+    assert len(merged) == 2
+    assert [[item.value for item in position.characteristics] for position in merged] == [
+        ["20 Вт"],
+        ["40 Вт"],
+    ]
+
+
+def test_aligned_sections_merge_a_small_number_of_different_product_labels() -> None:
+    price_names = [
+        "Лампа A",
+        "Лампа B",
+        "Светильник ЭРА 80 Вт",
+        "Лампа D",
+        "Лампа E",
+    ]
+    technical_names = [
+        "Лампа A",
+        "Лампа B",
+        "Светильник LEDCRAFT 100 Вт",
+        "Лампа D",
+        "Лампа E",
+    ]
+    price_positions = [
+        TenderPosition(
+            product=name,
+            quantity=index,
+            unit="шт",
+            sourceReference={
+                "fileName": "Извещение.doc",
+                "row": index + 70,
+                "sectionRole": "price_justification",
+            },
+        )
+        for index, name in enumerate(price_names, start=1)
+    ]
+    technical_positions = [
+        TenderPosition(
+            product=name,
+            quantity=index,
+            unit="шт",
+            characteristics=[
+                ProductCharacteristic(
+                    name="Мощность",
+                    value=f"{index * 10} Вт",
+                    associationMethod="same_row",
+                )
+            ],
+            sourceReference={
+                "fileName": "Извещение.doc",
+                "row": index + 10,
+                "sectionRole": "technical_specification",
+            },
+        )
+        for index, name in enumerate(technical_names, start=1)
+    ]
+
+    merged, warnings = merge_positions(technical_positions + price_positions, None)
+
+    assert [position.product for position in merged] == price_names
+    assert [
+        position.characteristics[0].value for position in merged
+    ] == ["10 Вт", "20 Вт", "30 Вт", "40 Вт", "50 Вт"]
+    assert any("aligned position order" in warning for warning in warnings)
+
+
+def test_repeated_merged_word_row_is_not_extracted_as_a_product() -> None:
+    text = "\n".join(
+        (
+            "4. ТЕХНИЧЕСКОЕ ЗАДАНИЕ",
+            "Таблица Word 1",
+            "Строка 1: A: Наименование товара | B: Ед. изм. | C: Количество",
+            "Строка 2: A: ИС-618 | B: ИС-618 | C: ИС-618",
+            "Строка 3: A: Лампа светодиодная | B: шт | C: 80",
+        )
+    )
+
+    positions = extract_deterministic_positions(text)
+
+    assert [(item.product, item.quantity) for item in positions] == [
+        ("Лампа светодиодная", 80)
+    ]
 
 
 def test_invalid_structured_table_falls_back_to_text_extraction() -> None:

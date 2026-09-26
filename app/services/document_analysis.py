@@ -19,6 +19,12 @@ from app.models import (
     TenderPosition,
 )
 from app.services.product_characteristics import ensure_position_identity
+from app.services.document_roles import (
+    COMPOSITE_ROLE,
+    OTHER_ROLE,
+    classify_document_role,
+    source_role_priority,
+)
 
 
 def _sha256(value: str) -> str:
@@ -93,8 +99,31 @@ def _normalized_product_identity(value: Any) -> str:
     return re.sub(r"[\W_]+", " ", text, flags=re.UNICODE).strip()
 
 
-def _is_nmck_source_name(value: Any) -> bool:
-    return "\u043d\u043c\u0446" in _normalized_product_identity(value)
+def _product_dedup_identity(value: Any) -> str:
+    text = re.sub(
+        r"\s*[([]?\s*(?:или\s+)?(?:аналог|эквивалент)\s*[)\]]?\s*$",
+        "",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+    return _normalized_product_identity(text)
+
+
+def _payload_source_role(
+    candidate: dict[str, Any],
+    fallback_file_name: str = "",
+) -> str:
+    reference = candidate.get("sourceReference")
+    reference = reference if isinstance(reference, dict) else {}
+    explicit = str(reference.get("sectionRole") or "").strip()
+    if explicit and explicit not in {OTHER_ROLE, COMPOSITE_ROLE}:
+        return explicit
+    return classify_document_role(
+        reference.get("fileName") or fallback_file_name,
+        reference.get("sheet"),
+        reference.get("table"),
+        candidate.get("evidence"),
+    )
 
 
 def _product_payloads_compatible(
@@ -176,32 +205,64 @@ def compact_document_analysis_results(
     representatives: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     input_product_count = 0
     duplicate_count = 0
+    merged_source_targets: set[tuple[str, int]] = set()
 
     ordered_results = sorted(
         enumerate(results),
-        key=lambda item: (not _is_nmck_source_name(item[1].fileName), item[0]),
+        key=lambda item: (
+            min(
+                (
+                    source_role_priority(
+                        _payload_source_role(
+                            product.model_dump(mode="json"),
+                            item[1].fileName,
+                        )
+                    )
+                    for product in item[1].products
+                ),
+                default=source_role_priority(
+                    classify_document_role(item[1].fileName)
+                ),
+            ),
+            item[0],
+        ),
     )
     for _, result in ordered_results:
         payload = result.model_dump(mode="json")
         unique_products: list[dict[str, Any]] = []
-        for candidate in payload.get("products", []):
+        candidates = sorted(
+            enumerate(payload.get("products", [])),
+            key=lambda item: (
+                source_role_priority(
+                    _payload_source_role(item[1], result.fileName)
+                ),
+                item[0],
+            ),
+        )
+        for _, candidate in candidates:
             input_product_count += 1
             reference = candidate.get("sourceReference") or {}
+            source_role = _payload_source_role(candidate, result.fileName)
             source_id = (
                 _normalized_product_identity(reference.get("fileName"))
                 or _normalized_product_identity(result.fileName)
                 or _normalized_product_identity(result.unitId)
             )
-            key = _normalized_product_identity(
-                candidate.get("productQuery") or candidate.get("product")
+            source_id = f"{source_id}:{source_role}"
+            key = _product_dedup_identity(
+                candidate.get("product") or candidate.get("productQuery")
             )
             duplicate_of: dict[str, Any] | None = None
             if key:
                 for existing_source, existing in representatives.get(key, []):
                     if existing_source == source_id:
                         continue
+                    pair_key = (source_id, id(existing))
+                    if pair_key in merged_source_targets:
+                        continue
                     if _product_payloads_compatible(existing, candidate):
                         duplicate_of = existing
+                        merged_source_targets.add(pair_key)
                         break
             if duplicate_of is not None:
                 _merge_product_payload(duplicate_of, candidate)
@@ -647,10 +708,29 @@ def result_from_unit(
         )
         if not reference.fileName:
             reference = reference.model_copy(update={"fileName": unit.fileName})
+        if not reference.sectionRole or reference.sectionRole in {
+            OTHER_ROLE,
+            COMPOSITE_ROLE,
+        }:
+            inferred_role = classify_document_role(
+                reference.fileName or unit.fileName,
+                reference.sheet,
+                reference.table,
+                raw_position.evidence,
+            )
+            if inferred_role in {OTHER_ROLE, COMPOSITE_ROLE}:
+                inferred_role = {
+                    "technical": "technical_specification",
+                    "specification": "technical_specification",
+                    "price_justification": "price_justification",
+                    "contract": "contract",
+                }.get(unit.documentKind.casefold(), inferred_role)
+            reference = reference.model_copy(update={"sectionRole": inferred_role})
         characteristics = []
         for characteristic in raw_position.characteristics:
             source_reference = dict(characteristic.sourceReference)
             source_reference.setdefault("fileName", unit.fileName)
+            source_reference.setdefault("sectionRole", reference.sectionRole)
             characteristics.append(
                 characteristic.model_copy(update={"sourceReference": source_reference})
             )
@@ -667,10 +747,17 @@ def result_from_unit(
     for raw_set in parsed.characteristicSets:
         source_reference = dict(raw_set.sourceReference)
         source_reference.setdefault("fileName", unit.fileName)
+        set_role = classify_document_role(
+            unit.fileName,
+            raw_set.evidence,
+            raw_set.productHint,
+        )
+        source_reference.setdefault("sectionRole", set_role)
         characteristics = []
         for characteristic in raw_set.characteristics:
             characteristic_source = dict(characteristic.sourceReference)
             characteristic_source.setdefault("fileName", unit.fileName)
+            characteristic_source.setdefault("sectionRole", set_role)
             characteristics.append(
                 characteristic.model_copy(update={"sourceReference": characteristic_source})
             )

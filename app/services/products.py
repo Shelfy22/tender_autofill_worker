@@ -13,6 +13,13 @@ from app.models import (
     TenderPosition,
     TenderPositionsResponse,
 )
+from app.services.document_roles import (
+    COMPOSITE_ROLE,
+    OTHER_ROLE,
+    classify_document_role,
+    detect_section_role,
+    source_role_priority,
+)
 
 
 _ONLY_ROW_NUMBER_PATTERN = re.compile(
@@ -80,7 +87,7 @@ _POSITION_PRICE_PATTERN = re.compile(
 )
 
 
-UNITS = r"штука|штук|шт\.?|комплект|компл\.?|набор|ед\.?|метр|м|кг|л|упак\.?"
+UNITS = r"штука|штук|шт\.?|комплект|компл\.?|набор|ед\.?|метр|м|кг|л|уп\.?|упак\.?"
 
 
 def _clean(value: Any) -> str:
@@ -343,6 +350,11 @@ def _word_table_key(value: Any) -> str:
     ).strip()
 
 
+def _is_repeated_merged_row(cells: dict[str, str]) -> bool:
+    values = [_word_table_key(value) for value in cells.values() if _clean(value)]
+    return len(values) >= 3 and len(set(values)) == 1
+
+
 def _word_table_serial(cells: dict[str, str]) -> str:
     for _, value in sorted(cells.items(), key=lambda item: _excel_column_number(item[0])):
         match = re.fullmatch(r"\s*(\d{1,5})\s*[.)]?\s*", value)
@@ -377,31 +389,90 @@ def _word_table_characteristic_columns(cells: dict[str, str]) -> tuple[str, list
     return product_column, characteristic_columns
 
 
+def _word_table_characteristics(
+    *,
+    value: Any,
+    fallback_name: str,
+    table_label: str,
+    section_role: str,
+    column: str,
+    association_method: str,
+    association_confidence: float,
+) -> list[ProductCharacteristic]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    parts = re.split(r"\s*;\s*(?=[^;:]{1,160}:)", text)
+    if len(parts) == 1 and ";" in text:
+        parts = re.split(r"\s*;\s*", text)
+    result: list[ProductCharacteristic] = []
+    for part in parts:
+        raw_part = str(part or "").strip()
+        if not raw_part:
+            continue
+        name, separator, characteristic_value = raw_part.partition(":")
+        if not separator:
+            tab_parts = re.split(r"\t+", raw_part, maxsplit=1)
+            if len(tab_parts) == 2:
+                name, characteristic_value = tab_parts
+                separator = "\t"
+        if not separator or not _clean(characteristic_value):
+            name = fallback_name
+            characteristic_value = raw_part
+        result.append(
+            ProductCharacteristic(
+                name=_clean(name) or fallback_name,
+                value=_clean(characteristic_value),
+                evidence=table_label,
+                sourceReference={
+                    "table": table_label,
+                    "column": column,
+                    "sectionRole": section_role,
+                },
+                confidence="high",
+                associationConfidence=association_confidence,
+                associationMethod=association_method,
+                associationStatus="confirmed",
+            )
+        )
+    return result
+
+
 def _enrich_structured_table_positions_with_characteristics(
     text: str,
     positions: list[TenderPosition],
 ) -> list[TenderPosition]:
     """Attach a companion table's requirements to its numbered product rows."""
-    tables: list[tuple[str, int, list[dict[str, str]]]] = []
+    tables: list[
+        tuple[str, int, str, list[tuple[int, dict[str, str]]]]
+    ] = []
     current_type = ""
     current_number: int | None = None
-    current_rows: list[dict[str, str]] = []
+    current_section_role = OTHER_ROLE
+    current_table_role = OTHER_ROLE
+    current_rows: list[tuple[int, dict[str, str]]] = []
     for line in text.splitlines():
+        detected_role = detect_section_role(line)
+        if detected_role != OTHER_ROLE:
+            current_section_role = detected_role
         marker = _STRUCTURED_TABLE_MARKER_PATTERN.match(line)
         if marker:
             if current_number is not None:
-                tables.append((current_type, current_number, current_rows))
+                tables.append(
+                    (current_type, current_number, current_table_role, current_rows)
+                )
             current_type = marker.group(1)
             current_number = int(marker.group(2))
+            current_table_role = current_section_role
             current_rows = []
             continue
         row = _WORD_TABLE_ROW_PATTERN.match(line)
         if current_number is not None and row:
             cells = _parse_structured_cells(row.group(2))
             if cells:
-                current_rows.append(cells)
+                current_rows.append((int(row.group(1)), cells))
     if current_number is not None:
-        tables.append((current_type, current_number, current_rows))
+        tables.append((current_type, current_number, current_table_role, current_rows))
 
     requirements_by_key: dict[
         tuple[str, str], tuple[str, str, list[ProductCharacteristic]]
@@ -409,38 +480,72 @@ def _enrich_structured_table_positions_with_characteristics(
     requirements_by_name: dict[
         str, list[tuple[str, str, list[ProductCharacteristic]]]
     ] = {}
-    for table_type, table_number, rows in tables:
+    requirements_by_row: dict[
+        tuple[str, int], list[tuple[str, str, list[ProductCharacteristic]]]
+    ] = {}
+    position_rows_by_table: dict[str, set[int]] = {}
+    for position in positions:
+        reference = position.sourceReference
+        if reference is None or reference.row is None or not reference.table:
+            continue
+        position_rows_by_table.setdefault(reference.table, set()).add(reference.row)
+    table_metadata = {
+        (table_type.casefold(), table_number): (table_role, len(rows))
+        for table_type, table_number, table_role, rows in tables
+    }
+    for table_type, table_number, table_role, rows in tables:
         if len(rows) < 2:
             continue
-        product_column, characteristic_columns = _word_table_characteristic_columns(rows[0])
+        companion_table = ""
+        previous_metadata = table_metadata.get(
+            (table_type.casefold(), table_number - 1)
+        )
+        if previous_metadata == (table_role, len(rows)):
+            companion_table = f"Таблица {table_type} {table_number - 1}"
+        header_cells = rows[0][1]
+        product_column, characteristic_columns = _word_table_characteristic_columns(
+            header_cells
+        )
         if not product_column or not characteristic_columns:
             continue
         records: list[dict[str, Any]] = []
         last_record: dict[str, Any] | None = None
-        for cells in rows[1:]:
+        for row_number, cells in rows[1:]:
             product = _clean(cells.get(product_column))
             serial = _word_table_serial(cells)
-            characteristics = [
-                ProductCharacteristic(
-                    name=_clean(rows[0].get(column)),
-                    value=_clean(cells.get(column)),
-                    evidence=f"Таблица {table_type} {table_number}",
-                    sourceReference={
-                        "table": f"Таблица {table_type} {table_number}",
-                        "column": column,
-                    },
-                    confidence="high",
-                    associationConfidence=0.98 if product else 0.90,
-                    associationMethod="same_row" if product else "continuation_row",
-                    associationStatus="confirmed",
+            table_label = f"Таблица {table_type} {table_number}"
+            characteristics: list[ProductCharacteristic] = []
+            row_aligned = (
+                bool(companion_table)
+                and row_number in position_rows_by_table.get(companion_table, set())
+            )
+            for column in characteristic_columns:
+                characteristics.extend(
+                    _word_table_characteristics(
+                        value=cells.get(column),
+                        fallback_name=_clean(header_cells.get(column)),
+                        table_label=table_label,
+                        section_role=table_role,
+                        column=column,
+                        association_method=(
+                            "same_row" if product or row_aligned else "continuation_row"
+                        ),
+                        association_confidence=0.98 if product else 0.96 if row_aligned else 0.90,
+                    )
                 )
-                for column in characteristic_columns
-                if _clean(cells.get(column))
-            ]
             if product:
                 last_record = {
                     "product": product,
                     "serial": serial,
+                    "row": row_number,
+                    "characteristics": characteristics,
+                }
+                records.append(last_record)
+            elif characteristics and row_aligned:
+                last_record = {
+                    "product": "",
+                    "serial": serial,
+                    "row": row_number,
                     "characteristics": characteristics,
                 }
                 records.append(last_record)
@@ -452,7 +557,9 @@ def _enrich_structured_table_positions_with_characteristics(
                 last_record["characteristics"].extend(characteristics)
 
         for record in records:
-            product_key = _word_table_key(record["product"])
+            product_key = _word_table_key(
+                _normalize_extracted_product_name(record["product"])
+            )
             characteristics = record["characteristics"]
             requirements = _clean(
                 "; ".join(
@@ -460,24 +567,29 @@ def _enrich_structured_table_positions_with_characteristics(
                     for item in characteristics
                 )
             )
-            if not product_key or not requirements:
+            if not requirements:
                 continue
             serial = record["serial"]
             source = (
                 f"\u0422\u0430\u0431\u043b\u0438\u0446\u0430 {table_type} {table_number}: "
                 f"{requirements}"
             )
-            if serial:
+            if serial and product_key:
                 requirements_by_key[(product_key, serial)] = (
                     requirements,
                     source,
                     characteristics,
                 )
-            requirements_by_name.setdefault(product_key, []).append(
-                (requirements, source, characteristics)
-            )
+            linked_value = (requirements, source, characteristics)
+            if product_key:
+                requirements_by_name.setdefault(product_key, []).append(linked_value)
+            if companion_table:
+                requirements_by_row.setdefault(
+                    (companion_table, record["row"]),
+                    [],
+                ).append(linked_value)
 
-    if not requirements_by_key and not requirements_by_name:
+    if not requirements_by_key and not requirements_by_name and not requirements_by_row:
         return positions
 
     enriched: list[TenderPosition] = []
@@ -491,6 +603,16 @@ def _enrich_structured_table_positions_with_characteristics(
         name_matches = requirements_by_name.get(product_key, [])
         if linked is None and len(name_matches) == 1:
             linked = name_matches[0]
+        if linked is None and position.sourceReference is not None:
+            row_matches = requirements_by_row.get(
+                (
+                    position.sourceReference.table,
+                    position.sourceReference.row or 0,
+                ),
+                [],
+            )
+            if len(row_matches) == 1:
+                linked = row_matches[0]
         if linked is None:
             enriched.append(position)
             continue
@@ -541,6 +663,30 @@ def _excel_column_number(value: str) -> int:
             return 0
         number = number * 26 + ord(character) - ord("A") + 1
     return number
+
+
+def _excel_column_name(number: int) -> str:
+    name = ""
+    while number > 0:
+        number, remainder = divmod(number - 1, 26)
+        name = chr(ord("A") + remainder) + name
+    return name
+
+
+def _right_aligned_header_columns(
+    header_columns: dict[str, str],
+    header_width: int,
+    cells: dict[str, str],
+) -> dict[str, str]:
+    row_width = max((_excel_column_number(column) for column in cells), default=0)
+    shift = row_width - header_width
+    if not header_width or shift >= 0:
+        return header_columns
+    adjusted: dict[str, str] = {}
+    for role, column in header_columns.items():
+        number = _excel_column_number(column) + shift
+        adjusted[role] = _excel_column_name(number) if number > 0 else column
+    return adjusted
 
 
 def _plain_number(value: Any) -> float | None:
@@ -866,6 +1012,7 @@ def extract_deterministic_positions(
                 source_reference=ProductSourceReference(
                     fileName=table.fileName,
                     sheet=table.sheet,
+                    sectionRole=classify_document_role(table.fileName, table.sheet),
                     row=row.row,
                     productColumn=product_column,
                     quantityColumn=quantity_column,
@@ -891,25 +1038,48 @@ def extract_deterministic_positions(
     current_sheet = ""
     header_columns: dict[str, str] = {}
     header_labels: dict[str, str] = {}
+    header_width = 0
+    current_section_role = OTHER_ROLE
     for line in text.splitlines():
         if line.startswith("--- ДОКУМЕНТ "):
             current_file = ""
             current_sheet = ""
             header_columns = {}
             header_labels = {}
+            header_width = 0
+            current_section_role = OTHER_ROLE
             continue
+        detected_section_role = detect_section_role(line)
+        if detected_section_role != OTHER_ROLE:
+            current_section_role = detected_section_role
         if line.startswith(("Таблица Word ", "Таблица PDF ", "Таблица RTF ")):
             current_sheet = line.strip()
             header_columns = {}
             header_labels = {}
+            header_width = 0
             continue
         if line.lower().startswith("filename:"):
             current_file = line.split(":", 1)[1].strip()
+            file_role = classify_document_role(current_file)
+            if file_role not in {OTHER_ROLE, COMPOSITE_ROLE}:
+                current_section_role = file_role
+            continue
+        if line.lower().startswith("documentkind:"):
+            document_kind = line.split(":", 1)[1].strip()
+            kind_role = {
+                "technical": "technical_specification",
+                "specification": "technical_specification",
+                "price_justification": "price_justification",
+                "contract": "contract",
+            }.get(document_kind.casefold(), OTHER_ROLE)
+            if kind_role != OTHER_ROLE:
+                current_section_role = kind_role
             continue
         if line.startswith("Лист:"):
             current_sheet = line.split(":", 1)[1].strip()
             header_columns = {}
             header_labels = {}
+            header_width = 0
             continue
         row_match = re.match(r"^Строка\s+(\d+)\s*:\s*(.+)$", line, re.I)
         if not row_match:
@@ -917,6 +1087,8 @@ def extract_deterministic_positions(
         row_number = int(row_match.group(1))
         cells = _parse_structured_cells(row_match.group(2))
         if not cells:
+            continue
+        if _is_repeated_merged_row(cells):
             continue
         detected_headers = {
             role: (column, value)
@@ -932,23 +1104,56 @@ def extract_deterministic_positions(
         }
         is_header_row = "product" in detected_headers or len(core_header_roles) >= 2
         if is_header_row:
+            header_width = max(
+                header_width,
+                max((_excel_column_number(column) for column in cells), default=0),
+            )
             for role, (column, label) in detected_headers.items():
                 header_columns[role] = column
                 header_labels[role] = label
             continue
         if not {"product", "quantity"}.issubset(header_columns):
             continue
-        product_column = header_columns["product"]
-        quantity_column = header_columns["quantity"]
-        unit, unit_column = _table_unit(cells, header_columns, header_labels)
+        active_header_columns = header_columns
+        product_column = active_header_columns["product"]
+        quantity_column = active_header_columns["quantity"]
+        unit, unit_column = _table_unit(cells, active_header_columns, header_labels)
         name = cells.get(product_column, "")
         raw_quantity = cells.get(quantity_column)
+        if not name or not unit or raw_quantity is None:
+            adjusted_columns = _right_aligned_header_columns(
+                header_columns,
+                header_width,
+                cells,
+            )
+            adjusted_unit, adjusted_unit_column = _table_unit(
+                cells,
+                adjusted_columns,
+                header_labels,
+            )
+            adjusted_product_column = adjusted_columns["product"]
+            adjusted_quantity_column = adjusted_columns["quantity"]
+            adjusted_name = cells.get(adjusted_product_column, "")
+            adjusted_quantity = cells.get(adjusted_quantity_column)
+            if (
+                adjusted_name
+                and adjusted_quantity is not None
+                and parse_quantity(adjusted_quantity) is not None
+                and re.fullmatch(UNITS, adjusted_unit, re.IGNORECASE)
+            ):
+                active_header_columns = adjusted_columns
+                product_column = adjusted_product_column
+                quantity_column = adjusted_quantity_column
+                unit = adjusted_unit
+                unit_column = adjusted_unit_column
+                name = adjusted_name
+                raw_quantity = adjusted_quantity
         if not name or not unit or raw_quantity is None:
             continue
         if _clean(line) in structured_spreadsheet_rows:
             continue
-        unit_price_column = header_columns.get("unit_price", "")
-        line_total_column = header_columns.get("line_total", "")
+        unit_price_column = active_header_columns.get("unit_price", "")
+        line_total_column = active_header_columns.get("line_total", "")
         raw_unit_price = cells.get(unit_price_column) if unit_price_column else None
         raw_line_total = cells.get(line_total_column) if line_total_column else None
         has_document_price = raw_unit_price not in {None, ""} or raw_line_total not in {None, ""}
@@ -996,6 +1201,7 @@ def extract_deterministic_positions(
                 unitHeader=header_labels.get("unit", ""),
                 table=current_sheet if current_sheet.startswith("Таблица ") else "",
                 positionNumber=_word_table_serial(cells),
+                sectionRole=current_section_role,
                 extractionMethod="excel_deterministic",
             ),
         )
@@ -1181,7 +1387,7 @@ def extract_seldon_positions(purchase: dict[str, Any]) -> list[TenderPosition]:
 
 
 def _position_name_key(position: TenderPosition) -> str:
-    value = _clean(position.productQuery or position.product).lower().replace("ё", "е")
+    value = _clean(position.product).lower().replace("ё", "е")
     description_match = _PRODUCT_DESCRIPTION_SEPARATOR_PATTERN.match(value)
     if description_match:
         value = _clean(description_match.group(1))
@@ -1211,8 +1417,13 @@ def _position_source_key(position: TenderPosition) -> str:
     )
 
 
-def _is_nmck_source_name(value: Any) -> bool:
-    return "\u043d\u043c\u0446" in _word_table_key(value)
+def _position_source_role(position: TenderPosition) -> str:
+    reference = position.sourceReference
+    if reference is None:
+        return OTHER_ROLE
+    if reference.sectionRole and reference.sectionRole != OTHER_ROLE:
+        return reference.sectionRole
+    return classify_document_role(reference.fileName, reference.sheet, reference.table)
 
 
 def _cross_document_position_key(position: TenderPosition) -> tuple[str, str, float | None, str] | None:
@@ -1227,36 +1438,157 @@ def _cross_document_position_key(position: TenderPosition) -> tuple[str, str, fl
         or _word_table_key(position.model)
         or (
             f"{_word_table_key(position.lotNumber)}:{_word_table_key(position.positionNumber)}"
-            if position.positionNumber
+            if position.lotNumber and position.positionNumber
             else ""
         )
-        or _word_table_key(position.requirements)
     )
     return (product, strong_identity, position.quantity, _word_table_key(position.unit))
+
+
+def _merge_replicated_position_details(
+    canonical: TenderPosition,
+    duplicate: TenderPosition,
+) -> TenderPosition:
+    updates: dict[str, Any] = {}
+    characteristics = list(canonical.characteristics)
+    seen_characteristics = {
+        (_word_table_key(item.name), _word_table_key(item.value))
+        for item in characteristics
+    }
+    for characteristic in duplicate.characteristics:
+        key = (
+            _word_table_key(characteristic.name),
+            _word_table_key(characteristic.value),
+        )
+        if key not in seen_characteristics:
+            characteristics.append(characteristic)
+            seen_characteristics.add(key)
+    if characteristics != canonical.characteristics:
+        updates["characteristics"] = characteristics
+
+    duplicate_requirements = _clean(duplicate.requirements)
+    canonical_requirements = _clean(canonical.requirements)
+    if duplicate_requirements and duplicate_requirements not in canonical_requirements:
+        updates["requirements"] = _clean(
+            "; ".join(filter(None, (canonical_requirements, duplicate_requirements)))
+        )
+
+    duplicate_evidence = _clean(duplicate.evidence)
+    canonical_evidence = _clean(canonical.evidence)
+    if duplicate_evidence and duplicate_evidence not in canonical_evidence:
+        updates["evidence"] = _clean(
+            " | ".join(filter(None, (canonical_evidence, duplicate_evidence)))
+        )[:1200]
+    return canonical.model_copy(update=updates) if updates else canonical
+
+
+def _aligned_section_duplicate_pairs(
+    positions: list[TenderPosition],
+) -> list[tuple[int, int]]:
+    by_scope: dict[tuple[str, str], list[tuple[int, TenderPosition]]] = {}
+    for index, position in enumerate(positions):
+        reference = position.sourceReference
+        if reference is None:
+            continue
+        file_key = _word_table_key(reference.fileName)
+        role = _position_source_role(position)
+        if not file_key or role not in {"price_justification", "technical_specification"}:
+            continue
+        by_scope.setdefault((file_key, role), []).append((index, position))
+
+    options: list[tuple[float, float, tuple[str, str], tuple[str, str]]] = []
+    price_scopes = [scope for scope in by_scope if scope[1] == "price_justification"]
+    technical_scopes = [
+        scope for scope in by_scope if scope[1] == "technical_specification"
+    ]
+    for price_scope in price_scopes:
+        price_rows = by_scope[price_scope]
+        for technical_scope in technical_scopes:
+            technical_rows = by_scope[technical_scope]
+            if len(price_rows) != len(technical_rows) or len(price_rows) < 4:
+                continue
+            aligned_identity = 0
+            aligned_grid = 0
+            for (_, price), (_, technical) in zip(price_rows, technical_rows):
+                same_quantity = price.quantity == technical.quantity
+                same_unit = _word_table_key(price.unit) == _word_table_key(technical.unit)
+                if same_quantity and same_unit:
+                    aligned_grid += 1
+                    if _position_name_key(price) == _position_name_key(technical):
+                        aligned_identity += 1
+            identity_ratio = aligned_identity / len(price_rows)
+            grid_ratio = aligned_grid / len(price_rows)
+            if identity_ratio >= 0.75 and grid_ratio >= 0.90:
+                options.append(
+                    (identity_ratio, grid_ratio, price_scope, technical_scope)
+                )
+
+    pairs: list[tuple[int, int]] = []
+    used_price_scopes: set[tuple[str, str]] = set()
+    used_technical_scopes: set[tuple[str, str]] = set()
+    for _, _, price_scope, technical_scope in sorted(options, reverse=True):
+        if (
+            price_scope in used_price_scopes
+            or technical_scope in used_technical_scopes
+        ):
+            continue
+        used_price_scopes.add(price_scope)
+        used_technical_scopes.add(technical_scope)
+        pairs.extend(
+            (price_entry[0], technical_entry[0])
+            for price_entry, technical_entry in zip(
+                by_scope[price_scope],
+                by_scope[technical_scope],
+            )
+        )
+    return pairs
 
 
 def _deduplicate_cross_document_positions(
     positions: list[TenderPosition],
 ) -> tuple[list[TenderPosition], list[str]]:
     """Keep every same-file row, but retain one document's copy of replicated rows."""
+    skipped_indexes: set[int] = set()
+    warnings: list[str] = []
+    aligned_pairs = _aligned_section_duplicate_pairs(positions)
+    for canonical_index, duplicate_index in aligned_pairs:
+        positions[canonical_index] = _merge_replicated_position_details(
+            positions[canonical_index],
+            positions[duplicate_index],
+        )
+        skipped_indexes.add(duplicate_index)
+    if aligned_pairs:
+        warnings.append(
+            "Paired replicated price-justification and technical-specification "
+            "rows by aligned position order; retained the price list and merged "
+            "technical characteristics."
+        )
+
     grouped: dict[tuple[str, str, float | None, str], list[tuple[int, TenderPosition]]] = {}
     for index, position in enumerate(positions):
+        if index in skipped_indexes:
+            continue
         key = _cross_document_position_key(position)
         if key is not None:
             grouped.setdefault(key, []).append((index, position))
 
-    skipped_indexes: set[int] = set()
-    warnings: list[str] = []
     for group in grouped.values():
         by_file: dict[str, list[tuple[int, TenderPosition]]] = {}
         for index, position in group:
             file_name = _clean(position.sourceReference.fileName if position.sourceReference else "")
-            by_file.setdefault(file_name, []).append((index, position))
+            source_scope = f"{file_name}::{_position_source_role(position)}"
+            by_file.setdefault(source_scope, []).append((index, position))
         if len(by_file) < 2:
             continue
         canonical_file = min(
             by_file,
-            key=lambda name: (not _is_nmck_source_name(name), min(index for index, _ in by_file[name])),
+            key=lambda name: (
+                min(
+                    source_role_priority(_position_source_role(position))
+                    for _, position in by_file[name]
+                ),
+                min(index for index, _ in by_file[name]),
+            ),
         )
         canonical_copies = by_file[canonical_file]
         for file_name, copies in by_file.items():
@@ -1268,23 +1600,8 @@ def _deduplicate_cross_document_positions(
                 canonical_index, canonical = canonical_copies[
                     min(copy_offset, len(canonical_copies) - 1)
                 ]
-                existing_characteristics = list(canonical.characteristics)
-                seen_characteristics = {
-                    (_word_table_key(item.name), _word_table_key(item.value))
-                    for item in existing_characteristics
-                }
-                for characteristic in duplicate.characteristics:
-                    key = (
-                        _word_table_key(characteristic.name),
-                        _word_table_key(characteristic.value),
-                    )
-                    if key not in seen_characteristics:
-                        existing_characteristics.append(characteristic)
-                        seen_characteristics.add(key)
-                if existing_characteristics != canonical.characteristics:
-                    updated = canonical.model_copy(
-                        update={"characteristics": existing_characteristics}
-                    )
+                updated = _merge_replicated_position_details(canonical, duplicate)
+                if updated != canonical:
                     group_entry = (canonical_index, updated)
                     canonical_copies[
                         min(copy_offset, len(canonical_copies) - 1)
