@@ -39,6 +39,11 @@ from app.services.product_validation import (
     review_spreadsheet_candidate_positions,
     validate_product_candidates,
 )
+from app.services.product_characteristics import (
+    associate_characteristic_sets,
+    finalize_position_characteristics,
+)
+from app.services.product_search_query import enrich_product_search_queries
 from app.services.products import (
     extract_deterministic_positions,
     extract_seldon_positions,
@@ -253,6 +258,7 @@ class TenderPipeline:
             )
 
             document_analysis_debug: dict[str, Any] = {"enabled": self.settings.enable_document_analysis_pipeline}
+            characteristic_association_debug: dict[str, Any] = {"applied": False}
             document_consolidation = None
             spreadsheet_review_debug: dict[str, Any] = {"reviewRequested": False}
             if self.settings.enable_document_analysis_pipeline:
@@ -377,6 +383,31 @@ class TenderPipeline:
                             "warnings": consolidation_warnings,
                         }
                     )
+                (
+                    associated_products,
+                    unresolved_characteristic_sets,
+                    association_warnings,
+                    characteristic_association_debug,
+                ) = self._run_stage(
+                    "Associate Product Characteristics",
+                    lambda: associate_characteristic_sets(
+                        document_consolidation.products,
+                        document_consolidation.characteristicSets,
+                    ),
+                )
+                self.warnings.extend(association_warnings)
+                document_consolidation = document_consolidation.model_copy(
+                    update={
+                        "products": associated_products,
+                        "characteristicSets": unresolved_characteristic_sets,
+                        "warnings": list(
+                            dict.fromkeys(
+                                list(document_consolidation.warnings)
+                                + association_warnings
+                            )
+                        ),
+                    }
+                )
                 self.warnings.extend(document_consolidation.warnings)
                 extracted_fields = self._run_stage(
                     "Build Fields From Document Analysis",
@@ -388,6 +419,13 @@ class TenderPipeline:
                         "resultCount": len(document_analysis_results),
                         "preConsolidationDeduplication": consolidation_dedup_debug,
                         "consolidatedProductCount": len(document_consolidation.products),
+                        "consolidatedCharacteristicCount": sum(
+                            len(position.characteristics)
+                            for position in document_consolidation.products
+                        ),
+                        "unmatchedCharacteristicSetCount": len(
+                            document_consolidation.characteristicSets
+                        ),
                         "reasonHitCount": len(document_consolidation.reasonHits),
                         "fieldCandidateCount": len(document_consolidation.fieldCandidates),
                         "incompleteUnitIds": document_consolidation.incompleteUnitIds,
@@ -453,6 +491,11 @@ class TenderPipeline:
                 ),
             )
             self.warnings.extend(position_warnings)
+            positions, characteristic_warnings, characteristic_finalize_debug = self._run_stage(
+                "Validate Product Characteristic Associations",
+                lambda: finalize_position_characteristics(positions),
+            )
+            self.warnings.extend(characteristic_warnings)
 
             catalog_positions, catalog_limit_warnings = limit_catalog_positions(
                 positions,
@@ -474,6 +517,15 @@ class TenderPipeline:
                     validation_debug.get("requiresManualReview")
                     or document_consolidation.incompleteUnitIds
                 )
+            catalog_positions, search_query_warnings, search_query_debug = self._run_stage(
+                "Build Semantic Product Search Queries",
+                lambda: enrich_product_search_queries(
+                    llm,
+                    catalog_positions,
+                    batch_size=self.settings.product_characteristic_batch_size,
+                ),
+            )
+            self.warnings.extend(search_query_warnings)
             match_items, catalog_warnings = self._run_stage(
                 "Поиск товаров в каталоге/Qdrant",
                 lambda: catalog.match_all(catalog_positions),
@@ -589,6 +641,11 @@ class TenderPipeline:
                 "counterpartyLookup": counterparty_lookup,
                 "productCheck": product_check,
                 "spreadsheetCandidateReview": spreadsheet_review_debug,
+                "productSearchQuery": search_query_debug,
+                "characteristicAssociation": {
+                    **characteristic_association_debug,
+                    "finalValidation": characteristic_finalize_debug,
+                },
                 "tenderDecision": decision,
                 "decisionContext": {**checks, "hardReasons": [reason.as_dict() for reason in hard_reasons]},
             }

@@ -20,6 +20,11 @@ from app.services.document_analysis import (
 )
 from app.services.documents import DocumentProcessor, build_combined_text, safe_filename
 from app.services.llm import LlmClient, LlmResponseTruncatedError, LlmWallTimeoutError
+from app.services.product_characteristics import (
+    associate_characteristic_sets,
+    finalize_position_characteristics,
+)
+from app.services.product_search_query import enrich_product_search_queries
 from app.services.product_validation import validate_product_candidates
 from app.services.products import extract_deterministic_positions, merge_positions
 
@@ -165,6 +170,28 @@ def run_product_matching_from_files(
                 if unit_id not in consolidation.incompleteUnitIds:
                     consolidation.incompleteUnitIds.append(unit_id)
 
+            (
+                associated_products,
+                unresolved_characteristic_sets,
+                association_warnings,
+                characteristic_association_debug,
+            ) = associate_characteristic_sets(
+                consolidation.products,
+                consolidation.characteristicSets,
+            )
+            warnings.extend(association_warnings)
+            consolidation = consolidation.model_copy(
+                update={
+                    "products": associated_products,
+                    "characteristicSets": unresolved_characteristic_sets,
+                    "warnings": list(
+                        dict.fromkeys(
+                            list(consolidation.warnings) + association_warnings
+                        )
+                    ),
+                }
+            )
+
             positions, position_warnings = merge_positions(
                 deterministic_positions,
                 TenderPositionsResponse(
@@ -175,6 +202,12 @@ def run_product_matching_from_files(
                 settings.max_tender_positions,
             )
             warnings.extend(position_warnings)
+            (
+                positions,
+                characteristic_warnings,
+                characteristic_finalize_debug,
+            ) = finalize_position_characteristics(positions)
+            warnings.extend(characteristic_warnings)
 
             catalog_positions, catalog_limit_warnings = limit_catalog_positions(
                 positions,
@@ -188,6 +221,16 @@ def run_product_matching_from_files(
             warnings.extend(validation_warnings)
             validation_debug["sourcePositionCount"] = len(positions)
             validation_debug["catalogPositionLimit"] = settings.catalog_match_max_positions
+            (
+                catalog_positions,
+                search_query_warnings,
+                search_query_debug,
+            ) = enrich_product_search_queries(
+                llm,
+                catalog_positions,
+                batch_size=settings.product_characteristic_batch_size,
+            )
+            warnings.extend(search_query_warnings)
             match_items, catalog_warnings = catalog.match_all(catalog_positions)
             warnings.extend(catalog_warnings)
             product_check = summarize_product_coverage(
@@ -211,6 +254,12 @@ def run_product_matching_from_files(
                 "preConsolidationDeduplication": consolidation_dedup_debug,
                 "incompleteUnitIds": consolidation.incompleteUnitIds,
                 "productCandidateValidation": validation_debug,
+                "characteristicAssociation": {
+                    **characteristic_association_debug,
+                    **characteristic_finalize_debug,
+                    "unresolvedSetCount": len(unresolved_characteristic_sets),
+                },
+                "productSearchQuery": search_query_debug,
                 "deterministicProductCount": len(deterministic_positions),
                 "consolidatedProductCount": len(consolidation.products),
                 "extractedProductCount": len(positions),

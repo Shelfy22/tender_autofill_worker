@@ -95,6 +95,8 @@ def test_stage_timeouts_and_full_model_fallback_defaults() -> None:
     configured = settings()
 
     assert configured.timeout_for("consolidate_tender_analysis") == 180
+    assert configured.timeout_for("classify_product_characteristics") == 120
+    assert configured.timeout_for("classify_sku_importance") == 120
     assert configured.timeout_for("ocr_pdf") == 360
     assert configured.llm_max_attempts_per_unit == 3
     assert configured.models_for_attempt(1) == ["model-a", "model-b", "model-c"]

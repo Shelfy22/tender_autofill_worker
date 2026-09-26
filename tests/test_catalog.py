@@ -5,7 +5,7 @@ import json
 import httpx
 
 from app.config import Settings
-from app.models import CatalogSelection, TenderPosition
+from app.models import CatalogSelection, ProductMatch, TenderPosition
 from app.services.catalog import (
     CatalogMatcher,
     hydrate_catalog_selection,
@@ -155,6 +155,80 @@ def test_qdrant_observability_separates_logical_query_from_http_requests() -> No
     assert len(http_events) == 2
     assert len(logical_events) == 1
     assert logical_events[0]["status"] == "completed"
+
+
+def test_qdrant_merges_candidates_from_multiple_query_variants() -> None:
+    matcher = make_matcher(httpx.MockTransport(lambda _: httpx.Response(200, json={})))
+    captured: list[dict[str, object]] = []
+
+    matcher._embedding = lambda query: [1.0 if query == "Светильник" else 2.0]  # type: ignore[method-assign]
+    matcher._query_qdrant = lambda vector: (  # type: ignore[method-assign]
+        [
+            {"id": "shared", "score": 0.70, "payload": {"name": "Общий"}},
+            {"id": "base-only", "score": 0.65, "payload": {"name": "Базовый"}},
+        ]
+        if vector == [1.0]
+        else [
+            {"id": "shared", "score": 0.95, "payload": {"name": "Точный"}},
+            {"id": "exact-only", "score": 0.90, "payload": {"name": "Точный вариант"}},
+        ]
+    )
+
+    def select(_: TenderPosition, candidates: list[dict[str, object]]) -> ProductMatch:
+        captured.extend(candidates)
+        return ProductMatch()
+
+    matcher._select_with_llm = select  # type: ignore[method-assign]
+    try:
+        matcher._qdrant_match(
+            TenderPosition(
+                product="Светильник",
+                searchQueries=["Светильник", "Светильник 40Вт"],
+            )
+        )
+    finally:
+        matcher.close()
+
+    assert {item["id"] for item in captured} == {
+        "shared",
+        "base-only",
+        "exact-only",
+    }
+    shared = next(item for item in captured if item["id"] == "shared")
+    assert shared["score"] == 0.95
+    assert shared["payload"] == {"name": "Точный"}
+    assert shared["matchedQueries"] == ["Светильник", "Светильник 40Вт"]
+
+
+def test_qdrant_keeps_successful_variant_when_another_variant_fails() -> None:
+    matcher = make_matcher(httpx.MockTransport(lambda _: httpx.Response(200, json={})))
+    captured: list[dict[str, object]] = []
+
+    matcher._embedding = lambda query: [1.0 if query == "Насос" else 2.0]  # type: ignore[method-assign]
+
+    def query(vector: list[float]) -> list[dict[str, object]]:
+        if vector == [2.0]:
+            raise TimeoutError("second variant timed out")
+        return [{"id": "base", "score": 0.80, "payload": {"name": "Насос"}}]
+
+    matcher._query_qdrant = query  # type: ignore[method-assign]
+
+    def select(_: TenderPosition, candidates: list[dict[str, object]]) -> ProductMatch:
+        captured.extend(candidates)
+        return ProductMatch()
+
+    matcher._select_with_llm = select  # type: ignore[method-assign]
+    try:
+        matcher._qdrant_match(
+            TenderPosition(
+                product="Насос",
+                searchQueries=["Насос", "Насос 20м3/ч"],
+            )
+        )
+    finally:
+        matcher.close()
+
+    assert [item["id"] for item in captured] == ["base"]
 
 
 def qdrant_text_candidate(

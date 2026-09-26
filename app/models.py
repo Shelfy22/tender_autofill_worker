@@ -172,7 +172,11 @@ class ProductSourceReference(BaseModel):
 
     fileName: str = ""
     sheet: str = ""
+    table: str = ""
     row: int | None = Field(default=None, ge=1)
+    page: int | None = Field(default=None, ge=1)
+    lotNumber: str = ""
+    positionNumber: str = ""
     productColumn: str = ""
     quantityColumn: str = ""
     unitColumn: str = ""
@@ -188,12 +192,15 @@ class ProductSourceReference(BaseModel):
     @field_validator(
         "fileName",
         "sheet",
+        "table",
         "productColumn",
         "quantityColumn",
         "unitColumn",
         "productHeader",
         "quantityHeader",
         "unitHeader",
+        "lotNumber",
+        "positionNumber",
         mode="before",
     )
     @classmethod
@@ -211,8 +218,65 @@ class ProductSourceReference(BaseModel):
         return text if text in {"excel_deterministic", "seldon_structured", "llm"} else "llm"
 
 
+class ProductCharacteristic(BaseModel):
+    name: str = ""
+    value: str
+    normalizedName: str = ""
+    evidence: str = ""
+    sourceReference: dict[str, Any] = Field(default_factory=dict)
+    confidence: Literal["low", "medium", "high"] = "medium"
+    targetPositionKey: str = ""
+    associationConfidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    associationMethod: Literal[
+        "same_row",
+        "continuation_row",
+        "position_key",
+        "article",
+        "model",
+        "lot_position",
+        "position_number",
+        "exact_product_name",
+        "llm_consolidation",
+        "unresolved",
+    ] = "unresolved"
+    associationStatus: Literal[
+        "confirmed",
+        "unverified",
+        "conflicting",
+    ] = "unverified"
+
+    @field_validator(
+        "name",
+        "value",
+        "normalizedName",
+        "evidence",
+        "targetPositionKey",
+        mode="before",
+    )
+    @classmethod
+    def normalize_characteristic_text(cls, value: Any) -> str:
+        return str(value or "").strip()
+
+
+class CharacteristicConflictValue(BaseModel):
+    value: str
+    sourceReference: dict[str, Any] = Field(default_factory=dict)
+    confidence: Literal["low", "medium", "high"] = "medium"
+
+
+class CharacteristicConflict(BaseModel):
+    normalizedName: str
+    values: list[CharacteristicConflictValue] = Field(default_factory=list, min_length=2)
+    resolution: Literal["unresolved", "selected"] = "unresolved"
+    selectedValue: str = ""
+
+
 class TenderPosition(BaseModel):
     candidateId: str = ""
+    positionKey: str = ""
+    lotNumber: str = ""
+    positionNumber: str = ""
+    model: str = ""
     product: str
     productQuery: str | None = None
     brand: str = ""
@@ -230,6 +294,12 @@ class TenderPosition(BaseModel):
     documentPriceSource: DocumentPriceSource | None = None
     sourceReference: ProductSourceReference | None = None
     sourceCells: dict[str, str] = Field(default_factory=dict)
+    characteristics: list[ProductCharacteristic] = Field(default_factory=list, max_length=100)
+    characteristicConflicts: list[CharacteristicConflict] = Field(default_factory=list, max_length=50)
+    searchCharacteristics: list[str] = Field(default_factory=list, max_length=5)
+    searchCategory: str = ""
+    searchCategoryCode: str = "other"
+    searchQueries: list[str] = Field(default_factory=list, max_length=4)
 
     @field_validator("sourceCells", mode="before")
     @classmethod
@@ -355,6 +425,37 @@ class DocumentReasonHit(BaseModel):
         return str(value or "").strip()[:500]
 
 
+class DocumentCharacteristicSet(BaseModel):
+    productHint: str = ""
+    brand: str = ""
+    article: str = ""
+    model: str = ""
+    lotNumber: str = ""
+    positionNumber: str = ""
+    targetPositionKey: str = ""
+    associationConfidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    associationMethod: str = "unresolved"
+    characteristics: list[ProductCharacteristic] = Field(default_factory=list, max_length=100)
+    evidence: str = ""
+    sourceReference: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator(
+        "productHint",
+        "brand",
+        "article",
+        "model",
+        "lotNumber",
+        "positionNumber",
+        "targetPositionKey",
+        "associationMethod",
+        "evidence",
+        mode="before",
+    )
+    @classmethod
+    def normalize_characteristic_set_text(cls, value: Any) -> str:
+        return str(value or "").strip()
+
+
 class DocumentAnalysisUnit(BaseModel):
     unitId: str
     sourceType: Literal["seldon_page", "document", "spreadsheet"] = "document"
@@ -371,6 +472,7 @@ class DocumentAnalysisUnit(BaseModel):
 
 class DocumentAnalysisResponse(BaseModel):
     products: list[TenderPosition] = Field(default_factory=list, max_length=1000)
+    characteristicSets: list[DocumentCharacteristicSet] = Field(default_factory=list, max_length=1000)
     reasonHits: list[DocumentReasonHit] = Field(default_factory=list, max_length=50)
     fieldCandidates: list[DocumentFieldCandidate] = Field(default_factory=list, max_length=80)
     analysisIncomplete: bool = False
@@ -388,9 +490,88 @@ class DocumentAnalysisResult(DocumentAnalysisResponse):
 
 class TenderConsolidationResponse(BaseModel):
     products: list[TenderPosition] = Field(default_factory=list, max_length=1000)
+    characteristicSets: list[DocumentCharacteristicSet] = Field(default_factory=list, max_length=1000)
     reasonHits: list[DocumentReasonHit] = Field(default_factory=list, max_length=80)
     fieldCandidates: list[DocumentFieldCandidate] = Field(default_factory=list, max_length=120)
     incompleteUnitIds: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class CharacteristicNumeric(BaseModel):
+    min: float | None = None
+    max: float | None = None
+    nominal: float | None = None
+    unit: str | None = None
+    values: list[str] = Field(default_factory=list, max_length=30)
+
+
+class SemanticCharacteristic(BaseModel):
+    id: str
+    name: str = ""
+    original_value: str = ""
+    semantic_role: Literal[
+        "IDENTIFIER",
+        "VARIANT_SELECTOR",
+        "SIZE_OR_DIMENSION",
+        "PACKAGING",
+        "PERFORMANCE",
+        "INTERFACE_OR_STANDARD",
+        "QUALITY_OR_PRECISION",
+        "ENVIRONMENT",
+        "TEMPORAL",
+        "QUANTITY",
+        "ENUMERATION",
+        "OTHER",
+    ] = "OTHER"
+    value_form: Literal[
+        "EXACT",
+        "ACCEPTABLE_RANGE",
+        "MINIMUM",
+        "MAXIMUM",
+        "TOLERANCE",
+        "ENUMERATED",
+        "INTERFACE_RANGE",
+        "TEMPERATURE_RANGE",
+        "TEXT",
+    ] = "TEXT"
+    search_token: str = ""
+    already_encoded_in_name: bool = False
+    numeric: CharacteristicNumeric = Field(default_factory=CharacteristicNumeric)
+
+
+class ProductSemanticClassification(BaseModel):
+    position_index: int = Field(ge=1)
+    normalized_product: str = ""
+    category: str = ""
+    identifier_strength: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    characteristics: list[SemanticCharacteristic] = Field(default_factory=list, max_length=100)
+
+
+class ProductSemanticBatchResponse(BaseModel):
+    results: list[ProductSemanticClassification] = Field(default_factory=list, max_length=200)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SkuCharacteristicDecision(BaseModel):
+    id: str
+    sku_importance: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE"] = "NONE"
+    usage: Literal[
+        "SEARCH_PRIMARY",
+        "SEARCH_SECONDARY",
+        "VALIDATION_ONLY",
+        "IGNORE",
+    ] = "IGNORE"
+    reason: str = ""
+
+
+class ProductSkuClassification(BaseModel):
+    position_index: int = Field(ge=1)
+    decisions: list[SkuCharacteristicDecision] = Field(default_factory=list, max_length=100)
+    selected_for_search: list[str] = Field(default_factory=list, max_length=5)
+
+
+class ProductSkuBatchResponse(BaseModel):
+    results: list[ProductSkuClassification] = Field(default_factory=list, max_length=200)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -481,6 +662,7 @@ class CatalogSelection(BaseModel):
 
 class ProductMatchItem(BaseModel):
     positionIndex: int
+    positionKey: str = ""
     product: str
     productQuery: str
     brand: str = ""
@@ -490,6 +672,12 @@ class ProductMatchItem(BaseModel):
     analogsAllowed: bool | None = None
     evidence: str = ""
     requirements: str = ""
+    characteristics: list[ProductCharacteristic] = Field(default_factory=list)
+    searchCharacteristics: list[str] = Field(default_factory=list)
+    searchCategory: str = ""
+    searchCategoryCode: str = "other"
+    searchQueries: list[str] = Field(default_factory=list)
+    characteristicConflicts: list[CharacteristicConflict] = Field(default_factory=list)
     documentUnitPriceRub: float | None = None
     documentLineTotalRub: float | None = None
     documentCurrency: str | None = None

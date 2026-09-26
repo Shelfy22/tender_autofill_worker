@@ -8,14 +8,17 @@ from typing import Any
 
 from app.config import Settings
 from app.models import (
+    DocumentCharacteristicSet,
     DocumentAnalysisResult,
     DocumentAnalysisUnit,
     ExtractedFieldsResponse,
     FieldValue,
     ParsedDocument,
+    ProductSourceReference,
     TenderConsolidationResponse,
     TenderPosition,
 )
+from app.services.product_characteristics import ensure_position_identity
 
 
 def _sha256(value: str) -> str:
@@ -113,8 +116,33 @@ def _merge_product_payload(
     target: dict[str, Any],
     duplicate: dict[str, Any],
 ) -> None:
+    existing_characteristics = target.get("characteristics") or []
+    seen_characteristics = {
+        (
+            _normalized_product_identity(item.get("name")),
+            _normalized_product_identity(item.get("value")),
+        )
+        for item in existing_characteristics
+        if isinstance(item, dict)
+    }
+    for item in duplicate.get("characteristics") or []:
+        if not isinstance(item, dict):
+            continue
+        key = (
+            _normalized_product_identity(item.get("name")),
+            _normalized_product_identity(item.get("value")),
+        )
+        if key[1] and key not in seen_characteristics:
+            existing_characteristics.append(item)
+            seen_characteristics.add(key)
+    if existing_characteristics:
+        target["characteristics"] = existing_characteristics
     for field in (
         "productQuery",
+        "positionKey",
+        "lotNumber",
+        "positionNumber",
+        "model",
         "brand",
         "article",
         "quantity",
@@ -129,6 +157,11 @@ def _merge_product_payload(
         "documentPriceSource",
         "sourceReference",
         "sourceCells",
+        "searchCharacteristics",
+        "searchCategory",
+        "searchCategoryCode",
+        "searchQueries",
+        "characteristicConflicts",
     ):
         current = target.get(field)
         replacement = duplicate.get(field)
@@ -194,6 +227,7 @@ def fallback_document_consolidation(
     """Combine bounded structured results locally when LLM consolidation is unavailable."""
 
     products: list[dict[str, Any]] = []
+    characteristic_sets: list[dict[str, Any]] = []
     reason_hits: list[dict[str, Any]] = []
     field_candidates: list[dict[str, Any]] = []
     incomplete_unit_ids: list[str] = []
@@ -202,6 +236,7 @@ def fallback_document_consolidation(
 
     for result in results:
         products.extend(result.get("products", []))
+        characteristic_sets.extend(result.get("characteristicSets", []))
         for reason in result.get("reasonHits", []):
             key = (
                 str(reason.get("reason") or "").casefold(),
@@ -224,9 +259,56 @@ def fallback_document_consolidation(
             "deterministic spreadsheet positions remain available for merge."
         )
 
+    unresolved_sets: list[dict[str, Any]] = []
+    for characteristic_set in characteristic_sets:
+        try:
+            parsed_set = DocumentCharacteristicSet.model_validate(characteristic_set)
+        except Exception:
+            continue
+        hint = _normalized_product_identity(parsed_set.productHint)
+        article = _normalized_product_identity(parsed_set.article)
+        matches: list[dict[str, Any]] = []
+        for product in products:
+            product_name = _normalized_product_identity(
+                product.get("productQuery") or product.get("product")
+            )
+            product_article = _normalized_product_identity(product.get("article"))
+            if article and (article == product_article or article in product_name):
+                matches.append(product)
+            elif hint and hint == product_name:
+                matches.append(product)
+        if len(matches) != 1:
+            unresolved_sets.append(characteristic_set)
+            continue
+        target = matches[0]
+        existing = target.setdefault("characteristics", [])
+        seen = {
+            (
+                _normalized_product_identity(item.get("name")),
+                _normalized_product_identity(item.get("value")),
+            )
+            for item in existing
+            if isinstance(item, dict)
+        }
+        for characteristic in parsed_set.characteristics:
+            payload = characteristic.model_dump(mode="json")
+            key = (
+                _normalized_product_identity(characteristic.name),
+                _normalized_product_identity(characteristic.value),
+            )
+            if key[1] and key not in seen:
+                existing.append(payload)
+                seen.add(key)
+
+    if unresolved_sets:
+        warnings.append(
+            f"Не удалось однозначно связать {len(unresolved_sets)} наборов характеристик с товарными позициями."
+        )
+
     return TenderConsolidationResponse.model_validate(
         {
             "products": products[:1000],
+            "characteristicSets": unresolved_sets[:1000],
             "reasonHits": reason_hits[:80],
             "fieldCandidates": field_candidates[:120],
             "incompleteUnitIds": list(dict.fromkeys(incomplete_unit_ids)),
@@ -557,7 +639,55 @@ def result_from_unit(
         partTotal=unit.partTotal,
         **response.model_dump(),
     )
-    return parsed
+    products: list[TenderPosition] = []
+    for ordinal, raw_position in enumerate(parsed.products, start=1):
+        reference = raw_position.sourceReference or ProductSourceReference(
+            fileName=unit.fileName,
+            extractionMethod="llm",
+        )
+        if not reference.fileName:
+            reference = reference.model_copy(update={"fileName": unit.fileName})
+        characteristics = []
+        for characteristic in raw_position.characteristics:
+            source_reference = dict(characteristic.sourceReference)
+            source_reference.setdefault("fileName", unit.fileName)
+            characteristics.append(
+                characteristic.model_copy(update={"sourceReference": source_reference})
+            )
+        position = raw_position.model_copy(
+            update={
+                "sourceReference": reference,
+                "characteristics": characteristics,
+            }
+        )
+        products.append(
+            ensure_position_identity(position, source_file=unit.fileName, ordinal=ordinal)
+        )
+    characteristic_sets = []
+    for raw_set in parsed.characteristicSets:
+        source_reference = dict(raw_set.sourceReference)
+        source_reference.setdefault("fileName", unit.fileName)
+        characteristics = []
+        for characteristic in raw_set.characteristics:
+            characteristic_source = dict(characteristic.sourceReference)
+            characteristic_source.setdefault("fileName", unit.fileName)
+            characteristics.append(
+                characteristic.model_copy(update={"sourceReference": characteristic_source})
+            )
+        characteristic_sets.append(
+            raw_set.model_copy(
+                update={
+                    "sourceReference": source_reference,
+                    "characteristics": characteristics,
+                }
+            )
+        )
+    return parsed.model_copy(
+        update={
+            "products": products,
+            "characteristicSets": characteristic_sets,
+        }
+    )
 
 
 def fields_from_consolidation(

@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     spreadsheet_candidate_review_max_rows: int = Field(default=100_000, ge=5, le=1_000_000)
     spreadsheet_candidate_review_max_chars: int = Field(default=1_000_000, ge=5_000)
     spreadsheet_llm_max_positions: int = Field(default=500, ge=1, le=100_000)
+    product_characteristic_batch_size: int = Field(default=20, ge=1, le=100)
     pdf_ocr_max_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
 
     seldon_base_url: str = "https://apitorgi.myseldon.com"
@@ -88,6 +89,7 @@ class Settings(BaseSettings):
     document_analysis_timeout_seconds: float | None = Field(default=120, gt=0)
     consolidation_timeout_seconds: float | None = Field(default=180, gt=0)
     product_extraction_timeout_seconds: float | None = Field(default=90, gt=0)
+    product_characteristic_timeout_seconds: float | None = Field(default=120, gt=0)
     catalog_selection_timeout_seconds: float | None = Field(default=45, gt=0)
     final_decision_timeout_seconds: float | None = Field(default=60, gt=0)
     ocr_timeout_seconds: float | None = Field(default=360, gt=0)
@@ -137,6 +139,8 @@ class Settings(BaseSettings):
     qdrant_collection: str = "products"
     qdrant_vector_name: str | None = None
     qdrant_top_k: int = Field(default=50, ge=1, le=500)
+    qdrant_query_variants: int = Field(default=4, ge=1, le=4)
+    qdrant_merged_candidate_limit: int = Field(default=100, ge=1, le=500)
     ollama_url: str | None = None
     ollama_embedding_model: str = "qwen3-embedder-ft:latest"
 
@@ -243,7 +247,12 @@ class Settings(BaseSettings):
             budget = self.catalog_selection_max_completion_tokens or base
         elif normalized in {"final_decision", "apply_final_decision", "decide_tender_status"}:
             budget = self.final_decision_max_completion_tokens or base
-        elif normalized in {"extract_tender_products", "audit_product_candidates"}:
+        elif normalized in {
+            "extract_tender_products",
+            "audit_product_candidates",
+            "classify_product_characteristics",
+            "classify_sku_importance",
+        }:
             budget = self.product_extraction_max_completion_tokens or base
         elif normalized in {"consolidate_tender_analysis", "consolidate_document_analysis"}:
             budget = self.consolidation_max_completion_tokens or base
@@ -264,6 +273,8 @@ class Settings(BaseSettings):
             return self.catalog_selection_timeout_seconds
         if normalized in {"final_decision", "apply_final_decision", "decide_tender_status"}:
             return self.final_decision_timeout_seconds
+        if normalized in {"classify_product_characteristics", "classify_sku_importance"}:
+            return self.product_characteristic_timeout_seconds
         if normalized in {"extract_tender_products", "audit_product_candidates"}:
             return self.product_extraction_timeout_seconds
         if normalized in {"consolidate_tender_analysis", "consolidate_document_analysis"}:

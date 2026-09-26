@@ -130,6 +130,7 @@ def summarize_product_coverage(
         details.append(
             {
                 "positionIndex": item.positionIndex or index,
+                "positionKey": item.positionKey,
                 "sourceProduct": item.product,
                 "productQuery": item.productQuery,
                 "brand": item.brand,
@@ -139,6 +140,18 @@ def summarize_product_coverage(
                 "analogsAllowed": item.analogsAllowed,
                 "sourceEvidence": item.evidence,
                 "sourceRequirements": item.requirements,
+                "sourceCharacteristics": [
+                    characteristic.model_dump(mode="json")
+                    for characteristic in item.characteristics
+                ],
+                "searchCharacteristics": item.searchCharacteristics,
+                "searchCategory": item.searchCategory,
+                "searchCategoryCode": item.searchCategoryCode,
+                "searchQueries": item.searchQueries,
+                "characteristicConflicts": [
+                    conflict.model_dump(mode="json")
+                    for conflict in item.characteristicConflicts
+                ],
                 "sourceReference": (
                     item.sourceReference.model_dump()
                     if item.sourceReference is not None

@@ -5,6 +5,8 @@ __pycache__/
 .ruff_cache/
 *.py[cod]
 *.log
+evaluation/*.local.jsonl
+evaluation/results/
 
 # Standalone partial-migration prototype; the full Python worker is used instead.
 document-processor/

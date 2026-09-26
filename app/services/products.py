@@ -6,6 +6,7 @@ from typing import Any
 
 from app.models import (
     DocumentPriceSource,
+    ProductCharacteristic,
     ProductSourceReference,
     SpreadsheetRow,
     SpreadsheetTable,
@@ -402,30 +403,79 @@ def _enrich_structured_table_positions_with_characteristics(
     if current_number is not None:
         tables.append((current_type, current_number, current_rows))
 
-    requirements_by_key: dict[tuple[str, str], tuple[str, str]] = {}
-    requirements_by_name: dict[str, list[tuple[str, str]]] = {}
+    requirements_by_key: dict[
+        tuple[str, str], tuple[str, str, list[ProductCharacteristic]]
+    ] = {}
+    requirements_by_name: dict[
+        str, list[tuple[str, str, list[ProductCharacteristic]]]
+    ] = {}
     for table_type, table_number, rows in tables:
         if len(rows) < 2:
             continue
         product_column, characteristic_columns = _word_table_characteristic_columns(rows[0])
         if not product_column or not characteristic_columns:
             continue
+        records: list[dict[str, Any]] = []
+        last_record: dict[str, Any] | None = None
         for cells in rows[1:]:
             product = _clean(cells.get(product_column))
-            requirements = _clean(
-                " ".join(cells.get(column, "") for column in characteristic_columns)
-            )
             serial = _word_table_serial(cells)
-            product_key = _word_table_key(product)
+            characteristics = [
+                ProductCharacteristic(
+                    name=_clean(rows[0].get(column)),
+                    value=_clean(cells.get(column)),
+                    evidence=f"Таблица {table_type} {table_number}",
+                    sourceReference={
+                        "table": f"Таблица {table_type} {table_number}",
+                        "column": column,
+                    },
+                    confidence="high",
+                    associationConfidence=0.98 if product else 0.90,
+                    associationMethod="same_row" if product else "continuation_row",
+                    associationStatus="confirmed",
+                )
+                for column in characteristic_columns
+                if _clean(cells.get(column))
+            ]
+            if product:
+                last_record = {
+                    "product": product,
+                    "serial": serial,
+                    "characteristics": characteristics,
+                }
+                records.append(last_record)
+            elif (
+                last_record is not None
+                and characteristics
+                and (not serial or not last_record["serial"] or serial == last_record["serial"])
+            ):
+                last_record["characteristics"].extend(characteristics)
+
+        for record in records:
+            product_key = _word_table_key(record["product"])
+            characteristics = record["characteristics"]
+            requirements = _clean(
+                "; ".join(
+                    f"{item.name}: {item.value}" if item.name else item.value
+                    for item in characteristics
+                )
+            )
             if not product_key or not requirements:
                 continue
+            serial = record["serial"]
             source = (
                 f"\u0422\u0430\u0431\u043b\u0438\u0446\u0430 {table_type} {table_number}: "
                 f"{requirements}"
             )
             if serial:
-                requirements_by_key[(product_key, serial)] = (requirements, source)
-            requirements_by_name.setdefault(product_key, []).append((requirements, source))
+                requirements_by_key[(product_key, serial)] = (
+                    requirements,
+                    source,
+                    characteristics,
+                )
+            requirements_by_name.setdefault(product_key, []).append(
+                (requirements, source, characteristics)
+            )
 
     if not requirements_by_key and not requirements_by_name:
         return positions
@@ -444,8 +494,18 @@ def _enrich_structured_table_positions_with_characteristics(
         if linked is None:
             enriched.append(position)
             continue
-        requirements, source = linked
+        requirements, source, characteristics = linked
         combined_requirements = _clean(" ".join((position.requirements, requirements)))
+        combined_characteristics = list(position.characteristics)
+        seen_characteristics = {
+            (_word_table_key(item.name), _word_table_key(item.value))
+            for item in combined_characteristics
+        }
+        for characteristic in characteristics:
+            key = (_word_table_key(characteristic.name), _word_table_key(characteristic.value))
+            if key not in seen_characteristics:
+                combined_characteristics.append(characteristic)
+                seen_characteristics.add(key)
         query = _clean(position.productQuery or position.product)
         if requirements.casefold() not in query.casefold():
             query = _clean(
@@ -457,6 +517,7 @@ def _enrich_structured_table_positions_with_characteristics(
                 update={
                     "productQuery": query,
                     "requirements": combined_requirements,
+                    "characteristics": combined_characteristics,
                     "evidence": evidence,
                 }
             )
@@ -555,6 +616,8 @@ def extract_deterministic_positions(
         document_price_source: DocumentPriceSource | None = None,
         source_reference: ProductSourceReference | None = None,
         source_cells: dict[str, str] | None = None,
+        characteristics: list[ProductCharacteristic] | None = None,
+        requirements: str = "",
     ) -> None:
         name, unit = _normalize_extracted_product_name(name), _clean(unit)
         quantity = parse_quantity(raw_quantity)
@@ -586,8 +649,55 @@ def extract_deterministic_positions(
                 documentPriceSource=document_price_source,
                 sourceReference=source_reference,
                 sourceCells=dict(source_cells or {}),
+                characteristics=list(characteristics or []),
+                requirements=_clean(requirements),
             )
         )
+
+    def table_characteristics(
+        *,
+        table: SpreadsheetTable,
+        row: SpreadsheetRow,
+        cells: dict[str, str],
+        column_labels: dict[str, str],
+        ignored_columns: set[str],
+        association_method: str,
+        association_confidence: float,
+    ) -> list[ProductCharacteristic]:
+        items: list[ProductCharacteristic] = []
+        for column, value in cells.items():
+            label = _clean(column_labels.get(column))
+            normalized_label = _normalize_header(label)
+            characteristic_value = _clean(value)
+            if (
+                column in ignored_columns
+                or not characteristic_value
+                or normalized_label in {"№", "no", "n", "номер", "п п", "пп"}
+                or re.search(
+                    r"(?:^код\b|окпд|ктру|тн\s+вэд|цена|стоимост|сумма|итого|"
+                    r"руб(?:ль|лей)?\b|предложени[ея]\s+поставщик)",
+                    normalized_label,
+                )
+            ):
+                continue
+            items.append(
+                ProductCharacteristic(
+                    name=label or f"Колонка {column}",
+                    value=characteristic_value,
+                    evidence=f"{table.fileName}; {table.sheet}; строка {row.row}",
+                    sourceReference={
+                        "fileName": table.fileName,
+                        "sheet": table.sheet,
+                        "row": row.row,
+                        "column": column,
+                    },
+                    confidence="high" if label else "medium",
+                    associationConfidence=association_confidence,
+                    associationMethod=association_method,
+                    associationStatus="confirmed",
+                )
+            )
+        return items
 
     for raw_table in spreadsheet_tables or []:
         try:
@@ -601,7 +711,18 @@ def extract_deterministic_positions(
         header_columns = dict(table.headerMap)
         header_labels = dict(table.headerLabels)
         header_rows = set(table.headerRows)
+        column_labels: dict[str, str] = {}
+        for header_row in table.rows:
+            if header_row.row not in header_rows:
+                continue
+            for column, value in header_row.cells.items():
+                label = _clean(value)
+                if label:
+                    current = column_labels.get(column, "")
+                    if label not in current.split(" / "):
+                        column_labels[column] = " / ".join(filter(None, (current, label)))
         use_precomputed_headers = {"product", "quantity"}.issubset(header_columns)
+        last_result_index: int | None = None
         for row in table.rows:
             cells = row.cells
             if use_precomputed_headers:
@@ -625,6 +746,14 @@ def extract_deterministic_positions(
                     or len(core_header_roles) >= 2
                 )
                 if is_header_row:
+                    for column, label in cells.items():
+                        cleaned_label = _clean(label)
+                        if cleaned_label:
+                            current = column_labels.get(column, "")
+                            if cleaned_label not in current.split(" / "):
+                                column_labels[column] = " / ".join(
+                                    filter(None, (current, cleaned_label))
+                                )
                     for role, (column, label) in detected_headers.items():
                         header_columns[role] = column
                         header_labels[role] = label
@@ -633,10 +762,56 @@ def extract_deterministic_positions(
                 continue
             product_column = header_columns["product"]
             quantity_column = header_columns["quantity"]
-            unit, unit_column = _table_unit(cells, header_columns, header_labels)
+            ignored_columns = {
+                column
+                for column in header_columns.values()
+                if column
+            }
             name = cells.get(product_column, "")
+            characteristics = table_characteristics(
+                table=table,
+                row=row,
+                cells=cells,
+                column_labels=column_labels,
+                ignored_columns=ignored_columns,
+                association_method="same_row" if name else "continuation_row",
+                association_confidence=0.98 if name else 0.90,
+            )
+            if not name:
+                if characteristics and last_result_index is not None:
+                    existing = result[last_result_index]
+                    combined_characteristics = list(existing.characteristics) + characteristics
+                    continuation_requirements = "; ".join(
+                        f"{item.name}: {item.value}" if item.name else item.value
+                        for item in characteristics
+                    )
+                    combined_requirements = _clean(
+                        "; ".join(
+                            filter(None, (existing.requirements, continuation_requirements))
+                        )
+                    )
+                    continuation_evidence = (
+                        f"Строка {row.row}: "
+                        + " | ".join(
+                            f"{column}: {value}" for column, value in cells.items()
+                        )
+                    )
+                    result[last_result_index] = existing.model_copy(
+                        update={
+                            "characteristics": combined_characteristics,
+                            "requirements": combined_requirements,
+                            "evidence": _clean(
+                                " | ".join(
+                                    filter(None, (existing.evidence, continuation_evidence))
+                                )
+                            )[:1200],
+                        }
+                    )
+                    structured_spreadsheet_rows.add(_clean(continuation_evidence))
+                continue
+            unit, unit_column = _table_unit(cells, header_columns, header_labels)
             raw_quantity = cells.get(quantity_column)
-            if not name or not unit or raw_quantity is None:
+            if not unit or raw_quantity is None:
                 continue
             unit_price_column = header_columns.get("unit_price", "")
             line_total_column = header_columns.get("line_total", "")
@@ -668,6 +843,11 @@ def extract_deterministic_positions(
                 if has_document_price
                 else None
             )
+            requirements = "; ".join(
+                f"{item.name}: {item.value}" if item.name else item.value
+                for item in characteristics
+            )
+            before_count = len(result)
             add(
                 name,
                 unit,
@@ -693,10 +873,15 @@ def extract_deterministic_positions(
                     productHeader=header_labels.get("product", ""),
                     quantityHeader=header_labels.get("quantity", ""),
                     unitHeader=header_labels.get("unit", ""),
+                    positionNumber=_word_table_serial(cells),
                     extractionMethod="excel_deterministic",
                 ),
                 source_cells=cells,
+                characteristics=characteristics,
+                requirements=requirements,
             )
+            if len(result) > before_count:
+                last_result_index = len(result) - 1
             if len(result) >= max_positions:
                 return result
 
@@ -760,6 +945,8 @@ def extract_deterministic_positions(
         raw_quantity = cells.get(quantity_column)
         if not name or not unit or raw_quantity is None:
             continue
+        if _clean(line) in structured_spreadsheet_rows:
+            continue
         unit_price_column = header_columns.get("unit_price", "")
         line_total_column = header_columns.get("line_total", "")
         raw_unit_price = cells.get(unit_price_column) if unit_price_column else None
@@ -807,6 +994,8 @@ def extract_deterministic_positions(
                 productHeader=header_labels.get("product", ""),
                 quantityHeader=header_labels.get("quantity", ""),
                 unitHeader=header_labels.get("unit", ""),
+                table=current_sheet if current_sheet.startswith("Таблица ") else "",
+                positionNumber=_word_table_serial(cells),
                 extractionMethod="excel_deterministic",
             ),
         )
@@ -1033,12 +1222,17 @@ def _cross_document_position_key(position: TenderPosition) -> tuple[str, str, fl
     product = _position_name_key(position)
     if not product:
         return None
-    return (
-        product,
-        _word_table_key(position.requirements),
-        position.quantity,
-        _word_table_key(position.unit),
+    strong_identity = (
+        _word_table_key(position.article)
+        or _word_table_key(position.model)
+        or (
+            f"{_word_table_key(position.lotNumber)}:{_word_table_key(position.positionNumber)}"
+            if position.positionNumber
+            else ""
+        )
+        or _word_table_key(position.requirements)
     )
+    return (product, strong_identity, position.quantity, _word_table_key(position.unit))
 
 
 def _deduplicate_cross_document_positions(
@@ -1064,9 +1258,38 @@ def _deduplicate_cross_document_positions(
             by_file,
             key=lambda name: (not _is_nmck_source_name(name), min(index for index, _ in by_file[name])),
         )
+        canonical_copies = by_file[canonical_file]
         for file_name, copies in by_file.items():
             if file_name == canonical_file:
                 continue
+            for copy_offset, (_, duplicate) in enumerate(copies):
+                if not canonical_copies:
+                    break
+                canonical_index, canonical = canonical_copies[
+                    min(copy_offset, len(canonical_copies) - 1)
+                ]
+                existing_characteristics = list(canonical.characteristics)
+                seen_characteristics = {
+                    (_word_table_key(item.name), _word_table_key(item.value))
+                    for item in existing_characteristics
+                }
+                for characteristic in duplicate.characteristics:
+                    key = (
+                        _word_table_key(characteristic.name),
+                        _word_table_key(characteristic.value),
+                    )
+                    if key not in seen_characteristics:
+                        existing_characteristics.append(characteristic)
+                        seen_characteristics.add(key)
+                if existing_characteristics != canonical.characteristics:
+                    updated = canonical.model_copy(
+                        update={"characteristics": existing_characteristics}
+                    )
+                    group_entry = (canonical_index, updated)
+                    canonical_copies[
+                        min(copy_offset, len(canonical_copies) - 1)
+                    ] = group_entry
+                    positions[canonical_index] = updated
             skipped_indexes.update(index for index, _ in copies)
             warnings.append(
                 "Skipped replicated product rows from document "
@@ -1241,6 +1464,11 @@ def merge_positions(
                 updates["unit"] = unit
             for field in (
                 "requirements",
+                "characteristics",
+                "positionKey",
+                "lotNumber",
+                "positionNumber",
+                "model",
                 "documentUnitPriceRub",
                 "documentLineTotalRub",
                 "documentCurrency",

@@ -374,6 +374,35 @@ def test_document_analysis_deduplicates_same_named_positions_across_documents() 
     assert compact[0]["products"][0]["article"] == "TW-1"
 
 
+def test_fallback_consolidation_attaches_characteristics_from_separate_document() -> None:
+    results = [
+        DocumentAnalysisResult(
+            unitId="products",
+            fileName="Перечень товаров.docx",
+            products=[TenderPosition(product="Светильник ионный", quantity=2, unit="шт")],
+        ),
+        DocumentAnalysisResult(
+            unitId="characteristics",
+            fileName="Характеристики светильника.pdf",
+            characteristicSets=[
+                {
+                    "productHint": "Светильник ионный",
+                    "characteristics": [
+                        {"name": "Мощность", "value": "40 Вт", "confidence": "high"},
+                        {"name": "Напряжение", "value": "220 В", "confidence": "high"},
+                    ],
+                }
+            ],
+        ),
+    ]
+
+    compact, _ = compact_document_analysis_results(results)
+    consolidated = fallback_document_consolidation(compact, "LLM unavailable")
+
+    assert [item.value for item in consolidated.products[0].characteristics] == ["40 Вт", "220 В"]
+    assert consolidated.characteristicSets == []
+
+
 def test_large_spreadsheet_is_skipped_by_document_analysis() -> None:
     document = ParsedDocument(
         documentIndex=1,

@@ -192,6 +192,10 @@ def normalize_qdrant_candidates(candidates: Any) -> list[dict[str, Any]]:
                 "available": _normalize_available(available_value),
                 "params": params_value if isinstance(params_value, dict) else {},
                 "score": raw.get("score"),
+                "matchedQueries": raw.get("matchedQueries")
+                if isinstance(raw.get("matchedQueries"), list)
+                else [],
+                "bestQueryIndex": raw.get("bestQueryIndex"),
             }
         )
     return normalized
@@ -383,6 +387,7 @@ class CatalogMatcher:
             result.append(
                 ProductMatchItem(
                     positionIndex=index,
+                    positionKey=product.positionKey,
                     product=product.product,
                     productQuery=product.productQuery or product.product,
                     brand=product.brand,
@@ -392,6 +397,12 @@ class CatalogMatcher:
                     analogsAllowed=product.analogsAllowed,
                     evidence=product.evidence,
                     requirements=product.requirements,
+                    characteristics=product.characteristics,
+                    searchCharacteristics=product.searchCharacteristics,
+                    searchCategory=product.searchCategory,
+                    searchCategoryCode=product.searchCategoryCode,
+                    searchQueries=product.searchQueries,
+                    characteristicConflicts=product.characteristicConflicts,
                     documentUnitPriceRub=product.documentUnitPriceRub,
                     documentLineTotalRub=product.documentLineTotalRub,
                     documentCurrency=product.documentCurrency,
@@ -490,8 +501,73 @@ class CatalogMatcher:
     def _qdrant_match(self, product: TenderPosition) -> ProductMatch:
         if not self.settings.qdrant_url:
             raise RuntimeError("QDRANT_URL не настроен")
-        vector = self._embedding(product.productQuery or product.product)
-        candidates = self._query_qdrant(vector)
+        queries = list(
+            dict.fromkeys(
+                query.strip()
+                for query in (
+                    product.searchQueries
+                    or [product.productQuery or product.product]
+                )
+                if query and query.strip()
+            )
+        )[: self.settings.qdrant_query_variants]
+        merged: dict[str, dict[str, Any]] = {}
+        successful_query_count = 0
+        last_query_error: Exception | None = None
+        for query_index, query in enumerate(queries, start=1):
+            self._position_context.update(
+                {
+                    "searchQuery": query[:300],
+                    "searchQueryIndex": query_index,
+                    "searchQueryCount": len(queries),
+                }
+            )
+            try:
+                vector = self._embedding(query)
+                query_candidates = self._query_qdrant(vector)
+                successful_query_count += 1
+            except Exception as exc:
+                last_query_error = exc
+                continue
+            for candidate in query_candidates:
+                point_id = str(candidate.get("id") or "")
+                if not point_id:
+                    continue
+                candidate = {
+                    **candidate,
+                    "matchedQueries": [query],
+                    "bestQueryIndex": query_index,
+                }
+                existing = merged.get(point_id)
+                if existing is None:
+                    merged[point_id] = candidate
+                    continue
+                existing["matchedQueries"] = list(
+                    dict.fromkeys([*existing.get("matchedQueries", []), query])
+                )
+                existing_score = existing.get("score")
+                candidate_score = candidate.get("score")
+                if (
+                    candidate_score is not None
+                    and (existing_score is None or float(candidate_score) > float(existing_score))
+                ):
+                    existing.update(
+                        {
+                            "score": candidate_score,
+                            "payload": candidate.get("payload") or {},
+                            "bestQueryIndex": query_index,
+                        }
+                    )
+        if successful_query_count == 0 and last_query_error is not None:
+            raise last_query_error
+        candidates = sorted(
+            merged.values(),
+            key=lambda item: (
+                item.get("score") is not None,
+                float(item.get("score") or 0),
+            ),
+            reverse=True,
+        )[: self.settings.qdrant_merged_candidate_limit]
         return self._select_with_llm(product, candidates)
 
     def _query_qdrant(self, vector: list[float]) -> list[dict[str, Any]]:

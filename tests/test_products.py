@@ -642,3 +642,100 @@ def test_deterministic_excel_and_merge_preserve_2500_positions() -> None:
     assert len(deterministic) == 2500
     assert len(merged) == 2500
     assert merged[-1].product == "Уникальный товар 2500"
+
+
+def test_excel_characteristics_are_extracted_from_arbitrary_columns() -> None:
+    positions = extract_deterministic_positions(
+        "",
+        [
+            {
+                "fileName": "spec.xlsx",
+                "sheet": "Лист1",
+                "rows": [
+                    {
+                        "row": 3,
+                        "cells": {
+                            "B": "Количество",
+                            "D": "Напряжение питания",
+                            "F": "Наименование товара",
+                            "H": "Ед. изм.",
+                            "K": "Частота",
+                        },
+                    },
+                    {
+                        "row": 4,
+                        "cells": {
+                            "B": "2",
+                            "D": "220 В",
+                            "F": "БУРС-1В",
+                            "H": "шт",
+                            "K": "50 Гц",
+                        },
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert len(positions) == 1
+    assert [(item.name, item.value) for item in positions[0].characteristics] == [
+        ("Напряжение питания", "220 В"),
+        ("Частота", "50 Гц"),
+    ]
+    assert "Напряжение питания: 220 В" in positions[0].requirements
+
+
+def test_excel_continuation_row_enriches_previous_position() -> None:
+    positions = extract_deterministic_positions(
+        "",
+        [
+            {
+                "fileName": "spec.xlsx",
+                "sheet": "Лист1",
+                "headerRows": [1],
+                "headerMap": {
+                    "product": "B",
+                    "unit": "C",
+                    "quantity": "D",
+                },
+                "headerLabels": {
+                    "product": "Наименование",
+                    "unit": "Ед. изм.",
+                    "quantity": "Количество",
+                },
+                "rows": [
+                    {
+                        "row": 1,
+                        "cells": {
+                            "B": "Наименование",
+                            "C": "Ед. изм.",
+                            "D": "Количество",
+                            "E": "Параметр",
+                        },
+                    },
+                    {
+                        "row": 2,
+                        "cells": {
+                            "B": "Насос центробежный",
+                            "C": "шт",
+                            "D": "1",
+                            "E": "Подача 20 м3/ч",
+                        },
+                    },
+                    {
+                        "row": 3,
+                        "cells": {
+                            "E": "Напор 30 м",
+                        },
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert len(positions) == 1
+    assert [item.value for item in positions[0].characteristics] == [
+        "Подача 20 м3/ч",
+        "Напор 30 м",
+    ]
+    assert positions[0].characteristics[1].associationMethod == "continuation_row"
