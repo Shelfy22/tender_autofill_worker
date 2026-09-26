@@ -175,6 +175,12 @@ def _header_role(value: Any) -> str | None:
     header = _normalize_header(value)
     if not header:
         return None
+    if re.search(
+        r"наименование\s+(?:страны\s+происхождения|участника\s+закупки|"
+        r"заказчика|поставщика|производителя)",
+        header,
+    ):
+        return None
     if header == "\u043e\u0431\u044a\u0435\u043a\u0442 \u0437\u0430\u043a\u0443\u043f\u043a\u0438":
         return "product"
     # A price column frequently contains a suffix such as "руб./ед. изм.".
@@ -583,6 +589,10 @@ def _enrich_structured_table_positions_with_characteristics(
             linked_value = (requirements, source, characteristics)
             if product_key:
                 requirements_by_name.setdefault(product_key, []).append(linked_value)
+            requirements_by_row.setdefault(
+                (table_label, record["row"]),
+                [],
+            ).append(linked_value)
             if companion_table:
                 requirements_by_row.setdefault(
                     (companion_table, record["row"]),
@@ -1401,20 +1411,30 @@ def _position_name_key(position: TenderPosition) -> str:
 
 
 def _position_source_key(position: TenderPosition) -> str:
+    reference = position.sourceReference
+    if reference is not None and reference.row is not None:
+        table_scope = reference.sheet or reference.table
+        if reference.fileName and table_scope:
+            return ":".join(
+                (
+                    "source",
+                    _word_table_key(reference.fileName),
+                    _word_table_key(table_scope),
+                    str(reference.row),
+                )
+            )
+        if reference.fileName and reference.productColumn:
+            return ":".join(
+                (
+                    "source",
+                    _word_table_key(reference.fileName),
+                    str(reference.row),
+                    _word_table_key(reference.productColumn),
+                )
+            )
     if position.candidateId:
         return f"candidate:{position.candidateId}"
-    reference = position.sourceReference
-    if reference is None or reference.row is None:
-        return ""
-    return ":".join(
-        (
-            "source",
-            reference.fileName,
-            reference.sheet,
-            str(reference.row),
-            reference.productColumn,
-        )
-    )
+    return ""
 
 
 def _position_source_role(position: TenderPosition) -> str:
@@ -1682,6 +1702,43 @@ def _drop_unconfirmed_llm_quantity_breakdowns(
     )
 
 
+def _merge_aligned_llm_table_copy(
+    deterministic: list[TenderPosition],
+    llm_products: list[TenderPosition],
+) -> tuple[list[TenderPosition], list[TenderPosition], list[str]]:
+    if len(deterministic) != len(llm_products) or len(deterministic) < 4:
+        return deterministic, llm_products, []
+
+    aligned_identity = 0
+    aligned_grid = 0
+    for source_position, llm_position in zip(deterministic, llm_products):
+        same_quantity = source_position.quantity == llm_position.quantity
+        same_unit = _word_table_key(source_position.unit) == _word_table_key(
+            llm_position.unit
+        )
+        if same_quantity and same_unit:
+            aligned_grid += 1
+            if _position_name_key(source_position) == _position_name_key(llm_position):
+                aligned_identity += 1
+    identity_ratio = aligned_identity / len(deterministic)
+    grid_ratio = aligned_grid / len(deterministic)
+    if identity_ratio < 0.75 or grid_ratio < 0.90:
+        return deterministic, llm_products, []
+
+    merged = [
+        _merge_replicated_position_details(source_position, llm_position)
+        for source_position, llm_position in zip(deterministic, llm_products)
+    ]
+    return (
+        merged,
+        [],
+        [
+            "Skipped an aligned LLM copy of deterministic table rows; "
+            "retained deterministic product identities and merged details."
+        ],
+    )
+
+
 def merge_positions(
     deterministic: list[TenderPosition],
     llm_response: TenderPositionsResponse | None,
@@ -1694,9 +1751,16 @@ def merge_positions(
         llm_products,
         deterministic + seldon + llm_products,
     )
+    deterministic, llm_products, aligned_copy_warnings = (
+        _merge_aligned_llm_table_copy(deterministic, llm_products)
+    )
     llm_product_ids = {id(position) for position in llm_products}
     combined = llm_products + seldon + deterministic
-    warnings = list(llm_response.warnings if llm_response else []) + breakdown_warnings
+    warnings = (
+        list(llm_response.warnings if llm_response else [])
+        + breakdown_warnings
+        + aligned_copy_warnings
+    )
     seldon_by_source = {
         key: position
         for position in seldon
@@ -1774,6 +1838,17 @@ def merge_positions(
         existing_index = seen.get(resolved_key)
         if existing_index is not None:
             existing = result[existing_index]
+            deterministic_replaces_llm = (
+                position.source == "excel_table_deterministic"
+                and existing.source != "excel_table_deterministic"
+            )
+            merged_existing = _merge_replicated_position_details(
+                position if deterministic_replaces_llm else existing,
+                existing if deterministic_replaces_llm else position,
+            )
+            if merged_existing != existing:
+                result[existing_index] = merged_existing
+                existing = merged_existing
             updates: dict[str, Any] = {}
             if existing.quantity is None and quantity is not None:
                 updates["quantity"] = quantity

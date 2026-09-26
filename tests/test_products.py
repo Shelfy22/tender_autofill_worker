@@ -483,6 +483,171 @@ def test_repeated_merged_word_row_is_not_extracted_as_a_product() -> None:
     ]
 
 
+def test_country_of_origin_column_does_not_replace_product_column() -> None:
+    text = "\n".join(
+        (
+            "4. ТЕХНИЧЕСКОЕ ЗАДАНИЕ",
+            "Таблица Word 1",
+            (
+                "Строка 1: A: № п/п | B: Наименование товара | "
+                "C: Технические и качественные характеристики товара | "
+                "D: Ед. изм. | E: Кол-во | F: Код ОКПД2 | "
+                "G: Наименование страны происхождения товара"
+            ),
+            (
+                "Строка 2: A: 1 | B: Генератор дыма | "
+                "C: Вид: генератор тумана; Мощность: не менее 550 Вт | "
+                "D: шт. | E: 2 | F: 27.11.32.120 | G: "
+            ),
+            (
+                "Строка 3: A: 2 | B: Жидкость для генератора дыма | "
+                "C: Объем: не менее 1 л; Время использования: не менее 35 ч | "
+                "D: л | E: 10 | F: 20.59.59.900 | G: "
+            ),
+        )
+    )
+
+    positions = extract_deterministic_positions(text)
+
+    assert [position.product for position in positions] == [
+        "Генератор дыма",
+        "Жидкость для генератора дыма",
+    ]
+    assert [position.quantity for position in positions] == [2, 10]
+    assert all(position.sourceReference is not None for position in positions)
+    assert all(position.characteristics for position in positions)
+    assert "550 Вт" in positions[0].requirements
+    assert "не менее 1 л" in positions[1].requirements
+
+
+def test_equal_product_names_receive_characteristics_from_their_own_rows() -> None:
+    text = "\n".join(
+        (
+            "4. ТЕХНИЧЕСКОЕ ЗАДАНИЕ",
+            "Таблица Word 1",
+            (
+                "Строка 1: A: № п/п | B: Наименование товара | "
+                "C: Технические характеристики товара | D: Ед. изм. | "
+                "E: Кол-во | F: Наименование страны происхождения товара"
+            ),
+            (
+                "Строка 2: A: 1 | B: Прожектор | "
+                "C: Мощность: не менее 500 Вт | D: шт. | E: 8 | F: "
+            ),
+            (
+                "Строка 3: A: 2 | B: Прожектор | "
+                "C: Мощность: не менее 760 Вт | D: шт. | E: 7 | F: "
+            ),
+        )
+    )
+
+    positions = extract_deterministic_positions(text)
+
+    assert [position.product for position in positions] == ["Прожектор", "Прожектор"]
+    assert [position.quantity for position in positions] == [8, 7]
+    assert "500 Вт" in positions[0].requirements
+    assert "760 Вт" in positions[1].requirements
+    assert "760 Вт" not in positions[0].requirements
+    assert "500 Вт" not in positions[1].requirements
+
+
+def test_deterministic_word_row_wins_over_llm_characteristic_as_product() -> None:
+    reference = {
+        "fileName": "Извещение.doc",
+        "table": "Таблица Word 4",
+        "row": 4,
+        "sectionRole": "technical_specification",
+    }
+    deterministic = [
+        TenderPosition(
+            candidateId="table:Извещение.doc:Таблица Word 4:4:B",
+            product="Генератор дыма",
+            productQuery="Генератор дыма; Мощность 550 Вт",
+            quantity=2,
+            unit="шт.",
+            requirements="Мощность: не менее 550 Вт",
+            characteristics=[
+                ProductCharacteristic(
+                    name="Мощность",
+                    value="не менее 550 Вт",
+                    associationMethod="same_row",
+                )
+            ],
+            source="excel_table_deterministic",
+            sourceReference=reference,
+        )
+    ]
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product="Вид: генератор тумана; Мощность: не менее 550 Вт",
+                quantity=2,
+                unit="шт.",
+                source="llm",
+                sourceReference=reference,
+            )
+        ]
+    )
+
+    merged, _ = merge_positions(deterministic, llm)
+
+    assert len(merged) == 1
+    assert merged[0].product == "Генератор дыма"
+    assert merged[0].quantity == 2
+    assert [item.value for item in merged[0].characteristics] == [
+        "не менее 550 Вт"
+    ]
+
+
+def test_aligned_llm_copy_without_references_does_not_double_table_rows() -> None:
+    deterministic = [
+        TenderPosition(
+            product=name,
+            quantity=index,
+            unit="шт",
+            source="excel_table_deterministic",
+            sourceReference={
+                "fileName": "Извещение.doc",
+                "table": "Таблица Word 4",
+                "row": index + 1,
+            },
+        )
+        for index, name in enumerate(
+            (
+                "Прожектор",
+                "Генератор дыма",
+                "Жидкость для генератора дыма",
+                "Струбцина",
+                "Кабель",
+            ),
+            start=1,
+        )
+    ]
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product=(
+                    "Мощность: 550 Вт"
+                    if index == 3
+                    else source_position.product
+                ),
+                quantity=source_position.quantity,
+                unit=source_position.unit,
+                source="llm",
+            )
+            for index, source_position in enumerate(deterministic, start=1)
+        ]
+    )
+
+    merged, warnings = merge_positions(deterministic, llm)
+
+    assert len(merged) == 5
+    assert [position.product for position in merged] == [
+        position.product for position in deterministic
+    ]
+    assert any("aligned LLM copy" in warning for warning in warnings)
+
+
 def test_invalid_structured_table_falls_back_to_text_extraction() -> None:
     text = chr(10).join(
         (
