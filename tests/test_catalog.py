@@ -200,6 +200,41 @@ def test_qdrant_merges_candidates_from_multiple_query_variants() -> None:
     assert shared["matchedQueries"] == ["Светильник", "Светильник 40Вт"]
 
 
+def test_qdrant_skips_bare_product_name_when_query_is_enriched() -> None:
+    matcher = make_matcher(httpx.MockTransport(lambda _: httpx.Response(200, json={})))
+    embedded_queries: list[str] = []
+
+    def embed(query: str) -> list[float]:
+        embedded_queries.append(query)
+        return [1.0]
+
+    matcher._embedding = embed  # type: ignore[method-assign]
+    matcher._query_qdrant = lambda _: [  # type: ignore[method-assign]
+        {"id": "candidate", "score": 0.90, "payload": {"name": "Прожектор"}}
+    ]
+    matcher._select_with_llm = lambda *_: ProductMatch()  # type: ignore[method-assign]
+    try:
+        matcher._qdrant_match(
+            TenderPosition(
+                product="Прожектор",
+                productQuery="Прожектор 500Вт линейное 3200-7500К",
+                searchCharacteristics=["500Вт", "линейное", "3200-7500К"],
+                searchQueries=[
+                    "Прожектор",
+                    "Прожектор 500Вт",
+                    "Прожектор 500Вт линейное 3200-7500К",
+                ],
+            )
+        )
+    finally:
+        matcher.close()
+
+    assert embedded_queries == [
+        "Прожектор 500Вт линейное 3200-7500К",
+        "Прожектор 500Вт",
+    ]
+
+
 def test_qdrant_keeps_successful_variant_when_another_variant_fails() -> None:
     matcher = make_matcher(httpx.MockTransport(lambda _: httpx.Response(200, json={})))
     captured: list[dict[str, object]] = []

@@ -480,6 +480,24 @@ def _fallback_characteristic_score(name: Any, token: str) -> int:
     return 60 if any(character.isdigit() for character in token) else 45
 
 
+def _search_query_variants(
+    base: str,
+    selected: list[str],
+    *,
+    exact_identity: str = "",
+) -> list[str]:
+    query = _clean(" ".join((base, *selected))) or base
+    candidates = [query, exact_identity]
+    if selected:
+        if len(selected) > 2:
+            candidates.append(_clean(" ".join((base, *selected[:2]))))
+        if len(selected) > 1:
+            candidates.append(_clean(" ".join((base, selected[0]))))
+    else:
+        candidates.append(base)
+    return list(dict.fromkeys(value for value in candidates if value))[:4]
+
+
 def _fallback_search_query(position: TenderPosition) -> TenderPosition:
     scored: list[tuple[int, int, str]] = []
     seen: set[str] = set()
@@ -505,17 +523,7 @@ def _fallback_search_query(position: TenderPosition) -> TenderPosition:
     ]
     base = _clean(position.product)
     query = _clean(" ".join((base, *selected))) or base
-    variants = list(
-        dict.fromkeys(
-            value
-            for value in (
-                query,
-                _clean(" ".join((base, *selected[:1]))),
-                base,
-            )
-            if value
-        )
-    )
+    variants = _search_query_variants(base, selected)
     return position.model_copy(
         update={
             "productQuery": query,
@@ -584,18 +592,11 @@ def build_search_query(
     exact_identity = _clean(
         " ".join(filter(None, (position.brand, position.model, position.article)))
     )
-    query_variants = list(
-        dict.fromkeys(
-            value
-            for value in (
-                query,
-                exact_identity,
-                _clean(" ".join([base, *selected[:1]])),
-                base,
-            )
-            if value
-        )
-    )[:4]
+    query_variants = _search_query_variants(
+        base,
+        selected,
+        exact_identity=exact_identity,
+    )
     return position.model_copy(
         update={
             "productQuery": query,

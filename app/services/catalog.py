@@ -501,14 +501,21 @@ class CatalogMatcher:
     def _qdrant_match(self, product: TenderPosition) -> ProductMatch:
         if not self.settings.qdrant_url:
             raise RuntimeError("QDRANT_URL не настроен")
+        canonical_query = (product.productQuery or product.product).strip()
+        raw_queries = [canonical_query, *(product.searchQueries or [])]
+        base_query = product.product.strip().casefold()
+        has_enriched_query = bool(product.searchCharacteristics) and (
+            canonical_query.casefold() != base_query
+        )
         queries = list(
             dict.fromkeys(
                 query.strip()
-                for query in (
-                    product.searchQueries
-                    or [product.productQuery or product.product]
-                )
+                for query in raw_queries
                 if query and query.strip()
+                and not (
+                    has_enriched_query
+                    and query.strip().casefold() == base_query
+                )
             )
         )[: self.settings.qdrant_query_variants]
         merged: dict[str, dict[str, Any]] = {}

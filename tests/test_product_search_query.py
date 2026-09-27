@@ -231,7 +231,7 @@ def test_query_builder_composes_cable_designation_and_query_variants() -> None:
     assert enriched.productQuery == "Кабель ПВС 3x0,75"
     assert enriched.searchCharacteristics == ["3x0,75"]
     assert enriched.searchCategoryCode == "electrical_lighting"
-    assert enriched.searchQueries == ["Кабель ПВС 3x0,75", "Кабель ПВС"]
+    assert enriched.searchQueries == ["Кабель ПВС 3x0,75"]
 
 
 class SearchQueryLlm:
@@ -349,6 +349,12 @@ def test_projector_fallback_uses_values_and_excludes_binary_presence() -> None:
         "3200-7500К",
     ]
     assert enriched[0].searchQueries[0] == enriched[0].productQuery
+    assert enriched[0].searchQueries == [
+        "Прожектор 500Вт линейное 3200-7500К",
+        "Прожектор 500Вт линейное",
+        "Прожектор 500Вт",
+    ]
+    assert "Прожектор" not in enriched[0].searchQueries
     assert "наличие" not in enriched[0].productQuery.casefold()
     assert "да" not in enriched[0].productQuery.casefold()
     assert "автоматический" not in enriched[0].productQuery.casefold()
