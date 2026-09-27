@@ -154,7 +154,7 @@ def test_word_rows_with_same_name_remain_separate_positions() -> None:
     assert positions[1].documentUnitPriceRub == 274.01
 
 
-def test_word_companion_characteristics_enrich_catalog_query() -> None:
+def test_word_companion_characteristics_are_stored_without_prebuilding_query() -> None:
     positions = extract_deterministic_positions(
         "\n".join(
             (
@@ -170,7 +170,11 @@ def test_word_companion_characteristics_enrich_catalog_query() -> None:
 
     assert len(positions) == 1
     assert "\u041c\u0430\u0440\u043a\u0430: \u042d42" in positions[0].requirements
-    assert "\u0434\u0438\u0430\u043c\u0435\u0442\u0440: 3,0 \u043c\u043c" in positions[0].productQuery
+    assert positions[0].productQuery == (
+        "\u042d\u043b\u0435\u043a\u0442\u0440\u043e\u0434\u044b "
+        "\u0441\u0432\u0430\u0440\u043e\u0447\u043d\u044b\u0435 \u0442\u0438\u043f 1"
+    )
+    assert positions[0].characteristics
     assert "\u0422\u0430\u0431\u043b\u0438\u0446\u0430 Word 2" in positions[0].evidence
 
 

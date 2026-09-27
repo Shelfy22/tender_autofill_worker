@@ -85,6 +85,43 @@ def test_non_search_and_already_encoded_characteristics_are_removed() -> None:
     assert normalize_search_characteristic(
         semantic_characteristic("c3", token="220В", encoded=True)
     ) is None
+    assert normalize_search_characteristic(
+        SemanticCharacteristic(
+            id="c4",
+            name="Наличие фрост фильтра",
+            original_value="да",
+            semantic_role="VARIANT_SELECTOR",
+            value_form="TEXT",
+            search_token="да",
+        )
+    ) is None
+    assert normalize_search_characteristic(
+        SemanticCharacteristic(
+            id="c5",
+            name="Индикаторы",
+            original_value="наличие питания и сигнала",
+            semantic_role="OTHER",
+            value_form="TEXT",
+            search_token="наличие питания и сигнала",
+        )
+    ) is None
+
+
+def test_color_temperature_range_is_preserved_instead_of_midpoint() -> None:
+    characteristic = SemanticCharacteristic(
+        id="c1",
+        name="Диапазон СТО, К",
+        original_value="3200-7500",
+        semantic_role="VARIANT_SELECTOR",
+        value_form="ACCEPTABLE_RANGE",
+        search_token="3200-7500К",
+        numeric=CharacteristicNumeric(min=3200, max=7500, unit="К"),
+    )
+
+    normalized = normalize_search_characteristic(characteristic)
+
+    assert normalized is not None
+    assert normalized["search_token"] == "3200-7500К"
 
 
 def test_hallucinated_search_token_is_rejected() -> None:
@@ -194,7 +231,7 @@ def test_query_builder_composes_cable_designation_and_query_variants() -> None:
     assert enriched.productQuery == "Кабель ПВС 3x0,75"
     assert enriched.searchCharacteristics == ["3x0,75"]
     assert enriched.searchCategoryCode == "electrical_lighting"
-    assert enriched.searchQueries == ["Кабель ПВС", "Кабель ПВС 3x0,75"]
+    assert enriched.searchQueries == ["Кабель ПВС 3x0,75", "Кабель ПВС"]
 
 
 class SearchQueryLlm:
@@ -258,7 +295,7 @@ def test_two_llm_stages_enrich_query_and_keep_structured_characteristics() -> No
     assert debug["enrichedCount"] == 1
 
 
-def test_characteristic_llm_failure_keeps_original_query() -> None:
+def test_characteristic_llm_failure_builds_compact_fallback_query() -> None:
     class FailingLlm:
         def classify_product_characteristics(self, items: list[dict]) -> ProductSemanticBatchResponse:
             raise TimeoutError("timeout")
@@ -271,6 +308,47 @@ def test_characteristic_llm_failure_keeps_original_query() -> None:
 
     enriched, warnings, debug = enrich_product_search_queries(FailingLlm(), [position])
 
-    assert enriched[0].productQuery == "Светильник исходный запрос"
+    assert enriched[0].productQuery == "Светильник 40Вт"
+    assert enriched[0].searchCharacteristics == ["40Вт"]
+    assert enriched[0].searchQueries[0] == "Светильник 40Вт"
     assert warnings
-    assert debug["enrichedCount"] == 0
+    assert debug["enrichedCount"] == 1
+
+
+def test_projector_fallback_uses_values_and_excludes_binary_presence() -> None:
+    class FailingLlm:
+        def classify_product_characteristics(self, items: list[dict]) -> ProductSemanticBatchResponse:
+            raise TimeoutError("timeout")
+
+    position = TenderPosition(
+        product="Прожектор",
+        productQuery=(
+            "Прожектор; технические характеристики: Источник света: светодиод; "
+            "Мощность, Вт: не менее 500"
+        ),
+        characteristics=[
+            ProductCharacteristic(name="Источник света", value="светодиод"),
+            ProductCharacteristic(name="Мощность, Вт", value="не менее 500"),
+            ProductCharacteristic(name="Наличие фрост фильтра", value="да"),
+            ProductCharacteristic(name="Тип цветосмешения CMY", value="линейное"),
+            ProductCharacteristic(name="Диапазон СТО, К", value="3200-7500"),
+            ProductCharacteristic(
+                name="Протоколы управления",
+                value="RDM, DMX512, автоматический режим, master-slave",
+            ),
+        ],
+    )
+
+    enriched, warnings, _ = enrich_product_search_queries(FailingLlm(), [position])
+
+    assert warnings
+    assert enriched[0].productQuery == "Прожектор 500Вт линейное 3200-7500К"
+    assert enriched[0].searchCharacteristics == [
+        "500Вт",
+        "линейное",
+        "3200-7500К",
+    ]
+    assert enriched[0].searchQueries[0] == enriched[0].productQuery
+    assert "наличие" not in enriched[0].productQuery.casefold()
+    assert "да" not in enriched[0].productQuery.casefold()
+    assert "автоматический" not in enriched[0].productQuery.casefold()

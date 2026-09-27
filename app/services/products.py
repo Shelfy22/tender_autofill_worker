@@ -408,7 +408,10 @@ def _word_table_characteristics(
     text = str(value or "").strip()
     if not text:
         return []
-    parts = re.split(r"\s*;\s*(?=[^;:]{1,160}:)", text)
+    parts = re.split(
+        r"\s*;{2,}\s*|\s*;\s*(?=[^;:]{1,160}:)",
+        text,
+    )
     if len(parts) == 1 and ";" in text:
         parts = re.split(r"\s*;\s*", text)
     result: list[ProductCharacteristic] = []
@@ -638,16 +641,11 @@ def _enrich_structured_table_positions_with_characteristics(
             if key not in seen_characteristics:
                 combined_characteristics.append(characteristic)
                 seen_characteristics.add(key)
-        query = _clean(position.productQuery or position.product)
-        if requirements.casefold() not in query.casefold():
-            query = _clean(
-                f"{query}; \u0442\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0435 \u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0438: {requirements}"
-            )
         evidence = _clean("\n".join((position.evidence, source)))[:500]
         enriched.append(
             position.model_copy(
                 update={
-                    "productQuery": query,
+                    "productQuery": _clean(position.product),
                     "requirements": combined_requirements,
                     "characteristics": combined_characteristics,
                     "evidence": evidence,

@@ -36,7 +36,10 @@ def _split_requirements(value: str) -> list[tuple[str, str]]:
     text = str(value or "").strip()
     if not text:
         return []
-    parts = re.split(r"[\r\n]+|\s*\|\s*|\s*;\s*(?=[^;:]{1,80}:)", text)
+    parts = re.split(
+        r"[\r\n]+|\s*\|\s*|\s*;{2,}\s*|\s*;\s*(?=[^;:]{1,80}:)",
+        text,
+    )
     result: list[tuple[str, str]] = []
     for part in parts:
         part = _clean(part)
@@ -235,7 +238,12 @@ def _search_token_is_grounded(
         return False
     if token_units and not source_units:
         role_name = _identity(characteristic.name)
-        if not (token_units == {"p"} and "полюс" in role_name):
+        name_unit = _canonical_unit(_fallback_unit_hint(characteristic.name))
+        unit_is_grounded_in_name = bool(name_unit and token_units == {name_unit})
+        if not (
+            unit_is_grounded_in_name
+            or (token_units == {"p"} and "полюс" in role_name)
+        ):
             return False
 
     if not _numbers(token):
@@ -252,12 +260,27 @@ def normalize_search_characteristic(
     if (
         characteristic.semantic_role in _NON_SEARCH_ROLES
         or characteristic.already_encoded_in_name
+        or _is_binary_presence_characteristic(
+            characteristic.name,
+            characteristic.original_value,
+        )
     ):
         return None
 
     value_form = characteristic.value_form
     numeric = characteristic.numeric
-    if value_form == "ACCEPTABLE_RANGE" and numeric.min is not None and numeric.max is not None:
+    name_identity = _identity(characteristic.name)
+    is_color_temperature_range = bool(
+        numeric.min is not None
+        and numeric.max is not None
+        and re.search(r"цветов.*температур|диапазон.*(?:сто|cct)", name_identity)
+    )
+    if is_color_temperature_range:
+        unit = _clean(numeric.unit) or _fallback_unit_hint(characteristic.name)
+        token = _compact_token(
+            f"{_format_number(numeric.min)}-{_format_number(numeric.max)}{unit}"
+        )
+    elif value_form == "ACCEPTABLE_RANGE" and numeric.min is not None and numeric.max is not None:
         token = _boundary_token(characteristic, (numeric.min + numeric.max) / 2)
     elif value_form == "MINIMUM":
         token = _boundary_token(
@@ -334,6 +357,175 @@ def _compose_search_tokens(items: list[dict[str, Any]]) -> list[str]:
     return list(dict.fromkeys(token for token in composed if token))
 
 
+def _is_binary_presence_characteristic(name: Any, value: Any) -> bool:
+    normalized_name = _identity(name)
+    normalized_value = _identity(value)
+    binary_values = {
+        "да",
+        "нет",
+        "есть",
+        "имеется",
+        "предусмотрено",
+        "не предусмотрено",
+        "true",
+        "false",
+    }
+    if normalized_value in binary_values:
+        return True
+    if re.match(r"^(?:наличие|отсутствие)\b", normalized_value):
+        return True
+    return bool(
+        re.search(r"\b(?:наличие|поддержка|совместимость)\b", normalized_name)
+        and normalized_value in binary_values
+    )
+
+
+def _fallback_unit_hint(name: Any) -> str:
+    normalized = _clean(name)
+    match = re.search(
+        r"(?:,|\()\s*(Вт|кВт|В|кВ|А|мА|Гц|мм|см|м|м2|м²|м3|м³|"
+        r"м3/ч|м³/ч|л|кг|г|К|°C|градус(?:а|ов)?)\s*\)?(?:\s|$)",
+        normalized,
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    unit = match.group(1)
+    if unit.casefold().startswith("градус"):
+        return "°"
+    return unit
+
+
+def _fallback_characteristic_token(name: Any, value: Any) -> str:
+    raw_name = _clean(name)
+    raw_value = _clean(value).strip(" ;,.")
+    if not raw_value or _is_binary_presence_characteristic(raw_name, raw_value):
+        return ""
+    if re.search(
+        r"\b(?:гарант|срок|время\s+использования|ресурс|наработка)\b",
+        _identity(raw_name),
+    ):
+        return ""
+
+    unit_hint = _fallback_unit_hint(raw_name)
+    range_match = re.search(
+        r"(-?\d+(?:[.,]\d+)?)\s*[-–—…]\s*(-?\d+(?:[.,]\d+)?)",
+        raw_value,
+    )
+    if range_match:
+        trailing_unit_match = re.match(
+            r"\s*([%°A-Za-zА-Яа-яЁё³²/]+)",
+            raw_value[range_match.end() :],
+        )
+        trailing_unit = (
+            trailing_unit_match.group(1)
+            if trailing_unit_match
+            and _canonical_unit(trailing_unit_match.group(1))
+            in {
+                "v", "kv", "a", "ma", "w", "kw", "hz", "mm", "mm2",
+                "cm", "m", "m2", "m3", "m3/h", "l", "kg", "g", "rpm",
+                "%", "°c", "к",
+            }
+            else ""
+        )
+        return _compact_token(
+            f"{range_match.group(1)}-{range_match.group(2)}"
+            f"{trailing_unit or unit_hint}"
+        )
+
+    number_match = re.search(r"-?\d+(?:[.,]\d+)?", raw_value)
+    if number_match:
+        value_unit_match = re.search(
+            r"-?\d+(?:[.,]\d+)?\s*([%°A-Za-zА-Яа-яЁё³²/]+)",
+            raw_value,
+        )
+        value_unit = value_unit_match.group(1) if value_unit_match else ""
+        if value_unit and _canonical_unit(value_unit) not in {
+            "v", "kv", "a", "ma", "w", "kw", "hz", "mm", "mm2",
+            "cm", "m", "m2", "m3", "m3/h", "l", "kg", "g", "rpm",
+            "%", "°c", "к",
+        }:
+            value_unit = ""
+        unit = value_unit or unit_hint
+        if not unit:
+            return ""
+        return _compact_token(f"{number_match.group(0)}{unit}")
+
+    if (
+        len(raw_value) <= 60
+        and len(raw_value.split()) <= 5
+        and not re.search(r"[.;:]", raw_value)
+    ):
+        return _compact_token(raw_value)
+    return ""
+
+
+def _fallback_characteristic_score(name: Any, token: str) -> int:
+    normalized = _identity(name)
+    rules = (
+        (r"модел|серия|артикул|маркиров", 120),
+        (r"мощност|номинал.*ток|напряж|частот", 110),
+        (r"тип.*цветосмеш|цветосмеш", 105),
+        (r"диапазон.*(?:сто|цвет.*температур)|цветов.*температур", 100),
+        (r"сечен|числ.*жил|колич.*жил|диаметр|резьб|типоразмер", 95),
+        (r"производительност|подач|напор|давлен|скорост", 90),
+        (r"источник.*свет|тип.*луч|тип\b|вид\b", 80),
+        (r"интерфейс|сигнал|протокол|вход|выход", 70),
+        (r"материал|цвет", 55),
+        (r"колич", 40),
+    )
+    for pattern, score in rules:
+        if re.search(pattern, normalized):
+            return score
+    return 60 if any(character.isdigit() for character in token) else 45
+
+
+def _fallback_search_query(position: TenderPosition) -> TenderPosition:
+    scored: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for ordinal, candidate in enumerate(_characteristic_candidates(position)):
+        token = _fallback_characteristic_token(
+            candidate.get("name"),
+            candidate.get("value"),
+        )
+        token_key = _identity(token)
+        if not token or not token_key or token_key in seen:
+            continue
+        seen.add(token_key)
+        scored.append(
+            (
+                _fallback_characteristic_score(candidate.get("name"), token),
+                -ordinal,
+                token,
+            )
+        )
+    selected = [
+        token
+        for _, _, token in sorted(scored, reverse=True)[:3]
+    ]
+    base = _clean(position.product)
+    query = _clean(" ".join((base, *selected))) or base
+    variants = list(
+        dict.fromkeys(
+            value
+            for value in (
+                query,
+                _clean(" ".join((base, *selected[:1]))),
+                base,
+            )
+            if value
+        )
+    )
+    return position.model_copy(
+        update={
+            "productQuery": query,
+            "searchCharacteristics": selected,
+            "searchCategoryCode": normalize_product_category("", position.product),
+            "searchQueries": variants,
+        }
+    )
+
+
 def _safe_base_name(position: TenderPosition, semantic: ProductSemanticClassification) -> str:
     original = _clean(position.product)
     normalized = _clean(semantic.normalized_product)
@@ -396,10 +588,10 @@ def build_search_query(
         dict.fromkeys(
             value
             for value in (
-                exact_identity,
-                base,
-                _clean(" ".join([base, *selected[:1]])),
                 query,
+                exact_identity,
+                _clean(" ".join([base, *selected[:1]])),
+                base,
             )
             if value
         )
@@ -471,9 +663,13 @@ def enrich_product_search_queries(
             )
             batch_debug.append(debug_item)
             warnings.append(
-                "Семантическая классификация характеристик недоступна; исходные productQuery "
-                f"сохранены для позиций {indexes[0]}-{indexes[-1]}: {type(exc).__name__}: {exc}"
+                "Семантическая классификация характеристик недоступна; применён компактный "
+                f"детерминированный fallback для позиций {indexes[0]}-{indexes[-1]}: "
+                f"{type(exc).__name__}: {exc}"
             )
+            for index in indexes:
+                result[index - 1] = _fallback_search_query(positions[index - 1])
+                enriched_count += 1
             continue
 
         semantic_by_index = {item.position_index: item for item in semantic_response.results}
@@ -485,8 +681,11 @@ def enrich_product_search_queries(
             returned_ids = {item.id for item in semantic.characteristics} if semantic else set()
             if semantic is None or returned_ids != expected_ids:
                 warnings.append(
-                    f"LLM №1 вернула неполную классификацию позиции {index}; исходный productQuery сохранён."
+                    f"LLM №1 вернула неполную классификацию позиции {index}; "
+                    "применён компактный детерминированный fallback."
                 )
+                result[index - 1] = _fallback_search_query(positions[index - 1])
+                enriched_count += 1
                 continue
             normalized = [
                 item
@@ -532,10 +731,15 @@ def enrich_product_search_queries(
             debug_item.update({"sku": "failed", "error": f"{type(exc).__name__}: {exc}"})
             batch_debug.append(debug_item)
             warnings.append(
-                "Классификация SKU-важности недоступна; исходные productQuery сохранены для "
+                "Классификация SKU-важности недоступна; применён компактный "
+                "детерминированный fallback для "
                 f"позиций {sku_input[0]['position_index']}-{sku_input[-1]['position_index']}: "
                 f"{type(exc).__name__}: {exc}"
             )
+            for item in sku_input:
+                index = item["position_index"]
+                result[index - 1] = _fallback_search_query(positions[index - 1])
+                enriched_count += 1
             continue
 
         sku_by_index = {item.position_index: item for item in sku_response.results}
@@ -547,8 +751,11 @@ def enrich_product_search_queries(
             decision_ids = {decision.id for decision in sku.decisions} if sku else set()
             if sku is None or decision_ids != expected_ids:
                 warnings.append(
-                    f"LLM №2 вернула неполную классификацию позиции {index}; исходный productQuery сохранён."
+                    f"LLM №2 вернула неполную классификацию позиции {index}; "
+                    "применён компактный детерминированный fallback."
                 )
+                result[index - 1] = _fallback_search_query(positions[index - 1])
+                enriched_count += 1
                 continue
             result[index - 1] = build_search_query(
                 positions[index - 1], semantic, sku, normalized_by_index[index]

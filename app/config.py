@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     spreadsheet_candidate_review_max_rows: int = Field(default=100_000, ge=5, le=1_000_000)
     spreadsheet_candidate_review_max_chars: int = Field(default=1_000_000, ge=5_000)
     spreadsheet_llm_max_positions: int = Field(default=500, ge=1, le=100_000)
-    product_characteristic_batch_size: int = Field(default=20, ge=1, le=100)
+    product_characteristic_batch_size: int = Field(default=5, ge=1, le=100)
     pdf_ocr_max_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
 
     seldon_base_url: str = "https://apitorgi.myseldon.com"
