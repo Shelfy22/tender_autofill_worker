@@ -21,6 +21,16 @@ _NUMBER_WITH_UNIT = re.compile(
 _UNIT_AFTER_NUMBER = re.compile(
     r"-?\d+(?:[.,]\d+)?\s*([%°A-Za-zА-Яа-яЁё³²/·*]+)"
 )
+_CABLE_PRODUCT_PATTERN = re.compile(r"\b(?:кабел|провод|шнур)", re.IGNORECASE)
+_CABLE_DESIGNATION_PATTERN = re.compile(
+    r"(?P<mark>[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9()\-]{1,40})\s*"
+    r"(?P<cores>\d{1,2})\s*[xх×*]\s*(?P<section>\d{1,4}(?:[.,]\d+)?)",
+    re.IGNORECASE,
+)
+_CABLE_MARK_PATTERN = re.compile(
+    r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9()\-]{2,40}",
+    re.IGNORECASE,
+)
 
 
 def _clean(value: Any) -> str:
@@ -142,6 +152,78 @@ def _compact_token(value: Any) -> str:
     token = re.sub(r"(?<=\d)\s+(?=[%°A-Za-zА-Яа-яЁё])", "", token)
     token = re.sub(r"(?<=[A-Za-zА-Яа-яЁё])\s+(?=\d)", "", token)
     return token[:120]
+
+
+def _is_weak_standalone_token(value: Any) -> bool:
+    return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", _clean(value)))
+
+
+def _is_cable_position(
+    position: TenderPosition,
+    semantic: ProductSemanticClassification | None = None,
+) -> bool:
+    text = " ".join(
+        value
+        for value in (
+            _clean(position.product),
+            _clean(position.productQuery),
+            _clean(semantic.category) if semantic is not None else "",
+        )
+        if value
+    )
+    return bool(_CABLE_PRODUCT_PATTERN.search(text))
+
+
+def _cable_identity_tokens(
+    position: TenderPosition,
+    semantic: ProductSemanticClassification | None = None,
+) -> list[str]:
+    if not _is_cable_position(position, semantic):
+        return []
+
+    values = [
+        _clean(value)
+        for value in (
+            position.product,
+            position.productQuery,
+            *(characteristic.value for characteristic in position.characteristics),
+        )
+        if _clean(value)
+    ]
+    for value in values:
+        match = _CABLE_DESIGNATION_PATTERN.search(value)
+        if match:
+            mark = _compact_token(match.group("mark")).rstrip(".,;:")
+            return [f"{mark} {match.group('cores')}x{match.group('section')}"]
+
+    mark = ""
+    cores = ""
+    section = ""
+    for characteristic in position.characteristics:
+        name = _identity(characteristic.name)
+        value = _clean(characteristic.value)
+        if not value:
+            continue
+        if not mark and re.search(r"\b(?:марка|маркиров|обозначен|тип)\b", name):
+            candidate = _CABLE_MARK_PATTERN.search(value)
+            if candidate:
+                mark = _compact_token(candidate.group(0)).rstrip(".,;:")
+        if not cores and re.search(r"\b(?:числ|колич).*жил\b", name):
+            cores = _first_number_token(value)
+        if not section and re.search(r"\b(?:сечен|площад.*попереч)\b", name):
+            section = _first_number_token(value)
+
+    tokens: list[str] = []
+    if mark:
+        tokens.append(mark)
+    if cores and section:
+        tokens.append(f"{cores}x{section}")
+    return tokens
+
+
+def _prepend_required_tokens(required: list[str], selected: list[str]) -> list[str]:
+    values = [*required, *(token for token in selected if not _is_weak_standalone_token(token))]
+    return list(dict.fromkeys(_compact_token(value) for value in values if _compact_token(value)))[:5]
 
 
 def _boundary_token(characteristic: SemanticCharacteristic, value: float | None) -> str:
@@ -521,6 +603,7 @@ def _fallback_search_query(position: TenderPosition) -> TenderPosition:
         token
         for _, _, token in sorted(scored, reverse=True)[:3]
     ]
+    selected = _prepend_required_tokens(_cable_identity_tokens(position), selected)
     base = _clean(position.product)
     query = _clean(" ".join((base, *selected))) or base
     variants = _search_query_variants(base, selected)
@@ -560,14 +643,30 @@ def build_search_query(
     decision_by_id = {decision.id: decision for decision in sku.decisions}
     selected_items: list[dict[str, Any]] = []
     seen_tokens: set[str] = set()
-    for characteristic_id in sku.selected_for_search:
+    identity_ids = list(dict.fromkeys(sku.identity_bundle))
+    selected_ids = list(dict.fromkeys([*identity_ids, *sku.selected_for_search]))
+    for characteristic_id in selected_ids:
         item = by_id.get(characteristic_id)
         decision = decision_by_id.get(characteristic_id)
-        if item is None or decision is None or decision.usage not in _SEARCH_USAGES:
+        is_identity = characteristic_id in identity_ids
+        if (
+            item is None
+            or decision is None
+            or (not is_identity and decision.usage not in _SEARCH_USAGES)
+        ):
             continue
         token = _compact_token(item["search_token"])
         token_key = _identity(token)
-        if not token or token_key in seen_tokens:
+        is_cable_cores = any(
+            characteristic.normalizedName == "cable.cores"
+            and _identity(characteristic.value) == _identity(item.get("source_value"))
+            for characteristic in position.characteristics
+        )
+        if (
+            not token
+            or (_is_weak_standalone_token(token) and not is_cable_cores)
+            or token_key in seen_tokens
+        ):
             continue
         seen_tokens.add(token_key)
         selected_items.append({**item, "search_token": token})
@@ -585,7 +684,10 @@ def build_search_query(
             ),
             item.get("name") or "",
         )
-    selected = _compose_search_tokens(selected_items)
+    selected = _prepend_required_tokens(
+        _cable_identity_tokens(position, semantic),
+        _compose_search_tokens(selected_items),
+    )
     query = _clean(" ".join([base, *selected])) or _clean(
         position.productQuery or position.product
     )
@@ -750,7 +852,12 @@ def enrich_product_search_queries(
             sku = sku_by_index.get(index)
             expected_ids = {entry["id"] for entry in normalized_by_index[index]}
             decision_ids = {decision.id for decision in sku.decisions} if sku else set()
-            if sku is None or decision_ids != expected_ids:
+            identity_ids = set(sku.identity_bundle) if sku else set()
+            if (
+                sku is None
+                or decision_ids != expected_ids
+                or not identity_ids.issubset(expected_ids)
+            ):
                 warnings.append(
                     f"LLM №2 вернула неполную классификацию позиции {index}; "
                     "применён компактный детерминированный fallback."

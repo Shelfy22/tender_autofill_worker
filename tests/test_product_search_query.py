@@ -234,6 +234,78 @@ def test_query_builder_composes_cable_designation_and_query_variants() -> None:
     assert enriched.searchQueries == ["Кабель ПВС 3x0,75"]
 
 
+def test_cable_identity_bundle_overrides_weak_llm_selection() -> None:
+    position = TenderPosition(
+        product="Кабель",
+        characteristics=[
+            ProductCharacteristic(name="Тип (марка)", value="АВВГнг(А) 4х70"),
+            ProductCharacteristic(name="Класс гибкости", value="5"),
+            ProductCharacteristic(name="Напряжение", value="0,66/1 кВ"),
+        ],
+    )
+    semantic = ProductSemanticClassification(
+        position_index=1,
+        normalized_product="Кабель",
+        category="Кабели и провода",
+        identifier_strength="LOW",
+    )
+    sku = ProductSkuClassification(
+        position_index=1,
+        decisions=[
+            SkuCharacteristicDecision(id="c1", sku_importance="NONE", usage="IGNORE"),
+            SkuCharacteristicDecision(id="c2", sku_importance="HIGH", usage="SEARCH_PRIMARY"),
+            SkuCharacteristicDecision(id="c3", sku_importance="HIGH", usage="SEARCH_SECONDARY"),
+        ],
+        selected_for_search=["c2", "c3"],
+    )
+
+    enriched = build_search_query(
+        position,
+        semantic,
+        sku,
+        [
+            {"id": "c1", "search_token": "АВВГнг(А) 4x70", "source_value": "АВВГнг(А) 4х70"},
+            {"id": "c2", "search_token": "5", "source_value": "5"},
+            {"id": "c3", "search_token": "0,66/1кВ", "source_value": "0,66/1 кВ"},
+        ],
+    )
+
+    assert enriched.productQuery == "Кабель АВВГнг(А) 4x70 0,66/1кВ"
+    assert enriched.searchCharacteristics == ["АВВГнг(А) 4x70", "0,66/1кВ"]
+    assert " 5" not in enriched.productQuery
+
+
+def test_llm_identity_bundle_adds_ignored_identifier_to_query() -> None:
+    position = TenderPosition(product="Датчик")
+    semantic = ProductSemanticClassification(
+        position_index=1,
+        normalized_product="Датчик",
+        category="КИП",
+        identifier_strength="LOW",
+    )
+    sku = ProductSkuClassification(
+        position_index=1,
+        decisions=[
+            SkuCharacteristicDecision(id="c1", sku_importance="CRITICAL", usage="IGNORE"),
+            SkuCharacteristicDecision(id="c2", sku_importance="HIGH", usage="SEARCH_SECONDARY"),
+        ],
+        selected_for_search=["c2"],
+        identity_bundle=["c1"],
+    )
+
+    enriched = build_search_query(
+        position,
+        semantic,
+        sku,
+        [
+            {"id": "c1", "search_token": "PT1000", "source_value": "PT1000"},
+            {"id": "c2", "search_token": "24В", "source_value": "24 В"},
+        ],
+    )
+
+    assert enriched.productQuery == "Датчик PT1000 24В"
+
+
 class SearchQueryLlm:
     def __init__(self) -> None:
         self.calls: list[str] = []

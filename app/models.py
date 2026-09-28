@@ -570,6 +570,8 @@ class ProductSkuClassification(BaseModel):
     position_index: int = Field(ge=1)
     decisions: list[SkuCharacteristicDecision] = Field(default_factory=list, max_length=100)
     selected_for_search: list[str] = Field(default_factory=list, max_length=5)
+    identity_bundle: list[str] = Field(default_factory=list, max_length=5)
+    identity_bundle: list[str] = Field(default_factory=list, max_length=5)
 
 
 class ProductSkuBatchResponse(BaseModel):
