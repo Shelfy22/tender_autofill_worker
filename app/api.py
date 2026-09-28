@@ -4,6 +4,7 @@ import base64
 import hmac
 import json
 import logging
+import shutil
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ from typing import AsyncIterator
 
 import redis
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 
 from app import __version__
@@ -22,6 +24,7 @@ from app.db import get_repository
 from app.logging import configure_logging
 from app.services.documents import safe_filename
 from app.services.product_matching import LocalDocument, run_product_matching_from_files
+from app.services.product_matching_jobs import ProductMatchingJobStore
 from app.models import (
     AcceptedJob,
     BatchDispatchRequest,
@@ -205,6 +208,109 @@ async def product_matching_from_documents(request: Request) -> Response:
             "Content-Disposition": f"attachment; filename=\"autopodbor_documents.xlsx\"; filename*=UTF-8''{quote(output_name)}",
             "X-Product-Matching-Debug-B64": debug_header,
         },
+    )
+
+
+@app.post(
+    "/product-matching/jobs",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(authorize)],
+)
+async def create_product_matching_job(request: Request) -> dict[str, object]:
+    try:
+        form = await request.form()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid multipart form data: {type(exc).__name__}",
+        ) from exc
+
+    tender_name = str(form.get("tender_name") or form.get("tenderName") or "").strip()
+    uploads = [value for _, value in form.multi_items() if hasattr(value, "filename")]
+    if not uploads:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files uploaded")
+    if len(uploads) > settings.max_documents:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Maximum files per job: {settings.max_documents}",
+        )
+
+    job_id = str(uuid.uuid4())
+    store = ProductMatchingJobStore(settings)
+    file_names = [
+        safe_filename(getattr(upload, "filename", "") or f"document_{index}", f"document_{index}")
+        for index, upload in enumerate(uploads, start=1)
+    ]
+    store.create(job_id, tender_name=tender_name, files=file_names)
+    try:
+        for index, (upload, source_name) in enumerate(zip(uploads, file_names, strict=True), start=1):
+            destination = store.document_path(job_id, index, source_name)
+            size = 0
+            with destination.open("wb") as output:
+                while chunk := await upload.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > settings.max_download_bytes_per_file:
+                        raise HTTPException(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail=f"File {source_name} exceeds MAX_DOWNLOAD_BYTES_PER_FILE",
+                        )
+                    output.write(chunk)
+            if size == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File {source_name} is empty",
+                )
+        store.queue(job_id)
+        celery_app.send_task(
+            "tender_autofill.process_product_matching",
+            args=[job_id],
+            task_id=str(uuid.uuid4()),
+            queue=settings.product_matching_celery_queue,
+        )
+    except Exception as exc:
+        shutil.rmtree(settings.product_matching_jobs_root / job_id, ignore_errors=True)
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Product matching task was not queued: {type(exc).__name__}",
+        ) from exc
+
+    return {
+        "jobId": job_id,
+        "status": "queued",
+        "statusUrl": f"/product-matching/jobs/{job_id}",
+        "downloadUrl": f"/product-matching/jobs/{job_id}/download",
+    }
+
+
+@app.get("/product-matching/jobs/{job_id}", dependencies=[Depends(authorize)])
+def get_product_matching_job(job_id: str) -> dict[str, object]:
+    try:
+        state = ProductMatchingJobStore(settings).public_state(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found") from exc
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return state
+
+
+@app.get("/product-matching/jobs/{job_id}/download", dependencies=[Depends(authorize)])
+def download_product_matching_report(job_id: str) -> FileResponse:
+    store = ProductMatchingJobStore(settings)
+    try:
+        state = store.public_state(job_id)
+        report_path = store.report_path(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found") from exc
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if state.get("status") != "completed" or not report_path.is_file():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Report is not ready")
+    return FileResponse(
+        report_path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=str(state.get("reportFileName") or "autopodbor.xlsx"),
     )
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:

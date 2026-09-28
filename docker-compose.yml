@@ -20,6 +20,8 @@ services:
     command: ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     ports:
       - "${TENDER_API_PORT:-8000}:8000"
+    volumes:
+      - tender-product-matching-data:/tmp/tender-autofill/product-matching-jobs
     depends_on:
       tender-redis:
         condition: service_healthy
@@ -57,6 +59,8 @@ services:
       - tender-queue
       - ai-net
     mem_limit: ${WORKER_MEMORY_LIMIT:-4g}
+    volumes:
+      - tender-product-matching-data:/tmp/tender-autofill/product-matching-jobs
     healthcheck:
       test: ["CMD-SHELL", "celery -A app.celery_app:celery_app inspect ping --destination celery@$$HOSTNAME --timeout=10 | grep -q pong"]
       interval: 60s
@@ -66,8 +70,37 @@ services:
     restart: unless-stopped
     stop_grace_period: 90s
 
+  tender-product-matching-worker:
+    build: .
+    env_file: ${ENV_FILE:-.env}
+    command:
+      - celery
+      - -A
+      - app.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --pool=prefork
+      - --concurrency=1
+      - --prefetch-multiplier=1
+      - --max-tasks-per-child=1
+      - -Q
+      - ${PRODUCT_MATCHING_CELERY_QUEUE:-tender-product-matching}
+    depends_on:
+      tender-redis:
+        condition: service_healthy
+    networks:
+      - default
+      - tender-queue
+      - ai-net
+    mem_limit: ${PRODUCT_MATCHING_WORKER_MEMORY_LIMIT:-4g}
+    volumes:
+      - tender-product-matching-data:/tmp/tender-autofill/product-matching-jobs
+    restart: unless-stopped
+    stop_grace_period: 150s
+
 volumes:
   tender-redis-data:
+  tender-product-matching-data:
 
 networks:
   tender-queue:

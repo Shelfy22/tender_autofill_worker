@@ -27,7 +27,13 @@ celery_app.conf.update(
     task_soft_time_limit=settings.celery_soft_time_limit_seconds,
     task_time_limit=settings.celery_hard_time_limit_seconds,
     broker_connection_retry_on_startup=True,
-    broker_transport_options={"visibility_timeout": settings.celery_hard_time_limit_seconds + 600},
+    broker_transport_options={
+        "visibility_timeout": max(
+            settings.celery_hard_time_limit_seconds,
+            settings.product_matching_hard_time_limit_seconds,
+        )
+        + 600
+    },
     accept_content=["json"],
     task_serializer="json",
 )

@@ -364,6 +364,46 @@ def test_compact_designation_is_not_repeated_when_already_in_product_name() -> N
     assert enriched.searchCharacteristics == []
 
 
+def test_flattened_table_row_uses_product_kind_and_preserves_named_model() -> None:
+    position = TenderPosition(
+        product=(
+            "\u0422\u0438\u043f \u0438\u0437\u0434\u0435\u043b\u0438\u044f: \u0424\u043e\u043d\u0430\u0440\u044c \u0430\u043a\u043a\u0443\u043c\u0443\u043b\u044f\u0442\u043e\u0440\u043d\u044b\u0439; \u0422\u0438\u043f \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u044f: \u042d\u043a\u043e\u0442\u043e\u043d-5; "
+            "\u041d\u043e\u043c\u0438\u043d\u0430\u043b\u044c\u043d\u043e\u0435 \u043d\u0430\u043f\u0440\u044f\u0436\u0435\u043d\u0438\u0435: 12 \u0412; \u0412\u0440\u0435\u043c\u044f \u0440\u0430\u0431\u043e\u0442\u044b: 6 \u0447"
+        )
+    )
+    semantic = ProductSemanticClassification(
+        position_index=1,
+        normalized_product="\u0424\u043e\u043d\u0430\u0440\u044c \u0430\u043a\u043a\u0443\u043c\u0443\u043b\u044f\u0442\u043e\u0440\u043d\u044b\u0439",
+        category="\u041e\u0441\u0432\u0435\u0449\u0435\u043d\u0438\u0435",
+        identifier_strength="LOW",
+    )
+    enriched = build_search_query(
+        position, semantic, ProductSkuClassification(position_index=1), []
+    )
+
+    assert enriched.productQuery == "\u0424\u043e\u043d\u0430\u0440\u044c \u0430\u043a\u043a\u0443\u043c\u0443\u043b\u044f\u0442\u043e\u0440\u043d\u044b\u0439 \u042d\u043a\u043e\u0442\u043e\u043d-5"
+    assert enriched.searchCharacteristics == ["\u042d\u043a\u043e\u0442\u043e\u043d-5"]
+    assert enriched.searchQueries == ["\u0424\u043e\u043d\u0430\u0440\u044c \u0430\u043a\u043a\u0443\u043c\u0443\u043b\u044f\u0442\u043e\u0440\u043d\u044b\u0439 \u042d\u043a\u043e\u0442\u043e\u043d-5"]
+
+
+def test_flattened_table_row_builds_power_supply_with_compact_type_model() -> None:
+    position = TenderPosition(
+        product="\u0412\u0438\u0434 /(\u0411\u043b\u043e\u043a): \u043f\u0438\u0442\u0430\u043d\u0438\u044f; \u0422\u0438\u043f: MDR-40; \u0412\u044b\u0445\u043e\u0434\u043d\u043e\u0435 \u043d\u0430\u043f\u0440\u044f\u0436\u0435\u043d\u0438\u0435: 24 \u0412"
+    )
+    semantic = ProductSemanticClassification(
+        position_index=1,
+        normalized_product="MDR-40",
+        category="\u042d\u043b\u0435\u043a\u0442\u0440\u043e\u0442\u0435\u0445\u043d\u0438\u043a\u0430",
+        identifier_strength="LOW",
+    )
+    enriched = build_search_query(
+        position, semantic, ProductSkuClassification(position_index=1), []
+    )
+
+    assert enriched.productQuery == "\u0411\u043b\u043e\u043a \u043f\u0438\u0442\u0430\u043d\u0438\u044f MDR-40"
+    assert enriched.searchCharacteristics == ["MDR-40"]
+
+
 class SearchQueryLlm:
     def __init__(self) -> None:
         self.calls: list[str] = []

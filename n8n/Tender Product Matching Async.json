@@ -1,0 +1,75 @@
+{
+  "name": "Tender Product Matching Async",
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "initialMessages": "Прикрепите один архив ZIP или 7Z с тендерной документацией. Подбор выполнится в фоне, а Excel появится на Яндекс Диске.",
+        "options": {
+          "allowFileUploads": true,
+          "allowedFilesMimeTypes": "application/zip,application/x-zip-compressed,application/x-7z-compressed,application/octet-stream",
+          "inputPlaceholder": "Прикрепите ZIP или 7Z и при необходимости укажите название тендера...",
+          "showWelcomeScreen": false,
+          "subtitle": "Документы будут приняты сразу; готовый Excel будет сохранён на Яндекс Диске",
+          "title": "Подбор товаров по документам тендера",
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "caeaae99-f11e-4a30-a0be-b00203885c9e",
+      "name": "When chat message received",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [976, 1760],
+      "webhookId": "tender-product-matching-chat"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst binaries = item.binary || {};\nconst keys = Object.keys(binaries);\nif (keys.length !== 1) throw new Error(keys.length ? `Ожидается один архив ZIP или 7Z. Получено файлов: ${keys.length}` : 'Прикрепите один архив ZIP или 7Z.');\nconst sourceKey = keys[0];\nconst archive = binaries[sourceKey];\nconst fileName = String(archive.fileName || sourceKey);\nconst extension = (fileName.match(/\\.([^.]+)$/)?.[1] || '').toLowerCase();\nif (!['zip', '7z'].includes(extension)) throw new Error(`Неподдерживаемый формат: ${fileName}. Разрешены ZIP и 7Z.`);\nconst tenderName = String(item.json?.tenderName || item.json?.chatInput || fileName || 'documents').trim();\nreturn [{ json: { tenderName, originalFileName: fileName }, binary: { archive } }];"
+      },
+      "id": "6a0d00ab-5d54-40a7-ac5d-54ee8f3e532d",
+      "name": "Prepare archive",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1264, 1760]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TENDER_PRODUCT_MATCHING_URL || 'http://tender-api:8000/product-matching/jobs' }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "X-API-Key", "value": "={{ $env.TENDER_PYTHON_API_KEY }}" }] },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "tender_name", "value": "={{ $json.tenderName }}" },
+            { "parameterType": "formBinaryData", "name": "files", "inputDataFieldName": "archive" }
+          ]
+        },
+        "options": { "timeout": 60000 }
+      },
+      "id": "d01d8bf3-c3e7-4017-92bc-313d31438f4e",
+      "name": "Queue Tender Worker",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1552, 1760]
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $input.first().json;\nconst jobId = String(result.jobId || '');\nif (!jobId) throw new Error('Worker не вернул идентификатор задачи.');\nreturn [{ json: { status: result.status || 'queued', jobId, output: `Задача принята: ${jobId}. Подбор выполняется в фоне; готовый Excel появится в папке Яндекс Диска «Тендеры автоподбор».` } }];"
+      },
+      "id": "42a3eb1a-7105-45de-baf5-833f009478a2",
+      "name": "Prepare chat response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1856, 1760]
+    }
+  ],
+  "connections": {
+    "When chat message received": { "main": [[{ "node": "Prepare archive", "type": "main", "index": 0 }]] },
+    "Prepare archive": { "main": [[{ "node": "Queue Tender Worker", "type": "main", "index": 0 }]] },
+    "Queue Tender Worker": { "main": [[{ "node": "Prepare chat response", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "binaryMode": "separate", "availableInMCP": false }
+}

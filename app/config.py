@@ -29,11 +29,15 @@ class Settings(BaseSettings):
 
     redis_url: SecretStr = SecretStr("redis://tender-redis:6379/0")
     celery_queue: str = "tender-autofill"
+    product_matching_celery_queue: str = "tender-product-matching"
     # Must remain below n8n Controller stale-processing threshold (30 minutes).
     celery_soft_time_limit_seconds: int = Field(default=1500, ge=60)
     celery_hard_time_limit_seconds: int = Field(default=1680, ge=60)
+    product_matching_soft_time_limit_seconds: int = Field(default=7200, ge=60)
+    product_matching_hard_time_limit_seconds: int = Field(default=7500, ge=60)
 
     temp_root: Path = Path("/tmp/tender-autofill")
+    product_matching_jobs_root: Path = Path("/tmp/tender-autofill/product-matching-jobs")
     http_connect_timeout_seconds: float = Field(default=15, gt=0)
     http_read_timeout_seconds: float = Field(default=120, gt=0)
     document_download_timeout_seconds: float = Field(default=180, gt=0)

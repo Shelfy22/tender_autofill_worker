@@ -71,6 +71,49 @@ def _split_requirements(value: str) -> list[tuple[str, str]]:
     return result
 
 
+def _structured_product_details(value: Any) -> tuple[str, list[str]]:
+    """Extract a product kind and short model tokens from a flattened table row."""
+    fields = [
+        (_identity(name), _clean(raw_value).strip(" \t\"'\u00ab\u00bb"), name)
+        for name, raw_value in _split_requirements(_clean(value))
+        if name and raw_value
+    ]
+    if len(fields) < 2:
+        return "", []
+
+    base_candidates: list[tuple[int, str]] = []
+    identity_tokens: list[str] = []
+    for label, raw_value, source_label in fields:
+        if re.search(r"(?:\u043d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d|\u043d\u043e\u043c\u0435\u043d\u043a\u043b\u0430\u0442\u0443\u0440|\u0442\u043e\u0432\u0430\u0440|\u043f\u0440\u043e\u0434\u0443\u043a\u0446)", label):
+            base_candidates.append((120, raw_value))
+        elif re.search(r"(?:\u0442\u0438\u043f|\u0432\u0438\u0434).*(?:\u0438\u0437\u0434\u0435\u043b|\u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b|\u0441\u0432\u0435\u0442\u0438\u043b\u044c\u043d\u0438\u043a|\u0440\u043e\u0437\u0435\u0442\u043a|\u043a\u043e\u043d\u0442\u0430\u043a\u0442\u043e\u0440|\u0440\u0435\u043b\u0435|\u0434\u0430\u0442\u0447\u0438\u043a|\u0444\u043e\u043d\u0430\u0440|\u043a\u0430\u0431\u0435\u043b|\u043f\u0440\u043e\u0432\u043e\u0434|\u043d\u0430\u0441\u043e\u0441|\u0434\u0432\u0438\u0433\u0430\u0442\u0435\u043b|\u043a\u043b\u0435\u043c\u043c|\u0430\u0432\u0442\u043e\u043c\u0430\u0442)", label):
+            base_candidates.append((115, raw_value))
+        elif label.startswith("\u0432\u0438\u0434"):
+            bracketed = re.search(r"\(([^()]{2,40})\)", source_label)
+            base_candidates.append(
+                (110 if bracketed else 100, _clean(f"{bracketed.group(1) if bracketed else ''} {raw_value}"))
+            )
+        elif label == "\u0442\u0438\u043f" and not any(character.isdigit() for character in raw_value):
+            base_candidates.append((80, raw_value))
+
+        is_identity_label = bool(re.search(r"(?:\u043c\u0430\u0440\u043a\u0430|\u0441\u0435\u0440\u0438\u044f|\u043c\u043e\u0434\u0435\u043b|\u0430\u0440\u0442\u0438\u043a\u0443\u043b|\u043a\u043e\u0434|\u0442\u0438\u043f.*\u043d\u0430\u0437\u0432\u0430\u043d)", label))
+        is_compact_type = label == "\u0442\u0438\u043f" and bool(_compact_designations(raw_value))
+        if is_identity_label or is_compact_type:
+            identity_tokens.extend(_compact_designations(raw_value))
+            if (
+                is_identity_label
+                and len(raw_value) <= 48
+                and len(raw_value.split()) <= 4
+                and re.fullmatch(r"[A-Za-z\u0400-\u04ff0-9()._/,\-\s]+", raw_value)
+                and re.search(r"[A-Za-z\u0400-\u04ff]", raw_value)
+                and re.search(r"\d", raw_value)
+            ):
+                identity_tokens.append(raw_value)
+
+    base = max(base_candidates, default=(0, ""), key=lambda item: item[0])[1]
+    return base, list(dict.fromkeys(identity_tokens))[:3]
+
+
 def _characteristic_candidates(position: TenderPosition) -> list[dict[str, str]]:
     candidates: list[tuple[str, str, str]] = []
     for characteristic in position.characteristics:
@@ -186,12 +229,13 @@ def _compact_designations(value: Any) -> list[str]:
 
 
 def _designation_identity_tokens(position: TenderPosition) -> list[str]:
+    _, structured_tokens = _structured_product_details(position.product)
     values = (
         position.model,
         position.article,
         *(characteristic.value for characteristic in position.characteristics),
     )
-    tokens: list[str] = []
+    tokens: list[str] = list(structured_tokens)
     for value in values:
         tokens.extend(_compact_designations(value))
     return list(dict.fromkeys(tokens))[:3]
@@ -665,12 +709,13 @@ def _fallback_search_query(position: TenderPosition) -> TenderPosition:
         token
         for _, _, token in sorted(scored, reverse=True)[:3]
     ]
+    base, _ = _structured_product_details(position.product)
+    base = base or _clean(position.product)
     selected = _prepend_required_tokens(
         [*_designation_identity_tokens(position), *_cable_identity_tokens(position)],
         selected,
-        base=_clean(position.product),
+        base=base,
     )
-    base = _clean(position.product)
     query = _clean(" ".join((base, *selected))) or base
     variants = _search_query_variants(base, selected)
     return position.model_copy(
@@ -685,6 +730,9 @@ def _fallback_search_query(position: TenderPosition) -> TenderPosition:
 
 def _safe_base_name(position: TenderPosition, semantic: ProductSemanticClassification) -> str:
     original = _clean(position.product)
+    structured_base, _ = _structured_product_details(original)
+    if structured_base:
+        return structured_base
     normalized = _clean(semantic.normalized_product)
     if not normalized:
         return original
