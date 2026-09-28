@@ -306,6 +306,64 @@ def test_llm_identity_bundle_adds_ignored_identifier_to_query() -> None:
     assert enriched.productQuery == "Датчик PT1000 24В"
 
 
+def test_compact_designation_is_preserved_when_llm_treats_it_as_a_range() -> None:
+    position = TenderPosition(
+        product="Светильник светодиодный",
+        characteristics=[
+            ProductCharacteristic(name="Технические характеристики", value="SPP-201-0-65-036"),
+            ProductCharacteristic(name="Напряжение", value="175-260 В"),
+        ],
+    )
+    semantic = ProductSemanticClassification(
+        position_index=1,
+        normalized_product="Светильник светодиодный",
+        category="Электротехника",
+        identifier_strength="LOW",
+    )
+    sku = ProductSkuClassification(
+        position_index=1,
+        decisions=[
+            SkuCharacteristicDecision(id="c1", sku_importance="LOW", usage="IGNORE"),
+            SkuCharacteristicDecision(id="c2", sku_importance="HIGH", usage="SEARCH_SECONDARY"),
+        ],
+        selected_for_search=["c2"],
+    )
+
+    enriched = build_search_query(
+        position,
+        semantic,
+        sku,
+        [
+            {"id": "c1", "search_token": "-201-0", "source_value": "SPP-201-0-65-036"},
+            {"id": "c2", "search_token": "175-260В", "source_value": "175-260 В"},
+        ],
+    )
+
+    assert enriched.productQuery == "Светильник светодиодный SPP-201-0-65-036 175-260В"
+    assert enriched.searchCharacteristics == ["SPP-201-0-65-036", "175-260В"]
+
+
+def test_compact_designation_is_not_repeated_when_already_in_product_name() -> None:
+    position = TenderPosition(product="Светильник SPO-7-72-4K-P(4)")
+    semantic = ProductSemanticClassification(
+        position_index=1,
+        normalized_product="Светильник SPO-7-72-4K-P(4)",
+        category="Электротехника",
+        identifier_strength="HIGH",
+    )
+    sku = ProductSkuClassification(position_index=1)
+
+    enriched = build_search_query(
+        position,
+        semantic,
+        sku,
+        [{"id": "c1", "search_token": "-7-72", "source_value": "SPO-7-72-4K-P(4)"}],
+    )
+
+    assert enriched.productQuery == "Светильник SPO-7-72-4K-P(4)"
+    assert enriched.searchCharacteristics == []
+
+
 class SearchQueryLlm:
     def __init__(self) -> None:
         self.calls: list[str] = []

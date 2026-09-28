@@ -32,6 +32,7 @@ from app.services.documents import (
     DocumentProcessor,
     build_combined_text as build_deterministic_text,
     document_processing_context,
+    safe_filename,
 )
 from app.services.llm import LlmClient, LlmResponseTruncatedError, LlmWallTimeoutError
 from app.services.normalization import deduplicate_strings, normalize_job_payload
@@ -44,6 +45,7 @@ from app.services.product_characteristics import (
     finalize_position_characteristics,
 )
 from app.services.product_search_query import enrich_product_search_queries
+from app.services.product_matching_export import build_product_matching_workbook
 from app.services.products import (
     extract_deterministic_positions,
     extract_seldon_positions,
@@ -52,6 +54,7 @@ from app.services.products import (
 from app.services.result import build_result_json
 from app.services.seldon import SeldonClient, build_page_text
 from app.services.validation import validate_fields
+from app.services.yandex_disk import upload_product_matching_report
 
 
 T = TypeVar("T")
@@ -615,6 +618,47 @@ class TenderPipeline:
                 ),
             )
 
+            report_export: dict[str, Any] = {
+                "enabled": self.settings.yandex_disk_token is not None,
+                "uploaded": False,
+            }
+            if self.settings.yandex_disk_token is not None:
+                tender_id = job.seldon_id or job.etp_id or job.job_record_key
+                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+                filename = safe_filename(
+                    f"autopodbor_{tender_id}_{timestamp}.xlsx",
+                    f"autopodbor_{timestamp}.xlsx",
+                )
+                try:
+                    workbook = build_product_matching_workbook(product_check)
+
+                    def upload_report() -> str:
+                        try:
+                            return upload_product_matching_report(
+                                self.settings,
+                                filename=filename,
+                                content=workbook,
+                            ).remote_path
+                        except Exception as exc:
+                            raise RuntimeError(type(exc).__name__) from exc
+
+                    report_export.update(
+                        {
+                            "uploaded": True,
+                            "fileName": filename,
+                            "remotePath": self._run_stage(
+                                "Upload Product Matching Report to Yandex Disk",
+                                upload_report,
+                            ),
+                        }
+                    )
+                except Exception as exc:
+                    report_export["errorType"] = type(exc).__name__
+                    self.warnings.append(
+                        "Не удалось выгрузить Excel-отчёт автоподбора на Яндекс Диск; "
+                        "результат тендера сохранён без файла."
+                    )
+
             debug = {
                 "htmlLength": len(page_text),
                 "documentCount": len(parsed_documents),
@@ -640,6 +684,7 @@ class TenderPipeline:
                 "actualCustomerResolution": customer_debug,
                 "counterpartyLookup": counterparty_lookup,
                 "productCheck": product_check,
+                "productMatchingReport": report_export,
                 "spreadsheetCandidateReview": spreadsheet_review_debug,
                 "productSearchQuery": search_query_debug,
                 "characteristicAssociation": {

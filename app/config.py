@@ -130,6 +130,10 @@ class Settings(BaseSettings):
     ipro_base_url: str = "https://idev.etm.ru/api/ipro/user/registration_ipro"
     ipro_token: SecretStr | None = None
 
+    yandex_disk_token: SecretStr | None = None
+    yandex_disk_autopodbor_path: str = "Тендеры автоподбор"
+    yandex_disk_timeout_seconds: float = Field(default=60, gt=0)
+
     catalog_mode: str = "disabled"
     catalog_search_url: str | None = None
     catalog_api_key: SecretStr | None = None

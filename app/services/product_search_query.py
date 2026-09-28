@@ -31,6 +31,14 @@ _CABLE_MARK_PATTERN = re.compile(
     r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9()\-]{2,40}",
     re.IGNORECASE,
 )
+_COMPACT_DESIGNATION_CANDIDATE = re.compile(
+    r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9()._/-]{2,80}",
+    re.IGNORECASE,
+)
+_MEASUREMENT_LIKE_DESIGNATION = re.compile(
+    r"\d+(?:[.,]\d+)?(?:[xх×*]\d+(?:[.,]\d+)?)?[A-Za-zА-Яа-яЁё³²/%°]+$",
+    re.IGNORECASE,
+)
 
 
 def _clean(value: Any) -> str:
@@ -158,6 +166,37 @@ def _is_weak_standalone_token(value: Any) -> bool:
     return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", _clean(value)))
 
 
+def _compact_designations(value: Any) -> list[str]:
+    """Return model/article-like tokens while excluding measurements and dimensions."""
+    result: list[str] = []
+    for match in _COMPACT_DESIGNATION_CANDIDATE.finditer(_clean(value)):
+        token = _compact_token(match.group(0)).strip(".,;:")
+        if (
+            not token
+            or not re.search(r"[A-Za-zА-Яа-яЁё]", token)
+            or not re.search(r"\d", token)
+            or token[0].isdigit()
+            or _MEASUREMENT_LIKE_DESIGNATION.fullmatch(token)
+        ):
+            continue
+        has_structure = any(symbol in token for symbol in "-_().")
+        if has_structure:
+            result.append(token)
+    return list(dict.fromkeys(result))
+
+
+def _designation_identity_tokens(position: TenderPosition) -> list[str]:
+    values = (
+        position.model,
+        position.article,
+        *(characteristic.value for characteristic in position.characteristics),
+    )
+    tokens: list[str] = []
+    for value in values:
+        tokens.extend(_compact_designations(value))
+    return list(dict.fromkeys(tokens))[:3]
+
+
 def _is_cable_position(
     position: TenderPosition,
     semantic: ProductSemanticClassification | None = None,
@@ -221,8 +260,17 @@ def _cable_identity_tokens(
     return tokens
 
 
-def _prepend_required_tokens(required: list[str], selected: list[str]) -> list[str]:
-    values = [*required, *(token for token in selected if not _is_weak_standalone_token(token))]
+def _prepend_required_tokens(
+    required: list[str],
+    selected: list[str],
+    *,
+    base: str = "",
+) -> list[str]:
+    base_identity = _identity(base)
+    values = [
+        *(token for token in required if _identity(token) not in base_identity),
+        *(token for token in selected if not _is_weak_standalone_token(token)),
+    ]
     return list(dict.fromkeys(_compact_token(value) for value in values if _compact_token(value)))[:5]
 
 
@@ -348,6 +396,20 @@ def normalize_search_characteristic(
         )
     ):
         return None
+
+    designation_tokens = _compact_designations(characteristic.original_value)
+    if designation_tokens:
+        token = designation_tokens[0]
+        if _search_token_is_grounded(characteristic, token):
+            return {
+                "id": characteristic.id,
+                "name": characteristic.name,
+                "semantic_role": "IDENTIFIER",
+                "value_form": "EXACT",
+                "search_token": token,
+                "source_value": characteristic.original_value,
+                "token_verified": True,
+            }
 
     value_form = characteristic.value_form
     numeric = characteristic.numeric
@@ -603,7 +665,11 @@ def _fallback_search_query(position: TenderPosition) -> TenderPosition:
         token
         for _, _, token in sorted(scored, reverse=True)[:3]
     ]
-    selected = _prepend_required_tokens(_cable_identity_tokens(position), selected)
+    selected = _prepend_required_tokens(
+        [*_designation_identity_tokens(position), *_cable_identity_tokens(position)],
+        selected,
+        base=_clean(position.product),
+    )
     base = _clean(position.product)
     query = _clean(" ".join((base, *selected))) or base
     variants = _search_query_variants(base, selected)
@@ -685,8 +751,12 @@ def build_search_query(
             item.get("name") or "",
         )
     selected = _prepend_required_tokens(
-        _cable_identity_tokens(position, semantic),
+        [
+            *_designation_identity_tokens(position),
+            *_cable_identity_tokens(position, semantic),
+        ],
         _compose_search_tokens(selected_items),
+        base=base,
     )
     query = _clean(" ".join([base, *selected])) or _clean(
         position.productQuery or position.product
