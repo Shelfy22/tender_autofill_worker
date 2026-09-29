@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hmac
 import json
@@ -184,7 +185,8 @@ async def product_matching_from_documents(request: Request) -> Response:
             local_files.append(LocalDocument(file_name=source_name, path=destination))
 
         try:
-            workbook, debug = run_product_matching_from_files(
+            workbook, debug = await asyncio.to_thread(
+                run_product_matching_from_files,
                 local_files,
                 settings,
                 tender_name=tender_name,

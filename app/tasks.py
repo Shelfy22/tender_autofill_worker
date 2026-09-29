@@ -69,7 +69,12 @@ def process_product_matching(self: Task, job_id: str) -> dict[str, object]:
                     content=workbook,
                 ).remote_path
             except Exception as exc:
-                warnings.append(f"YandexDiskUpload:{type(exc).__name__}")
+                warnings.insert(0, f"YandexDiskUpload:{type(exc).__name__}")
+                logger.warning(
+                    "product_matching_yandex_disk_upload_failed",
+                    extra={"event": {"jobId": job_id, "errorType": type(exc).__name__}},
+                    exc_info=True,
+                )
 
         store.complete(
             job_id,

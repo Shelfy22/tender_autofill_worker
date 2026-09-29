@@ -540,6 +540,12 @@ class SemanticCharacteristic(BaseModel):
     already_encoded_in_name: bool = False
     numeric: CharacteristicNumeric = Field(default_factory=CharacteristicNumeric)
 
+    @field_validator("numeric", mode="before")
+    @classmethod
+    def coerce_empty_numeric(cls, value: Any) -> Any:
+        # Some otherwise valid LLM responses use null instead of an empty object.
+        return {} if value is None else value
+
 
 class ProductSemanticClassification(BaseModel):
     position_index: int = Field(ge=1)

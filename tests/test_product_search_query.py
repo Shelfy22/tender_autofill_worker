@@ -140,6 +140,29 @@ def test_hallucinated_search_token_is_rejected() -> None:
     assert normalize_search_characteristic(wrong_unit) is None
 
 
+def test_enumerated_feature_list_is_not_used_as_a_search_token() -> None:
+    characteristic = SemanticCharacteristic(
+        id="c1",
+        name="Supported functions",
+        original_value="VLAN; 802.1Q; Private VLAN; Voice VLAN; MAC; QinQ",
+        semantic_role="INTERFACE_OR_STANDARD",
+        value_form="ENUMERATED",
+        search_token="VLAN; 802.1Q; Private VLAN; Voice VLAN; MAC; QinQ",
+    )
+
+    assert normalize_search_characteristic(characteristic) is None
+
+
+def test_semantic_characteristic_accepts_empty_numeric_from_llm() -> None:
+    characteristic = SemanticCharacteristic.model_validate(
+        {"id": "c1", "name": "Material", "original_value": "copper", "numeric": None}
+    )
+
+    assert characteristic.numeric.model_dump() == {
+        "min": None, "max": None, "nominal": None, "unit": None, "values": []
+    }
+
+
 def test_query_builder_uses_only_values_without_parameter_labels() -> None:
     position = TenderPosition(product="БУРС-1В", productQuery="БУРС-1В; Напряжение питания: 220 В")
     semantic = ProductSemanticClassification(
@@ -171,6 +194,37 @@ def test_query_builder_uses_only_values_without_parameter_labels() -> None:
     assert enriched.productQuery == "БУРС-1В 220В 50Гц"
     assert enriched.searchCharacteristics == ["220В", "50Гц"]
     assert "Напряжение" not in enriched.productQuery
+
+
+def test_query_builder_does_not_repeat_value_already_in_product_name() -> None:
+    position = TenderPosition(product="Power cord 220V 10A")
+    semantic = ProductSemanticClassification(
+        position_index=1,
+        normalized_product="Power cord 220V 10A",
+        category="Electrical",
+        identifier_strength="HIGH",
+    )
+    sku = ProductSkuClassification(
+        position_index=1,
+        decisions=[
+            SkuCharacteristicDecision(id="c1", sku_importance="HIGH", usage="SEARCH_PRIMARY"),
+            SkuCharacteristicDecision(id="c2", sku_importance="HIGH", usage="SEARCH_PRIMARY"),
+        ],
+        selected_for_search=["c1", "c2"],
+    )
+
+    enriched = build_search_query(
+        position,
+        semantic,
+        sku,
+        [
+            {"id": "c1", "search_token": "220V"},
+            {"id": "c2", "search_token": "10A"},
+        ],
+    )
+
+    assert enriched.productQuery == "Power cord 220V 10A"
+    assert enriched.searchCharacteristics == []
 
 
 def test_query_builder_composes_cable_designation_and_query_variants() -> None:

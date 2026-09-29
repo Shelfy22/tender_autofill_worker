@@ -1562,6 +1562,77 @@ def _aligned_section_duplicate_pairs(
     return pairs
 
 
+def _aligned_replicated_table_pairs(
+    positions: list[TenderPosition],
+    skipped_indexes: set[int],
+) -> list[tuple[int, int]]:
+    """Pair whole repeated tables in one file without collapsing same-table rows."""
+    by_scope: dict[tuple[str, str], list[tuple[int, TenderPosition]]] = {}
+    for index, position in enumerate(positions):
+        if index in skipped_indexes:
+            continue
+        reference = position.sourceReference
+        if reference is None:
+            continue
+        file_name = _word_table_key(reference.fileName)
+        table_scope = _word_table_key(reference.sheet or reference.table)
+        if not file_name or not table_scope:
+            continue
+        by_scope.setdefault((file_name, table_scope), []).append((index, position))
+
+    scopes = list(by_scope)
+    options: list[tuple[float, tuple[str, str], tuple[str, str]]] = []
+    for left_offset, left_scope in enumerate(scopes):
+        left_rows = by_scope[left_scope]
+        if len(left_rows) < 4:
+            continue
+        for right_scope in scopes[left_offset + 1 :]:
+            if left_scope[0] != right_scope[0]:
+                continue
+            right_rows = by_scope[right_scope]
+            if len(left_rows) != len(right_rows):
+                continue
+            aligned = 0
+            for (_, left), (_, right) in zip(left_rows, right_rows):
+                if (
+                    _position_name_key(left) == _position_name_key(right)
+                    and left.quantity == right.quantity
+                    and _word_table_key(left.unit) == _word_table_key(right.unit)
+                ):
+                    aligned += 1
+            ratio = aligned / len(left_rows)
+            if ratio >= 0.90:
+                options.append((ratio, left_scope, right_scope))
+
+    pairs: list[tuple[int, int]] = []
+    used_scopes: set[tuple[str, str]] = set()
+    for _, left_scope, right_scope in sorted(options, reverse=True):
+        if left_scope in used_scopes or right_scope in used_scopes:
+            continue
+        left_rows = by_scope[left_scope]
+        right_rows = by_scope[right_scope]
+        left_priority = min(
+            source_role_priority(_position_source_role(position))
+            for _, position in left_rows
+        )
+        right_priority = min(
+            source_role_priority(_position_source_role(position))
+            for _, position in right_rows
+        )
+        left_first_index = left_rows[0][0]
+        right_first_index = right_rows[0][0]
+        if (left_priority, left_first_index) <= (right_priority, right_first_index):
+            canonical_rows, duplicate_rows = left_rows, right_rows
+        else:
+            canonical_rows, duplicate_rows = right_rows, left_rows
+        pairs.extend(
+            (canonical[0], duplicate[0])
+            for canonical, duplicate in zip(canonical_rows, duplicate_rows)
+        )
+        used_scopes.update((left_scope, right_scope))
+    return pairs
+
+
 def _deduplicate_cross_document_positions(
     positions: list[TenderPosition],
 ) -> tuple[list[TenderPosition], list[str]]:
@@ -1580,6 +1651,19 @@ def _deduplicate_cross_document_positions(
             "Paired replicated price-justification and technical-specification "
             "rows by aligned position order; retained the price list and merged "
             "technical characteristics."
+        )
+
+    table_pairs = _aligned_replicated_table_pairs(positions, skipped_indexes)
+    for canonical_index, duplicate_index in table_pairs:
+        positions[canonical_index] = _merge_replicated_position_details(
+            positions[canonical_index],
+            positions[duplicate_index],
+        )
+        skipped_indexes.add(duplicate_index)
+    if table_pairs:
+        warnings.append(
+            "Skipped a replicated table in the same document after aligned "
+            "product, quantity, and unit rows were confirmed."
         )
 
     grouped: dict[tuple[str, str, float | None, str], list[tuple[int, TenderPosition]]] = {}

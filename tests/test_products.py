@@ -469,6 +469,46 @@ def test_aligned_sections_merge_a_small_number_of_different_product_labels() -> 
     assert any("aligned position order" in warning for warning in warnings)
 
 
+def test_identical_tables_in_one_document_are_collapsed_without_losing_rows() -> None:
+    source_rows = [
+        ("Lamp", "20 W"),
+        ("Lamp", "40 W"),
+        ("Pump", "1.5 kW"),
+        ("Sensor", "24 V"),
+    ]
+    positions = [
+        TenderPosition(
+            product=product,
+            quantity=1,
+            unit="pcs",
+            characteristics=[
+                ProductCharacteristic(name="Value", value=value, associationMethod="same_row")
+            ],
+            sourceReference={
+                "fileName": "specification.docx",
+                "table": table,
+                "row": row,
+                "sectionRole": "other",
+            },
+        )
+        for table in ("Table A", "Table B")
+        for row, (product, value) in enumerate(source_rows, start=2)
+    ]
+
+    merged, warnings = merge_positions(positions, None)
+
+    assert [position.product for position in merged] == [
+        "Lamp",
+        "Lamp",
+        "Pump",
+        "Sensor",
+    ]
+    assert [
+        position.characteristics[0].value for position in merged
+    ] == ["20 W", "40 W", "1.5 kW", "24 V"]
+    assert any("replicated table" in warning for warning in warnings)
+
+
 def test_repeated_merged_word_row_is_not_extracted_as_a_product() -> None:
     text = "\n".join(
         (

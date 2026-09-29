@@ -313,7 +313,12 @@ def _prepend_required_tokens(
     base_identity = _identity(base)
     values = [
         *(token for token in required if _identity(token) not in base_identity),
-        *(token for token in selected if not _is_weak_standalone_token(token)),
+        *(
+            token
+            for token in selected
+            if not _is_weak_standalone_token(token)
+            and _identity(token) not in base_identity
+        ),
     ]
     return list(dict.fromkeys(_compact_token(value) for value in values if _compact_token(value)))[:5]
 
@@ -428,6 +433,20 @@ def _search_token_is_grounded(
     return True
 
 
+def _is_non_identifier_enumeration(token: str) -> bool:
+    """Keep feature lists out of the primary vector-search query."""
+    compact = _clean(token)
+    if re.search(
+        r"\b\u043d\u0435\s+(?:\u043c\u0435\u043d\u0435\u0435|\u0431\u043e\u043b\u0435\u0435)\b",
+        _identity(compact),
+    ):
+        return True
+    list_items = [item.strip() for item in re.split(r"[;,]", compact) if item.strip()]
+    if len(list_items) >= 3:
+        return True
+    return len(compact.split()) > 8
+
+
 def normalize_search_characteristic(
     characteristic: SemanticCharacteristic,
 ) -> dict[str, Any] | None:
@@ -484,6 +503,8 @@ def normalize_search_characteristic(
         token = _boundary_token(characteristic, numeric.nominal)
     else:
         token = _compact_token(characteristic.search_token or characteristic.original_value)
+    if _is_non_identifier_enumeration(token):
+        return None
     if not token:
         return None
     if not _search_token_is_grounded(characteristic, token):

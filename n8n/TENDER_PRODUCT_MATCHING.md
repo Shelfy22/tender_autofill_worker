@@ -6,6 +6,8 @@ Required n8n environment variables:
 
 ```env
 TENDER_PYTHON_API_KEY=<same value as worker API_KEY>
+Set the HTTP Request node timeout to 300000 ms. It only covers transfer and
+storage of the uploaded archive; matching continues in the Celery worker.
 TENDER_PRODUCT_MATCHING_URL=http://tender-api:8000/product-matching/jobs
 ```
 

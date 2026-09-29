@@ -14,6 +14,18 @@ services:
     networks:
       - tender-queue
 
+  tender-product-matching-volume-init:
+    build: .
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mkdir -p /tmp/tender-autofill/product-matching-jobs
+        && chown -R tender:tender /tmp/tender-autofill/product-matching-jobs
+    volumes:
+      - tender-product-matching-data:/tmp/tender-autofill/product-matching-jobs
+    restart: "no"
+
   tender-api:
     build: .
     env_file: ${ENV_FILE:-.env}
@@ -25,6 +37,8 @@ services:
     depends_on:
       tender-redis:
         condition: service_healthy
+      tender-product-matching-volume-init:
+        condition: service_completed_successfully
     networks:
       - default
       - tender-queue
@@ -88,6 +102,8 @@ services:
     depends_on:
       tender-redis:
         condition: service_healthy
+      tender-product-matching-volume-init:
+        condition: service_completed_successfully
     networks:
       - default
       - tender-queue
