@@ -50,11 +50,6 @@ def process_product_matching(self: Task, job_id: str) -> dict[str, object]:
             settings,
             tender_name=str(state.get("tenderName") or ""),
         )
-        report_path = store.report_path(job_id)
-        temporary_report = report_path.with_suffix(".xlsx.tmp")
-        temporary_report.write_bytes(workbook)
-        temporary_report.replace(report_path)
-
         report_file_name = safe_filename(
             f"autopodbor_{state.get('tenderName') or job_id}.xlsx",
             f"autopodbor_{job_id}.xlsx",

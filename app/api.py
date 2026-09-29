@@ -282,7 +282,6 @@ async def create_product_matching_job(request: Request) -> dict[str, object]:
         "jobId": job_id,
         "status": "queued",
         "statusUrl": f"/product-matching/jobs/{job_id}",
-        "downloadUrl": f"/product-matching/jobs/{job_id}/download",
     }
 
 
