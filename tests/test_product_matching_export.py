@@ -59,7 +59,26 @@ def test_build_product_matching_workbook_contains_expected_columns_and_values() 
     assert sheet["O2"].value == "spec.xlsx / Лист1 / row 7"
     assert sheet["P2"].value == "pos_test"
     assert sheet["Q2"].value == "Сечение: 2,5 мм2 [same_row, 0.98]"
-    assert sheet["R2"].value == "Кабель ВВГнг 3x2,5"
-    assert sheet["S2"].value == "3x2,5"
-    assert sheet["T2"].value == "electrical_lighting"
-    assert sheet["U2"].value == "Кабель ВВГнг\nКабель ВВГнг 3x2,5"
+    assert sheet["R1"].value == "Характеристики выбранного товара ETM"
+    assert sheet["S2"].value == "Кабель ВВГнг 3x2,5"
+    assert sheet["T2"].value == "3x2,5"
+    assert sheet["U2"].value == "electrical_lighting"
+    assert sheet["V2"].value == "Кабель ВВГнг\nКабель ВВГнг 3x2,5"
+
+
+def test_export_shows_params_only_for_selected_catalog_product() -> None:
+    workbook_bytes = build_product_matching_workbook(
+        {"details": [
+            {"sourceProduct": "Кабель", "result": {"Наименование": "Кабель ETM"}},
+            {"sourceProduct": "Лампа", "result": {"Соответствие": "Товар не найден"}},
+        ]},
+        selected_catalog_params=[
+            {"Число жил": "3", "Сечение": "2,5 мм2"},
+            {},
+        ],
+    )
+
+    sheet = load_workbook(BytesIO(workbook_bytes)).active
+    assert sheet["R2"].value == "Число жил: 3\nСечение: 2,5 мм2"
+    assert sheet["R3"].value is None
+    assert sheet.max_column == 23

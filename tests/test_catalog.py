@@ -5,8 +5,9 @@ import json
 import httpx
 
 from app.config import Settings
-from app.models import CatalogSelection, ProductMatch, TenderPosition
+from app.models import CatalogSelection, ProductCharacteristic, ProductMatch, TenderPosition
 from app.services.catalog import (
+    _catalog_value_matches,
     CatalogMatcher,
     hydrate_catalog_selection,
     limit_catalog_positions,
@@ -353,6 +354,8 @@ def test_duplicate_same_product_prices_use_median_and_missing_selected_price_can
             qdrant_text_candidate(104, name="Другой товар", price="999999", product_id="ETM-2"),
         ]
     )
+    normalized[0]["params"] = {"Модель": "Выбранная"}
+    normalized[1]["params"] = {"Модель": "Только цена"}
     match = hydrate_catalog_selection(
         CatalogSelection(
             selectedPointId="101",
@@ -365,6 +368,7 @@ def test_duplicate_same_product_prices_use_median_and_missing_selected_price_can
     assert match.median_price == 200
     assert match.price_aggregation == "median_same_product_id"
     assert "payload.metadata.price" in match.price_source_field
+    assert match.catalog_params == {"Модель": "Выбранная"}
 
 
 def test_catalog_llm_returns_only_point_id_and_python_hydrates_catalog_fields() -> None:
@@ -417,3 +421,111 @@ def test_catalog_rejects_cable_rack_selected_for_high_voltage_insulator() -> Non
     assert match.correspondence == "Товар не найден"
     assert match.qdrant_point_id is None
     assert "кабельная стойка" in match.rationale
+
+
+
+def test_selection_compares_specs_with_qdrant_params_and_keeps_distant_match() -> None:
+    llm = SelectionLlm("27")
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        catalog_mode="qdrant",
+    )
+    candidates = []
+    for index in range(50):
+        params = {
+            "Номинальный первичный ток (А)": "400" if index == 27 else "200",
+            "Класс точности вторичных обмоток": "0.5Fs10/10P10",
+        }
+        metadata = {
+            "id": str(index),
+            "name": f"Трансформатор тока ТОЛ-НТЗ-10 вариант {index}",
+            "params": json.dumps(params, ensure_ascii=False) if index == 27 else params,
+        }
+        candidates.append({
+            "id": index,
+            "score": 1 - index / 100,
+            "payload": {
+                "text": json.dumps(
+                    {"pageContent": metadata["name"], "metadata": metadata, "id": index},
+                    ensure_ascii=False,
+                )
+            },
+        })
+
+    matcher = CatalogMatcher(settings, llm)  # type: ignore[arg-type]
+    try:
+        match = matcher._select_with_llm(
+            TenderPosition(
+                product="Трансформатор тока ТОЛ-НТЗ-10",
+                productQuery="Трансформатор тока ТОЛ-НТЗ-10 400/5",
+                characteristics=[
+                    ProductCharacteristic(
+                        name="Номинальный первичный ток (А)",
+                        value="400",
+                        associationMethod="same_row",
+                        associationConfidence=0.98,
+                    ),
+                    ProductCharacteristic(
+                        name="Колонка F",
+                        value="126.96",
+                        associationMethod="same_row",
+                        associationConfidence=0.98,
+                    ),
+                    ProductCharacteristic(
+                        name="Н(М)ЦД",
+                        value="9242.13",
+                        associationMethod="same_row",
+                        associationConfidence=0.98,
+                    ),
+                ],
+            ),
+            candidates,
+        )
+    finally:
+        matcher.close()
+
+    shown = json.loads(llm.prompt.split("normalizedCandidates: ", 1)[1])
+    assert len(shown) == 10
+    assert [candidate["pointId"] for candidate in shown[:7]] == [str(i) for i in range(7)]
+    assert "27" in {candidate["pointId"] for candidate in shown}
+    selected = next(candidate for candidate in shown if candidate["pointId"] == "27")
+    assert selected["params"]["Номинальный первичный ток (А)"] == "400"
+    assert "unitPriceRub" not in selected
+    request = json.loads(llm.prompt.split("Позиция: ", 1)[1].split("\nnormalizedCandidates:", 1)[0])
+    assert request["originalProduct"] == "Трансформатор тока ТОЛ-НТЗ-10"
+    assert request["characteristics"][0]["value"] == "400"
+    assert len(request["characteristics"]) == 1
+    assert match.qdrant_point_id == "27"
+    assert match.catalog_params["Номинальный первичный ток (А)"] == "400"
+    assert "catalog_params" not in match.model_dump()
+
+
+def test_catalog_selection_rejects_analog_when_tender_forbids_it() -> None:
+    class AnalogSelectionLlm:
+        def json_call(self, **_: object) -> CatalogSelection:
+            return CatalogSelection(
+                selectedPointId="1",
+                correspondence="Аналог",
+                rationale="Другой артикул",
+            )
+
+    settings = Settings(postgres_dsn="postgresql://user:pass@localhost/db")
+    matcher = CatalogMatcher(settings, AnalogSelectionLlm())  # type: ignore[arg-type]
+    try:
+        match = matcher._select_with_llm(
+            TenderPosition(product="Трансформатор тока", analogsAllowed=False),
+            [{"id": 1, "payload": {"name": "Трансформатор тока другой серии"}}],
+        )
+    finally:
+        matcher.close()
+
+    assert match.correspondence == "Товар не найден"
+    assert match.qdrant_point_id is None
+
+
+
+def test_catalog_value_match_does_not_confuse_current_and_voltage() -> None:
+    assert _catalog_value_matches("400 А", "400")
+    assert _catalog_value_matches("400 А", "400 А")
+    assert not _catalog_value_matches("400 А", "400 В")
+    assert not _catalog_value_matches("400 А", "4000 А")

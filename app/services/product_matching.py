@@ -243,7 +243,10 @@ def run_product_matching_from_files(
 
             from app.services.product_matching_export import build_product_matching_workbook
 
-            workbook = build_product_matching_workbook(product_check)
+            workbook = build_product_matching_workbook(
+                product_check,
+                selected_catalog_params=[item.match.catalog_params for item in match_items],
+            )
             debug = {
                 "tenderName": tender_name,
                 "documentsParsed": sum(document.textQualityOk for document in parsed_documents),

@@ -586,6 +586,7 @@ class ProductSkuBatchResponse(BaseModel):
 
 
 class ProductMatch(BaseModel):
+    catalog_params: dict[str, Any] = Field(default_factory=dict, exclude=True)
     article: str | None = Field(default=None, alias="Артикул")
     link: str | None = Field(default=None, alias="Ссылка")
     name: str | None = Field(default=None, alias="Наименование")

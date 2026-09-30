@@ -190,7 +190,7 @@ def normalize_qdrant_candidates(candidates: Any) -> list[dict[str, Any]]:
                 or ("RUB" if unit_price is not None else None),
                 "priceSourceField": price_source_field if unit_price is not None else "",
                 "available": _normalize_available(available_value),
-                "params": params_value if isinstance(params_value, dict) else {},
+                "params": _json_object(params_value) or {},
                 "score": raw.get("score"),
                 "matchedQueries": raw.get("matchedQueries")
                 if isinstance(raw.get("matchedQueries"), list)
@@ -201,28 +201,139 @@ def normalize_qdrant_candidates(candidates: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _selection_candidates_json(candidates: list[dict[str, Any]], limit: int = 150_000) -> str:
-    serialized = json.dumps(candidates, ensure_ascii=False, default=str)
-    if len(serialized) <= limit:
-        return serialized
 
-    trimmed: list[dict[str, Any]] = []
+_NON_TECHNICAL_CHARACTERISTIC = re.compile(
+    r"^(?:колонка\s+[a-zа-я]{1,3}\b|цена\b|стоимость\b|"
+    r"срок\s+(?:поставки|службы)|количество\s+закупаем|"
+    r"однородность\s+совокупности)|н\s*\(?м\)?\s*ц|коэффициент\s+вариации",
+    re.IGNORECASE,
+)
+
+
+def _catalog_identity(value: Any) -> str:
+    return re.sub(r"[^a-zа-я0-9]+", " ", str(value or "").casefold().replace("ё", "е")).strip()
+
+
+def _selection_specs(product: TenderPosition) -> list[tuple[str, str]]:
+    specs: list[tuple[str, str]] = []
+    for characteristic in product.characteristics:
+        name = characteristic.name.strip()
+        value = characteristic.value.strip()
+        if (
+            not name or not value
+            or characteristic.associationStatus == "conflicting"
+            or 0 < characteristic.associationConfidence < 0.80
+            or _NON_TECHNICAL_CHARACTERISTIC.search(name)
+        ):
+            continue
+        specs.append((name[:120], value[:180]))
+    return list(dict.fromkeys(specs))[:40]
+
+
+def _catalog_value_matches(requested: str, actual: Any) -> bool:
+    expected = _catalog_identity(requested)
+    found = _catalog_identity(actual)
+    if not expected or not found:
+        return False
+    if expected == found:
+        return True
+    expected_numbers = re.findall(r"\d+(?:[.,]\d+)?", requested)
+    found_numbers = re.findall(r"\d+(?:[.,]\d+)?", str(actual))
+    if (
+        len(expected_numbers) != 1 or len(found_numbers) != 1
+        or expected_numbers[0].replace(",", ".") != found_numbers[0].replace(",", ".")
+    ):
+        return False
+    requested_words = set(re.findall(r"[a-zа-я]+", expected))
+    actual_words = set(re.findall(r"[a-zа-я]+", found))
+    return not actual_words or actual_words.issubset(requested_words)
+
+
+def _selection_affinity(
+    product: TenderPosition,
+    candidate: dict[str, Any],
+    specs: list[tuple[str, str]],
+) -> int:
+    candidate_identity = _catalog_identity(
+        f"{candidate.get('name', '')} {candidate.get('vendorCode', '')}"
+    )
+    score = sum(
+        4
+        for identity in (product.model, product.article)
+        if len(_catalog_identity(identity)) >= 4
+        and _catalog_identity(identity) in candidate_identity
+    )
+    params = candidate.get("params")
+    if not isinstance(params, dict):
+        return score
+    for name, value in specs:
+        name_terms = {word for word in _catalog_identity(name).split() if len(word) >= 3}
+        for key, actual in params.items():
+            key_terms = {word for word in _catalog_identity(key).split() if len(word) >= 3}
+            if name_terms & key_terms and _catalog_value_matches(value, actual):
+                score += 2
+                break
+    return score
+
+
+def _selection_shortlist(
+    product: TenderPosition, candidates: list[dict[str, Any]], limit: int = 10
+) -> list[dict[str, Any]]:
+    if len(candidates) <= limit:
+        return candidates
+    head_count = min(7, limit)
+    head = candidates[:head_count]
+    specs = _selection_specs(product)
+    ranked = sorted(
+        (
+            (_selection_affinity(product, candidate, specs), index, candidate)
+            for index, candidate in enumerate(candidates[head_count:])
+        ),
+        key=lambda item: (-item[0], item[1]),
+    )
+    promoted = [candidate for score, _, candidate in ranked if score > 0][:limit - len(head)]
+    selected_ids = {candidate["pointId"] for candidate in [*head, *promoted]}
+    filler = [
+        candidate for candidate in candidates[head_count:]
+        if candidate["pointId"] not in selected_ids
+    ][:limit - len(head) - len(promoted)]
+    return [*head, *promoted, *filler]
+
+
+def _selection_candidates_json(
+    candidates: list[dict[str, Any]], specs: list[tuple[str, str]]
+) -> str:
+    requested_terms = {
+        word for name, _ in specs
+        for word in _catalog_identity(name).split()
+        if len(word) >= 3
+    }
+    compact: list[dict[str, Any]] = []
     for candidate in candidates:
-        compact = dict(candidate)
-        params = compact.get("params")
-        if isinstance(params, dict):
-            compact["params"] = {
-                str(key)[:200]: str(value)[:500]
-                for key, value in list(params.items())[:30]
-            }
-        trimmed.append(compact)
-    serialized = json.dumps(trimmed, ensure_ascii=False, default=str)
-    if len(serialized) <= limit:
-        return serialized
+        params = candidate.get("params") or {}
+        ordered_params = (
+            sorted(
+                params.items(),
+                key=lambda pair: -len(
+                    {word for word in _catalog_identity(pair[0]).split() if len(word) >= 3}
+                    & requested_terms
+                ),
+            )
+            if isinstance(params, dict) else []
+        )
+        compact.append({
+            "pointId": candidate["pointId"],
+            "name": str(candidate.get("name") or "")[:300],
+            "manufacturer": str(candidate.get("manufacturer") or "")[:100],
+            "vendorCode": str(candidate.get("vendorCode") or "")[:100],
+            "params": {
+                str(key)[:120]: str(value)[:180]
+                for key, value in ordered_params[:30]
+            },
+            "score": candidate.get("score"),
+        })
+    return json.dumps(compact, ensure_ascii=False, default=str)
 
-    for candidate in trimmed:
-        candidate["params"] = {}
-    return json.dumps(trimmed, ensure_ascii=False, default=str)
 
 
 _INSULATOR_REQUEST_PATTERN = re.compile(
@@ -346,6 +457,7 @@ def hydrate_catalog_selection(
             ),
             "Поле цены": price_source_field,
             "Метод цены": price_aggregation,
+            "catalog_params": selected.get("params") if isinstance(selected.get("params"), dict) else {},
             "Qdrant point ID": selected.get("pointId"),
             "ID товара": product_id or article,
             "Обоснование": selection.rationale,
@@ -729,18 +841,46 @@ class CatalogMatcher:
             result = NOT_FOUND.model_copy(deep=True)
             result.rationale = "Qdrant не вернул нормализуемых кандидатов"
             return result
-        candidates_json = _selection_candidates_json(normalized_candidates)
+        shortlisted = _selection_shortlist(product, normalized_candidates)
+        specs = _selection_specs(product)
+        request = {
+            "originalProduct": product.product,
+            "searchQuery": product.productQuery or product.product,
+            "brand": product.brand,
+            "model": product.model,
+            "article": product.article,
+            "analogsAllowed": product.analogsAllowed,
+            "requirements": product.requirements[:1500],
+            "characteristics": [
+                {"name": name, "value": value} for name, value in specs
+            ],
+        }
+        candidates_json = _selection_candidates_json(shortlisted, specs)
         prompt = f"""
-Сопоставь позицию тендера с реальным товаром каталога. Используй только normalizedCandidates.
-Полное соответствие — все существенные характеристики соблюдены.
-Аналог — допустимая замена. Если подтверждения нет, верни «Товар не найден».
-Выбирай по назначению и существенным техническим характеристикам, а не по цене.
-Совпадение обозначения или цифр недостаточно, если категории товара различаются
-(например, высоковольтный изолятор и кабельная стойка).
-selectedPointId обязан точно совпадать с pointId одного кандидата. Не возвращай цену,
-артикул, ссылку, название или производителя: Python возьмёт их из выбранного payload.
-Если подходящего кандидата нет, верни selectedPointId=null и «Товар не найден».
-Позиция: {json.dumps(product.model_dump(), ensure_ascii=False)}
+Сопоставь исходную позицию тендера с normalizedCandidates. searchQuery использовался
+для поиска; окончательный выбор делай по originalProduct, характеристикам и требованиям.
+params кандидата и явно указанные параметры в его названии/модели — доказательства.
+Отсутствие параметра в params означает «неизвестно», а не «совпадает» или «не совпадает».
+Сопоставляй смысл параметров и единицы измерения, а не только одинаковые слова или цифры.
+Проверяй ограничения «не менее», «не более», диапазоны и допуски по фактическому значению
+кандидата. Не принимай цену, срок поставки, Qdrant score за техническое соответствие.
+
+«Полное соответствие»: совпадает тип/назначение товара и подтверждены все существенные
+технические требования; нет известных противоречий. Точная модель или артикул может
+подтвердить параметры, явно закодированные в обозначении. При неизвестном существенном
+параметре не утверждай полное соответствие.
+«Аналог»: тот же тип и назначение, критичные требования совместимы, но исполнение
+отличается или часть второстепенных параметров не подтверждена. Выбирай наиболее близкий
+по подтверждённым характеристикам, даже если он не первый по Qdrant score.
+Если analogsAllowed=false, аналог выбирать нельзя.
+Если ни один кандидат не подтверждает совместимость по типу и ключевым параметрам,
+верни «Товар не найден» с selectedPointId=null. Совпадение только числа при другом
+классе товара недостаточно.
+
+В rationale кратко укажи совпавшие и спорные ключевые параметры; не придумывай
+отсутствующие значения. selectedPointId должен быть pointId из normalizedCandidates.
+Верни только selectedPointId, correspondence и rationale. Выбирай не по цене.
+Позиция: {json.dumps(request, ensure_ascii=False)}
 normalizedCandidates: {candidates_json}
 """.strip()
         selection = self.llm.json_call(
@@ -757,11 +897,17 @@ normalizedCandidates: {candidates_json}
         selected = next(
             (
                 candidate
-                for candidate in normalized_candidates
+                for candidate in shortlisted
                 if str(candidate.get("pointId")) == str(selection.selected_point_id)
             ),
             None,
         )
+        if selection.selected_point_id and selected is None:
+            return hydrate_catalog_selection(selection, shortlisted)
+        if product.analogsAllowed is False and selection.correspondence == "Аналог":
+            result = NOT_FOUND.model_copy(deep=True)
+            result.rationale = "Аналоги запрещены документацией; точное соответствие не подтверждено."
+            return result
         if selected is not None:
             conflict = _catalog_category_conflict(product, selected)
             if conflict:

@@ -26,6 +26,7 @@ HEADERS = [
     "Источник",
     "Position key",
     "Характеристики из документов",
+    "Характеристики выбранного товара ETM",
     "Итоговый поисковый запрос",
     "Выбранные search_token",
     "Категория поиска",
@@ -77,6 +78,16 @@ def _characteristics_label(value: Any) -> str:
     return "\n".join(result)
 
 
+def _catalog_characteristics_label(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return "\n".join(
+        f"{key}: {item}"
+        for key, item in value.items()
+        if str(key).strip() and item is not None and str(item).strip()
+    )
+
+
 def _list_label(value: Any) -> str:
     if not isinstance(value, list):
         return ""
@@ -103,7 +114,11 @@ def _conflicts_label(value: Any) -> str:
     return "\n".join(result)
 
 
-def build_product_matching_workbook(product_check: dict[str, Any]) -> bytes:
+def build_product_matching_workbook(
+    product_check: dict[str, Any],
+    *,
+    selected_catalog_params: list[dict[str, Any]] | None = None,
+) -> bytes:
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "Автоподбор"
@@ -122,6 +137,11 @@ def build_product_matching_workbook(product_check: dict[str, Any]) -> bytes:
         if not isinstance(detail, dict):
             continue
         result = detail.get("result") if isinstance(detail.get("result"), dict) else {}
+        catalog_params = (
+            selected_catalog_params[index - 1]
+            if selected_catalog_params is not None and index <= len(selected_catalog_params)
+            else {}
+        )
         article = detail.get("article") or result.get("Артикул") or ""
         link = detail.get("link") or result.get("Ссылка") or ""
         product_id = detail.get("productId") or result.get("ID товара") or article
@@ -144,6 +164,7 @@ def build_product_matching_workbook(product_check: dict[str, Any]) -> bytes:
                 _source_label(detail),
                 _value(detail.get("positionKey")),
                 _characteristics_label(detail.get("sourceCharacteristics")),
+                _catalog_characteristics_label(catalog_params),
                 _value(detail.get("productQuery")),
                 _list_label(detail.get("searchCharacteristics")),
                 _value(
@@ -159,7 +180,7 @@ def build_product_matching_workbook(product_check: dict[str, Any]) -> bytes:
     worksheet.auto_filter.ref = worksheet.dimensions
     widths = [
         8, 48, 14, 12, 16, 34, 16, 52, 24, 16, 10, 16, 22, 72, 40,
-        24, 65, 65, 36, 28, 65, 60,
+        24, 65, 65, 65, 36, 28, 65, 60,
     ]
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(index)].width = width

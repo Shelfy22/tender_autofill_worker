@@ -630,7 +630,10 @@ class TenderPipeline:
                     f"autopodbor_{timestamp}.xlsx",
                 )
                 try:
-                    workbook = build_product_matching_workbook(product_check)
+                    workbook = build_product_matching_workbook(
+                        product_check,
+                        selected_catalog_params=[item.match.catalog_params for item in match_items],
+                    )
 
                     def upload_report() -> str:
                         try:
