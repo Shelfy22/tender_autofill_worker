@@ -81,12 +81,22 @@ def extract_pdf_text(
 
     with fitz.open(path) as document:
         for page_number, page in enumerate(document, start=1):
-            append_limited("\n".join(_pdf_table_text(page, page_number)))
+            append_limited(f"--- PDF PAGE {page_number} BEGIN ---")
+            table_parts = _pdf_table_text(page, page_number)
+            if table_parts:
+                append_limited(
+                    f"--- PDF PAGE {page_number} STRUCTURED TABLES ---"
+                )
+                append_limited("\n".join(table_parts))
+            append_limited(f"--- PDF PAGE {page_number} RAW TEXT ---")
             append_limited(page.get_text("text"))
             if total >= settings.max_text_chars_per_file:
                 break
     result = "\n".join(parts).strip()
-    useful = _has_meaningful_text(result)
+    content_without_markers = "\n".join(
+        line for line in result.splitlines() if not line.startswith("--- PDF PAGE ")
+    )
+    useful = _has_meaningful_text(content_without_markers)
     if useful:
         return result, "ok", warnings
     warnings.append("PDF не дал полезный текст; требуется OCR.")

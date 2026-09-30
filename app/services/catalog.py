@@ -347,6 +347,21 @@ _CABLE_RACK_CANDIDATE_PATTERN = re.compile(
 )
 
 
+_BASIC_PRODUCT_CLASSES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("projector", re.compile(r"\b\u043f\u0440\u043e\u0436\u0435\u043a\u0442\u043e\u0440", re.IGNORECASE)),
+    ("luminaire", re.compile(r"\b\u0441\u0432\u0435\u0442\u0438\u043b\u044c\u043d\u0438\u043a", re.IGNORECASE)),
+    ("lamp", re.compile(r"\b\u043b\u0430\u043c\u043f\u0430", re.IGNORECASE)),
+    ("cable_tie", re.compile(r"\b(?:\u0441\u0442\u044f\u0436\u043a\u0430|\u0445\u043e\u043c\u0443\u0442)\w*", re.IGNORECASE)),
+    ("wire_connector", re.compile(r"\b(?:\u0441\u0438\u0437(?:[-\s]?\d+)?|\u0437\u0430\u0436\u0438\u043c)\w*", re.IGNORECASE)),
+)
+
+
+def _basic_product_class(value: str) -> str | None:
+    for class_name, pattern in _BASIC_PRODUCT_CLASSES:
+        if pattern.search(value):
+            return class_name
+    return None
+
 def _catalog_category_conflict(
     product: TenderPosition,
     selected: dict[str, Any],
@@ -370,6 +385,10 @@ def _catalog_category_conflict(
             json.dumps(selected.get("params") or {}, ensure_ascii=False, default=str),
         )
     )
+    requested_class = _basic_product_class(requested)
+    candidate_class = _basic_product_class(candidate)
+    if requested_class and candidate_class and requested_class != candidate_class:
+        return f"Requested class {requested_class}, selected class {candidate_class}."
     if (
         _INSULATOR_REQUEST_PATTERN.search(requested)
         and _CABLE_RACK_CANDIDATE_PATTERN.search(candidate)

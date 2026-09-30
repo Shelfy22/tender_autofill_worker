@@ -12,6 +12,8 @@ from app.models import (
     TenderPosition,
 )
 from app.services.product_search_query import (
+    _compact_token,
+    _prepend_required_tokens,
     build_search_query,
     enrich_product_search_queries,
     normalize_search_characteristic,
@@ -122,6 +124,16 @@ def test_color_temperature_range_is_preserved_instead_of_midpoint() -> None:
 
     assert normalized is not None
     assert normalized["search_token"] == "3200-7500К"
+
+
+def test_search_token_sanitizer_drops_quantities_broken_units_and_case_duplicates() -> None:
+    assert _compact_token("2 шт") == ""
+    assert _compact_token("м2)") == ""
+    assert _prepend_required_tokens(
+        [],
+        ["RS-232/422/485", "rs-232/422/485", "8 шт"],
+    ) == ["RS-232/422/485"]
+
 
 
 def test_hallucinated_search_token_is_rejected() -> None:

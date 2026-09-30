@@ -60,6 +60,23 @@ _COMPACT_MODEL_TOKEN_PATTERN = re.compile(
 )
 
 
+_DIMENSION_ONLY_PATTERN = re.compile(
+    r"^\s*(?:[x\u0445\u00d7]\s*)?\d+(?:[.,]\d+)?\s*"
+    r"(?:[x\u0445\u00d7]\s*\d+(?:[.,]\d+)?\s*)+(?:\D{0,12})?\s*$",
+    re.IGNORECASE,
+)
+_CHARACTERISTIC_VALUE_PATTERN = re.compile(
+    r"^\s*(?:\u043c\u043e\u0449\u043d\u043e\u0441\u0442\u044c|\u043d\u0430\u043f\u0440\u044f\u0436\u0435\u043d\u0438\u0435|"
+    r"\u0442\u043e\u043a|\u0447\u0430\u0441\u0442\u043e\u0442\u0430|\u0434\u0438\u0430\u043c\u0435\u0442\u0440|\u0434\u043b\u0438\u043d\u0430|"
+    r"\u0448\u0438\u0440\u0438\u043d\u0430|\u0442\u043e\u043b\u0449\u0438\u043d\u0430|\u0446\u0432\u0435\u0442|\u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b|"
+    r"\u043d\u0430\u043b\u0438\u0447\u0438\u0435|\u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d)\s*:",
+    re.IGNORECASE,
+)
+_NON_PRODUCT_SINGLE_WORDS = {
+    "\u0442\u043e\u0447\u043d\u043e", "\u0434\u0430\u043b\u0435\u0435",
+    "\u0438\u0442\u043e\u0433\u043e", "\u043f\u0440\u0438\u043c\u0435\u0447\u0430\u043d\u0438\u0435",
+}
+
 def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -70,6 +87,10 @@ def _missing(value: Any) -> bool:
 
 def _deterministic_non_product_role(value: Any) -> str | None:
     text = _clean(value)
+    if _DIMENSION_ONLY_PATTERN.fullmatch(text) or _CHARACTERISTIC_VALUE_PATTERN.match(text):
+        return "characteristic"
+    if text.casefold().strip(" .,:;-") in _NON_PRODUCT_SINGLE_WORDS:
+        return "header"
     if _STANDALONE_SERVICE_PATTERN.fullmatch(text):
         return "service"
     if _STANDALONE_HEADER_PATTERN.fullmatch(text):

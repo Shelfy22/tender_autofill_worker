@@ -12,6 +12,10 @@ from app.models import (
 )
 from app.services.product_characteristics import normalize_product_category
 
+_QUANTITY_TOKEN_PATTERN = re.compile(
+    r"^\d+(?:[.,]\d+)?\s*(?:шт(?:ук(?:а|и)?)?\.?|ед\.?|компл(?:ект)?(?:а|ов)?)$",
+    re.IGNORECASE,
+)
 
 _NON_SEARCH_ROLES = {"TEMPORAL", "QUANTITY"}
 _SEARCH_USAGES = {"SEARCH_PRIMARY", "SEARCH_SECONDARY"}
@@ -202,11 +206,21 @@ def _compact_token(value: Any) -> str:
     token = _clean(value)
     token = re.sub(r"(?<=\d)\s+(?=[%°A-Za-zА-Яа-яЁё])", "", token)
     token = re.sub(r"(?<=[A-Za-zА-Яа-яЁё])\s+(?=\d)", "", token)
+    if (
+        not token
+        or _QUANTITY_TOKEN_PATTERN.fullmatch(token)
+        or token.count(")") > token.count("(")
+        or token.count("]") > token.count("[")
+    ):
+        return ""
     return token[:120]
 
 
 def _is_weak_standalone_token(value: Any) -> bool:
-    return bool(re.fullmatch(r"\d+(?:[.,]\d+)?", _clean(value)))
+    token = _compact_token(value)
+    return bool(
+        not token or re.fullmatch(r"\d+(?:[.,]\d+)?", token)
+    )
 
 
 def _compact_designations(value: Any) -> list[str]:
@@ -240,6 +254,19 @@ def _designation_identity_tokens(position: TenderPosition) -> list[str]:
         tokens.extend(_compact_designations(value))
     return list(dict.fromkeys(tokens))[:3]
 
+
+def _has_strong_model_identifier(
+    position: TenderPosition,
+    semantic: ProductSemanticClassification,
+) -> bool:
+    """Only a real model/article may suppress supplemental search tokens."""
+    if semantic.identifier_strength != "HIGH":
+        return False
+    tokens = [*_designation_identity_tokens(position), *_compact_designations(position.product)]
+    return any(
+        re.search(r"[A-Za-z\u0410-\u044f]", token) and re.search(r"\d", token)
+        for token in tokens
+    )
 
 def _is_cable_position(
     position: TenderPosition,
@@ -320,7 +347,18 @@ def _prepend_required_tokens(
             and _identity(token) not in base_identity
         ),
     ]
-    return list(dict.fromkeys(_compact_token(value) for value in values if _compact_token(value)))[:5]
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        token = _compact_token(value)
+        token_key = _identity(token)
+        if not token or not token_key or token_key in seen:
+            continue
+        seen.add(token_key)
+        result.append(token)
+        if len(result) >= 5:
+            break
+    return result
 
 
 def _boundary_token(characteristic: SemanticCharacteristic, value: float | None) -> str:
@@ -779,7 +817,10 @@ def build_search_query(
     selected_items: list[dict[str, Any]] = []
     seen_tokens: set[str] = set()
     identity_ids = list(dict.fromkeys(sku.identity_bundle))
-    selected_ids = list(dict.fromkeys([*identity_ids, *sku.selected_for_search]))
+    strong_model_only = _has_strong_model_identifier(position, semantic)
+    selected_ids = list(dict.fromkeys(
+        identity_ids if strong_model_only else [*identity_ids, *sku.selected_for_search]
+    ))
     for characteristic_id in selected_ids:
         item = by_id.get(characteristic_id)
         decision = decision_by_id.get(characteristic_id)
@@ -824,7 +865,7 @@ def build_search_query(
             *_designation_identity_tokens(position),
             *_cable_identity_tokens(position, semantic),
         ],
-        _compose_search_tokens(selected_items),
+        [] if strong_model_only else _compose_search_tokens(selected_items),
         base=base,
     )
     query = _clean(" ".join([base, *selected])) or _clean(

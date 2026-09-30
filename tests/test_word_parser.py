@@ -39,6 +39,29 @@ def test_word_parser_extracts_nested_procurement_table(tmp_path: Path) -> None:
     ]
 
 
+def test_word_table_combines_product_with_model_and_skips_blank_offer_form() -> None:
+    text = "\n".join(
+        [
+            "Таблица Word 1",
+            "Строка 1: A: № п/п | B: Наименование товара | C: Марка (модель, тип) | D: Ед. изм. | E: Кол-во",
+            "Строка 2: A: 1 | B: Провод | C: СИП-2 3х70+1х70-0,6/1 | D: км | E: 0,400",
+            "Строка 3: A: 2 | B: Провод | C: СИП-4 4х25-0,6/1 | D: км | E: 0,449",
+            "Таблица Word 2",
+            "Строка 1: A: № п/п | B: Наименование товара | C: Марка (модель, тип) | D: Ед. изм. | E: Кол-во",
+            "Строка 2: A: 1 | B: Провод | C:  | D: км | E: 0,400",
+            "Строка 3: A: 2 | B: Провод | C:  | D: км | E: 0,449",
+        ]
+    )
+
+    positions = extract_deterministic_positions(text)
+
+    assert [(item.product, item.quantity, item.unit) for item in positions] == [
+        ("Провод СИП-2 3х70+1х70-0,6/1", 0.4, "км"),
+        ("Провод СИП-4 4х25-0,6/1", 0.449, "км"),
+    ]
+
+
+
 def test_word_parser_preserves_section_and_table_order(tmp_path: Path) -> None:
     document = Document()
     document.add_paragraph("4. ТЕХНИЧЕСКОЕ ЗАДАНИЕ")

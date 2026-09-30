@@ -103,6 +103,50 @@ def _normalize_extracted_product_name(value: str) -> str:
     return _clean(_EQUIVALENT_SUFFIX_PATTERN.sub("", value))
 
 
+_TABLE_IDENTITY_HEADER_PATTERN = re.compile(
+    r"(?:\bмарка\b|\bмодель\b|\bартикул\b|\bобозначени|\bтип\b)",
+    re.IGNORECASE,
+)
+_TABLE_IDENTITY_EXCLUDED_HEADER_PATTERN = re.compile(
+    r"(?:предложени.*участник|страна|техническ.*регламент|стандарт)",
+    re.IGNORECASE,
+)
+
+
+def _compose_table_product_identity(
+    name: Any,
+    cells: dict[str, str],
+    column_labels: dict[str, str],
+    product_column: str,
+) -> str:
+    """Keep a model/mark from the same row as part of a generic product title."""
+    product = _clean(name)
+    if not product:
+        return ""
+    product_key = _word_table_key(product)
+    identity_values: list[str] = []
+    for column, value in sorted(
+        cells.items(), key=lambda item: _excel_column_number(item[0])
+    ):
+        if column == product_column:
+            continue
+        label = _clean(column_labels.get(column))
+        candidate = _clean(value).strip(" ;,.")
+        if (
+            not candidate
+            or not label
+            or not _TABLE_IDENTITY_HEADER_PATTERN.search(label)
+            or _TABLE_IDENTITY_EXCLUDED_HEADER_PATTERN.search(label)
+        ):
+            continue
+        candidate_key = _word_table_key(candidate)
+        if not candidate_key or candidate_key in product_key:
+            continue
+        identity_values.append(candidate)
+        product_key = f"{product_key} {candidate_key}".strip()
+    return _clean(" ".join((product, *dict.fromkeys(identity_values))))
+
+
 def _missing(value: Any) -> bool:
     return value is None or value == ""
 
@@ -266,6 +310,18 @@ def _header_candidates(cells: dict[str, str]) -> list[tuple[str, str, str]]:
     ]
 
 
+def _is_parameter_value_cell(value: str) -> bool:
+    """Return whether a cell looks like a technical-specification entry."""
+    text = _clean(value)
+    if not text or ":" not in text:
+        return False
+    name, raw_value = text.split(":", 1)
+    return bool(
+        re.search(r"[A-Za-z\u0410-\u044f]", name)
+        and raw_value.strip()
+        and len(name) <= 120
+    )
+
 def _header_data_score(
     role: str,
     column: str,
@@ -283,6 +339,9 @@ def _header_data_score(
     if role == "unit":
         matches = sum(bool(re.fullmatch(UNITS, value, re.IGNORECASE)) for value in values)
     elif role == "product":
+        # A column headed as a product can still contain technical characteristics.
+        if sum(_is_parameter_value_cell(value) for value in values) / len(values) >= 0.6:
+            return 0.0
         matches = sum(
             bool(re.search(r"[A-Za-z\u0410-\u044f]", value))
             and _header_role(value) is None
@@ -442,6 +501,42 @@ def _word_table_characteristics(
                 associationConfidence=association_confidence,
                 associationMethod=association_method,
                 associationStatus="confirmed",
+            )
+        )
+    return result
+
+
+def _inline_table_characteristics(
+    *,
+    cells: dict[str, str],
+    ignored_columns: set[str],
+    table_label: str,
+    section_role: str,
+    association_method: str,
+    association_confidence: float,
+) -> list[ProductCharacteristic]:
+    """Read named parameter cells from a product row with a merged description."""
+    result: list[ProductCharacteristic] = []
+    for column, value in sorted(
+        cells.items(), key=lambda item: _excel_column_number(item[0])
+    ):
+        text = _clean(value)
+        if (
+            column in ignored_columns
+            or not text
+            or ":" not in text
+            or _ONLY_ROW_NUMBER_PATTERN.fullmatch(text)
+        ):
+            continue
+        result.extend(
+            _word_table_characteristics(
+                value=text,
+                fallback_name="Characteristic",
+                table_label=table_label,
+                section_role=section_role,
+                column=column,
+                association_method=association_method,
+                association_confidence=association_confidence,
             )
         )
     return result
@@ -738,6 +833,51 @@ def _currency_from_price_cells(*values: Any) -> str | None:
     return None
 
 
+
+def _drop_unresolved_generic_table_positions(
+    positions: list[TenderPosition],
+) -> list[TenderPosition]:
+    """Discard blank offer-form rows when a richer table in the file names the goods."""
+    richer_prefixes: dict[str, set[str]] = {}
+    generic_indexes: list[tuple[int, str, str]] = []
+    for index, position in enumerate(positions):
+        reference = position.sourceReference
+        if reference is None or not reference.table:
+            continue
+        product_key = _word_table_key(position.product)
+        words = product_key.split()
+        if not words:
+            continue
+        file_key = _word_table_key(reference.fileName) or "__single_document__"
+        if len(words) == 1 and not _clean(position.model) and not _clean(position.article):
+            generic_indexes.append((index, file_key, product_key))
+            continue
+        for generic_index, generic_file, generic_key in list(generic_indexes):
+            if generic_file == file_key and product_key.startswith(f"{generic_key} "):
+                richer_prefixes.setdefault(file_key, set()).add(generic_key)
+        for generic_key in list(richer_prefixes.get(file_key, set())):
+            if product_key.startswith(f"{generic_key} "):
+                richer_prefixes.setdefault(file_key, set()).add(generic_key)
+
+    # The first pass may encounter generic forms after the detailed table.
+    for position in positions:
+        reference = position.sourceReference
+        if reference is None or not reference.table:
+            continue
+        file_key = _word_table_key(reference.fileName) or "__single_document__"
+        product_key = _word_table_key(position.product)
+        for _, generic_file, generic_key in generic_indexes:
+            if generic_file == file_key and product_key.startswith(f"{generic_key} "):
+                richer_prefixes.setdefault(file_key, set()).add(generic_key)
+
+    skipped = {
+        index
+        for index, file_key, product_key in generic_indexes
+        if product_key in richer_prefixes.get(file_key, set())
+    }
+    return [position for index, position in enumerate(positions) if index not in skipped]
+
+
 def extract_deterministic_positions(
     text: str,
     spreadsheet_tables: list[SpreadsheetTable] | None = None,
@@ -756,6 +896,7 @@ def extract_deterministic_positions(
     ]
     result: list[TenderPosition] = []
     structured_spreadsheet_rows: set[str] = set()
+    structured_text_table_rows: set[str] = set()
 
     def add(
         name: str,
@@ -922,6 +1063,12 @@ def extract_deterministic_positions(
                 if column
             }
             name = cells.get(product_column, "")
+            name = _compose_table_product_identity(
+                name,
+                cells,
+                column_labels,
+                product_column,
+            )
             characteristics = table_characteristics(
                 table=table,
                 row=row,
@@ -1046,7 +1193,10 @@ def extract_deterministic_positions(
     current_sheet = ""
     header_columns: dict[str, str] = {}
     header_labels: dict[str, str] = {}
+    column_labels: dict[str, str] = {}
     header_width = 0
+    last_text_table_result_index: int | None = None
+    pdf_inherited_headers_pending = False
     current_section_role = OTHER_ROLE
     for line in text.splitlines():
         if line.startswith("--- ДОКУМЕНТ "):
@@ -1054,6 +1204,7 @@ def extract_deterministic_positions(
             current_sheet = ""
             header_columns = {}
             header_labels = {}
+            column_labels = {}
             header_width = 0
             current_section_role = OTHER_ROLE
             continue
@@ -1061,10 +1212,19 @@ def extract_deterministic_positions(
         if detected_section_role != OTHER_ROLE:
             current_section_role = detected_section_role
         if line.startswith(("Таблица Word ", "Таблица PDF ", "Таблица RTF ")):
+            inherit_pdf_headers = (
+                bool(re.search(r"\bPDF\s+\d", current_sheet, re.IGNORECASE))
+                and bool(re.search(r"\bPDF\s+\d", line, re.IGNORECASE))
+                and {"product", "quantity"}.issubset(header_columns)
+            )
             current_sheet = line.strip()
-            header_columns = {}
-            header_labels = {}
-            header_width = 0
+            pdf_inherited_headers_pending = inherit_pdf_headers
+            if not inherit_pdf_headers:
+                header_columns = {}
+                header_labels = {}
+                column_labels = {}
+                header_width = 0
+                last_text_table_result_index = None
             continue
         if line.lower().startswith("filename:"):
             current_file = line.split(":", 1)[1].strip()
@@ -1087,7 +1247,9 @@ def extract_deterministic_positions(
             current_sheet = line.split(":", 1)[1].strip()
             header_columns = {}
             header_labels = {}
+            column_labels = {}
             header_width = 0
+            last_text_table_result_index = None
             continue
         row_match = re.match(r"^Строка\s+(\d+)\s*:\s*(.+)$", line, re.I)
         if not row_match:
@@ -1096,6 +1258,8 @@ def extract_deterministic_positions(
         cells = _parse_structured_cells(row_match.group(2))
         if not cells:
             continue
+        if re.search(r"\b(?:Word|PDF|RTF)\s+\d", current_sheet, re.IGNORECASE):
+            structured_text_table_rows.add(_clean(line))
         if _is_repeated_merged_row(cells):
             continue
         detected_headers = {
@@ -1112,10 +1276,24 @@ def extract_deterministic_positions(
         }
         is_header_row = "product" in detected_headers or len(core_header_roles) >= 2
         if is_header_row:
+            if pdf_inherited_headers_pending:
+                header_columns = {}
+                header_labels = {}
+                column_labels = {}
+                header_width = 0
+                pdf_inherited_headers_pending = False
             header_width = max(
                 header_width,
                 max((_excel_column_number(column) for column in cells), default=0),
             )
+            for column, label in cells.items():
+                cleaned_label = _clean(label)
+                if cleaned_label:
+                    current = column_labels.get(column, "")
+                    if cleaned_label not in current.split(" / "):
+                        column_labels[column] = " / ".join(
+                            filter(None, (current, cleaned_label))
+                        )
             for role, (column, label) in detected_headers.items():
                 header_columns[role] = column
                 header_labels[role] = label
@@ -1157,9 +1335,68 @@ def extract_deterministic_positions(
                 name = adjusted_name
                 raw_quantity = adjusted_quantity
         if not name or not unit or raw_quantity is None:
+            structured_spreadsheet_rows.add(_clean(line))
+            serial = _word_table_serial(cells)
+            if last_text_table_result_index is not None and not serial:
+                ignored_columns = {
+                    column
+                    for role, column in active_header_columns.items()
+                    if role in {"product", "unit", "quantity", "unit_price", "line_total"}
+                    and column
+                }
+                continuation = _inline_table_characteristics(
+                    cells=cells,
+                    ignored_columns=ignored_columns,
+                    table_label=current_sheet,
+                    section_role=current_section_role,
+                    association_method="continuation_row",
+                    association_confidence=0.90,
+                )
+                if continuation:
+                    existing = result[last_text_table_result_index]
+                    continuation_requirements = "; ".join(
+                        f"{item.name}: {item.value}" for item in continuation
+                    )
+                    result[last_text_table_result_index] = existing.model_copy(
+                        update={
+                            "characteristics": list(existing.characteristics)
+                            + continuation,
+                            "requirements": _clean(
+                                "; ".join(
+                                    filter(
+                                        None,
+                                        (
+                                            existing.requirements,
+                                            continuation_requirements,
+                                        ),
+                                    )
+                                )
+                            ),
+                        }
+                    )
             continue
+        name = _compose_table_product_identity(
+            name,
+            cells,
+            column_labels,
+            product_column,
+        )
         if _clean(line) in structured_spreadsheet_rows:
             continue
+        ignored_columns = {
+            column
+            for role, column in active_header_columns.items()
+            if role in {"product", "unit", "quantity", "unit_price", "line_total"}
+            and column
+        }
+        characteristics = _inline_table_characteristics(
+            cells=cells,
+            ignored_columns=ignored_columns,
+            table_label=current_sheet,
+            section_role=current_section_role,
+            association_method="same_row",
+            association_confidence=0.98,
+        )
         unit_price_column = active_header_columns.get("unit_price", "")
         line_total_column = active_header_columns.get("line_total", "")
         raw_unit_price = cells.get(unit_price_column) if unit_price_column else None
@@ -1179,6 +1416,10 @@ def extract_deterministic_positions(
             if has_document_price
             else None
         )
+        requirements = "; ".join(
+            f"{item.name}: {item.value}" for item in characteristics
+        )
+        before_count = len(result)
         structured_spreadsheet_rows.add(_clean(line))
         add(
             name,
@@ -1212,14 +1453,20 @@ def extract_deterministic_positions(
                 sectionRole=current_section_role,
                 extractionMethod="excel_deterministic",
             ),
+            characteristics=characteristics,
+            requirements=requirements,
         )
+        if len(result) > before_count:
+            last_text_table_result_index = len(result) - 1
         if len(result) >= max_positions:
             return result
 
     # Structured row emitted by the spreadsheet parser:
     # "Строка 2: A: 1 | B: Кабель | D: шт | E: 10".
     for row_match in re.finditer(r"^Строка\s+\d+\s*:\s*(.+)$", text, re.I | re.M):
-        if _clean(row_match.group(0)) in structured_spreadsheet_rows:
+        if _clean(row_match.group(0)) in (
+            structured_spreadsheet_rows | structured_text_table_rows
+        ):
             continue
         parts = []
         for raw_part in row_match.group(1).split("|"):
@@ -1250,11 +1497,28 @@ def extract_deterministic_positions(
             if len(result) >= max_positions:
                 return result
 
-    fallback_text = "\n".join(
-        line
+    fallback_lines: list[str] = []
+    pdf_page_has_structured_table = False
+    has_pdf_structured_tables = any(
+        line.startswith("--- PDF PAGE ") and line.endswith(" STRUCTURED TABLES ---")
         for line in text.splitlines()
-        if not _looks_like_structured_row(line)
     )
+    skip_pdf_raw_text = False
+    for line in text.splitlines():
+        if line.startswith("--- PDF PAGE ") and line.endswith(" BEGIN ---"):
+            pdf_page_has_structured_table = False
+            skip_pdf_raw_text = False
+            continue
+        if line.startswith("--- PDF PAGE ") and line.endswith(" STRUCTURED TABLES ---"):
+            pdf_page_has_structured_table = True
+            continue
+        if line.startswith("--- PDF PAGE ") and line.endswith(" RAW TEXT ---"):
+            skip_pdf_raw_text = has_pdf_structured_tables or pdf_page_has_structured_table
+            continue
+        if skip_pdf_raw_text or _looks_like_structured_row(line):
+            continue
+        fallback_lines.append(line)
+    fallback_text = "\n".join(fallback_lines)
     fallback_normalized = _clean(fallback_text)
     for pattern_index, pattern in enumerate(patterns):
         for match in pattern.finditer(fallback_normalized if pattern_index == 0 else fallback_text):
@@ -1265,7 +1529,9 @@ def extract_deterministic_positions(
             add(name, unit, raw_quantity, match.group(0))
             if len(result) >= max_positions:
                 return result
-    return _enrich_structured_table_positions_with_characteristics(text, result)
+    return _drop_unresolved_generic_table_positions(
+        _enrich_structured_table_positions_with_characteristics(text, result)
+    )
 
 
 def _first_value(mapping: dict[str, Any], *keys: str) -> Any:
@@ -1574,9 +1840,9 @@ def _aligned_replicated_table_pairs(
         reference = position.sourceReference
         if reference is None:
             continue
-        file_name = _word_table_key(reference.fileName)
+        file_name = _word_table_key(reference.fileName) or "__single_document__"
         table_scope = _word_table_key(reference.sheet or reference.table)
-        if not file_name or not table_scope:
+        if not table_scope:
             continue
         by_scope.setdefault((file_name, table_scope), []).append((index, position))
 
@@ -1584,7 +1850,11 @@ def _aligned_replicated_table_pairs(
     options: list[tuple[float, tuple[str, str], tuple[str, str]]] = []
     for left_offset, left_scope in enumerate(scopes):
         left_rows = by_scope[left_scope]
-        if len(left_rows) < 4:
+        is_identified_single_row = (
+            len(left_rows) == 1
+            and bool(re.search(r"\d", _position_name_key(left_rows[0][1])))
+        )
+        if len(left_rows) < 4 and not is_identified_single_row:
             continue
         for right_scope in scopes[left_offset + 1 :]:
             if left_scope[0] != right_scope[0]:

@@ -1,0 +1,70 @@
+{
+    "name":  "Tender Product Matching",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "public":  true,
+                                         "initialMessages":  "РџСЂРёРєСЂРµРїРёС‚Рµ PDF, Word РёР»Рё Excel-С„Р°Р№Р» СЃ С‚РµРЅРґРµСЂРЅРѕР№ РґРѕРєСѓРјРµРЅС‚Р°С†РёРµР№. РњРѕР¶РЅРѕ РїСЂРёР»РѕР¶РёС‚СЊ РЅРµСЃРєРѕР»СЊРєРѕ С„Р°Р№Р»РѕРІ РѕРґРЅРёРј СЃРѕРѕР±С‰РµРЅРёРµРј. РџРѕСЃР»Рµ РѕР±СЂР°Р±РѕС‚РєРё Р±СѓРґРµС‚ СЃС„РѕСЂРјРёСЂРѕРІР°РЅ XLSX СЃ РїРѕРґРѕР±СЂР°РЅРЅС‹РјРё С‚РѕРІР°СЂР°РјРё.",
+                                         "options":  {
+                                                         "allowFileUploads":  true,
+                                                         "allowedFilesMimeTypes":  "application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/zip,application/x-zip-compressed,application/x-7z-compressed,application/vnd.rar,application/x-rar-compressed",
+                                                         "inputPlaceholder":  "РџСЂРёРєСЂРµРїРёС‚Рµ С„Р°Р№Р»С‹ Рё РїСЂРё РЅРµРѕР±С…РѕРґРёРјРѕСЃС‚Рё СѓРєР°Р¶РёС‚Рµ РЅР°Р·РІР°РЅРёРµ С‚РµРЅРґРµСЂР°...",
+                                                         "showWelcomeScreen":  false,
+                                                         "subtitle":  "Р—Р°РіСЂСѓР·РёС‚Рµ РґРѕРєСѓРјРµРЅС‚С‹ вЂ” СЃРёСЃС‚РµРјР° СЂР°СЃРїРѕР·РЅР°РµС‚ РїРѕР·РёС†РёРё, РІС‹РїРѕР»РЅРёС‚ РїРѕРёСЃРє РїРѕ Р±Р°Р·Рµ Рё СЃС„РѕСЂРјРёСЂСѓРµС‚ Excel",
+                                                         "title":  "РџРѕРґР±РѕСЂ С‚РѕРІР°СЂРѕРІ РїРѕ РґРѕРєСѓРјРµРЅС‚Р°Рј С‚РµРЅРґРµСЂР°",
+                                                         "responseMode":  "lastNode"
+                                                     }
+                                     },
+                      "id":  "c6f3cdec-c4ac-4c6c-bef0-6ed60eb0fe90",
+                      "name":  "When chat message received",
+                      "type":  "@n8n/n8n-nodes-langchain.chatTrigger",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       1328,
+                                       1520
+                                   ],
+                      "webhookId":  "tender-product-matching-chat"
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const env = typeof $env !== \u0027undefined\u0027 ? $env : process.env;\nconst endpoint = String(env.TENDER_PRODUCT_MATCHING_URL || \u0027http://tender-api:8000/product-matching/from-documents\u0027).trim();\nconst apiKey = String(env.TENDER_PYTHON_API_KEY || \u0027\u0027).trim();\nconst allItems = $input.all();\n\nlet tenderName = \u0027\u0027;\nfor (const item of allItems) {\n  tenderName ||= String(item.json?.tenderName || item.json?.chatInput || \u0027\u0027).trim();\n}\ntenderName ||= \u0027documents\u0027;\n\nconst form = new FormData();\nform.append(\u0027tender_name\u0027, tenderName);\n\nlet fileCount = 0;\nfor (let itemIndex = 0; itemIndex \u003c allItems.length; itemIndex++) {\n  const item = allItems[itemIndex];\n  const binaries = item.binary || {};\n  for (const [propertyName, binary] of Object.entries(binaries)) {\n    const buffer = await this.helpers.getBinaryDataBuffer(itemIndex, propertyName);\n    const fileName = String(binary.fileName || propertyName || `document_${fileCount + 1}`);\n    const mimeType = String(binary.mimeType || \u0027application/octet-stream\u0027);\n    form.append(\u0027files\u0027, new Blob([buffer], { type: mimeType }), fileName);\n    fileCount++;\n  }\n}\n\nif (!fileCount) {\n  return [{\n    json: {\n      output: \u0027Прикрепите хотя бы один файл PDF, Word или Excel и отправьте сообщение еще раз.\u0027,\n      status: \u0027no_files\u0027\n    }\n  }];\n}\n\nconst headers = {};\nif (apiKey) headers[\u0027X-API-Key\u0027] = apiKey;\n\nconst response = await fetch(endpoint, {\n  method: \u0027POST\u0027,\n  headers,\n  body: form,\n});\n\nif (!response.ok) {\n  const text = await response.text();\n  throw new Error(`Tender Worker returned HTTP ${response.status}: ${text.slice(0, 2000)}`);\n}\n\nconst arrayBuffer = await response.arrayBuffer();\nconst outputName = `autopodbor_${(tenderName || \u0027documents\u0027).replace(/[^a-z0-9а-яё_-]+/gi, \u0027_\u0027).slice(0, 80) || \u0027documents\u0027}.xlsx`;\nconst data = await this.helpers.prepareBinaryData(\n  Buffer.from(arrayBuffer),\n  outputName,\n  \u0027application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\u0027\n);\n\nreturn [{\n  json: {\n    output: `Готово. Сформирован файл: ${outputName}`,\n    status: \u0027completed\u0027,\n    tenderName,\n    uploadedFiles: fileCount,\n    fileName: outputName,\n  },\n  binary: { data },\n}];"
+                                     },
+                      "id":  "a03d8726-bd7e-4c5c-b927-79a6fd4f6f03",
+                      "name":  "Build product matching in Tender Worker",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       1616,
+                                       1520
+                                   ],
+                      "notesInFlow":  true,
+                      "notes":  "Collects chat attachments, posts multipart/form-data to Python Worker with fetch, and returns XLSX as binary data."
+                  }
+              ],
+    "pinData":  {
+
+                },
+    "connections":  {
+                        "When chat message received":  {
+                                                           "main":  [
+                                                                        {
+                                                                            "node":  "Build product matching in Tender Worker",
+                                                                            "type":  "main",
+                                                                            "index":  0
+                                                                        }
+                                                                    ]
+                                                       }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "binaryMode":  "separate",
+                     "availableInMCP":  false
+                 },
+    "nodeGroups":  [
+
+                   ],
+    "tags":  [
+
+             ]
+}
