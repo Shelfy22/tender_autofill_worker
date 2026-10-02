@@ -39,6 +39,43 @@ def test_word_parser_extracts_nested_procurement_table(tmp_path: Path) -> None:
     ]
 
 
+def test_word_table_reads_unit_embedded_in_quantity_cell(tmp_path: Path) -> None:
+    document = Document()
+    document.add_paragraph("\u0422\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0437\u0430\u0434\u0430\u043d\u0438\u0435 " * 30)
+    table = document.add_table(rows=3, cols=4)
+    headers = [
+        "\u2116 \u043f/\u043f",
+        "\u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435",
+        "\u0422\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0435 \u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0438",
+        "\u041a\u043e\u043b-\u0432\u043e",
+    ]
+    for index, header in enumerate(headers):
+        table.cell(0, index).text = header
+    table.cell(1, 0).text = "1"
+    table.cell(1, 1).text = "\u041c\u0443\u0444\u0442\u0430 4\u041a\u041d\u0422\u043f-1-150/240"
+    table.cell(1, 2).text = "\u0422\u0438\u043f: \u043a\u043e\u043d\u0446\u0435\u0432\u0430\u044f"
+    table.cell(1, 3).text = "150 \u0448\u0442."
+    table.cell(2, 0).text = "2"
+    table.cell(2, 1).text = "\u041c\u0443\u0444\u0442\u0430 4\u041a\u041d\u0422\u043f-1-70/120"
+    table.cell(2, 2).text = "\u0422\u0438\u043f: \u043a\u043e\u043d\u0446\u0435\u0432\u0430\u044f"
+    table.cell(2, 3).text = "60 \u0448\u0442."
+    path = tmp_path / "sleeves.docx"
+    document.save(path)
+
+    text, status, _ = extract_word_text(
+        path,
+        "docx",
+        Settings(postgres_dsn="postgresql://user:pass@localhost/db"),
+    )
+    positions = extract_deterministic_positions(text)
+
+    assert status == "ok"
+    assert [(item.product, item.quantity, item.unit) for item in positions] == [
+        ("\u041c\u0443\u0444\u0442\u0430 4\u041a\u041d\u0422\u043f-1-150/240", 150.0, "\u0448\u0442"),
+        ("\u041c\u0443\u0444\u0442\u0430 4\u041a\u041d\u0422\u043f-1-70/120", 60.0, "\u0448\u0442"),
+    ]
+
+
 def test_word_table_combines_product_with_model_and_skips_blank_offer_form() -> None:
     text = "\n".join(
         [

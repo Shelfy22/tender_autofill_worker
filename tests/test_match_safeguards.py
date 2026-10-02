@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.models import (
+    ProductCharacteristic,
     ProductSemanticClassification,
     ProductSkuClassification,
     SkuCharacteristicDecision,
@@ -9,7 +10,10 @@ from app.models import (
 )
 from app.services.catalog import _catalog_category_conflict
 from app.services.product_search_query import build_search_query
-from app.services.product_validation import _deterministic_non_product_role
+from app.services.product_validation import (
+    _deterministic_non_product_role,
+    _sanitize_catalog_candidate,
+)
 from app.services.products import _header_data_score
 
 
@@ -30,7 +34,12 @@ def test_obvious_fragments_are_rejected_before_catalog_search() -> None:
 
 
 def test_strong_model_does_not_add_numeric_characteristics_to_search() -> None:
-    position = TenderPosition(product="Transformer ABC-100")
+    position = TenderPosition(
+        product="Transformer ABC-100",
+        characteristics=[
+            ProductCharacteristic(name="Mounting method", value="mounting-IM1001"),
+        ],
+    )
     semantic = ProductSemanticClassification(
         position_index=1,
         normalized_product="Transformer ABC-100",
@@ -56,6 +65,7 @@ def test_strong_model_does_not_add_numeric_characteristics_to_search() -> None:
 
     assert enriched.productQuery == "Transformer ABC-100"
     assert enriched.searchCharacteristics == []
+    assert "IM1001" not in enriched.productQuery
 
 
 def test_catalog_rejects_different_basic_product_class() -> None:
@@ -67,3 +77,26 @@ def test_catalog_rejects_different_basic_product_class() -> None:
     assert conflict is not None
     assert "projector" in conflict
     assert "luminaire" in conflict
+
+
+def test_embedded_specification_is_split_and_address_is_not_a_characteristic() -> None:
+    position = TenderPosition(
+        product=(
+            "\u0423\u0437\u0435\u043b \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f \u0440\u0430\u0441\u0445\u043e\u0434\u0430 \u0433\u0430\u0437\u0430; "
+            "\u0422\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0435 \u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0438: "
+            "\u0420\u0413-\u0420 G160 DN80"
+        ),
+        characteristics=[
+            ProductCharacteristic(
+                name="Characteristic",
+                value="\u043f\u043e \u0430\u0434\u0440\u0435\u0441\u0443: \u0443\u043b. \u041c\u043e\u043b\u043e\u0434\u0435\u0436\u043d\u0430\u044f, \u0434. 26",
+            )
+        ],
+    )
+
+    sanitized = _sanitize_catalog_candidate(position)
+
+    assert sanitized.product == "\u0423\u0437\u0435\u043b \u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f \u0440\u0430\u0441\u0445\u043e\u0434\u0430 \u0433\u0430\u0437\u0430"
+    assert len(sanitized.characteristics) == 1
+    assert sanitized.characteristics[0].value == "\u0420\u0413-\u0420 G160 DN80"
+    assert "\u0434. 26" not in sanitized.requirements

@@ -9,6 +9,7 @@ from app.models import (
     ProductCandidateAuditResponse,
     ProductHierarchyAssignment,
     ProductHierarchyResponse,
+    ProductCharacteristic,
     SpreadsheetCandidateReviewResponse,
     TenderPosition,
 )
@@ -77,6 +78,21 @@ _NON_PRODUCT_SINGLE_WORDS = {
     "\u0438\u0442\u043e\u0433\u043e", "\u043f\u0440\u0438\u043c\u0435\u0447\u0430\u043d\u0438\u0435",
 }
 
+_ADDRESS_CHARACTERISTIC_PATTERN = re.compile(
+    r"\b(?:\u043f\u043e\s+\u0430\u0434\u0440\u0435\u0441\u0443|\u0430\u0434\u0440\u0435\u0441|"
+    r"\u0443\u043b(?:\u0438\u0446\u0430)?\.?|\u043e\u0431\u043b\u0430\u0441\u0442\u044c|"
+    r"\u0440\u0430\u0439\u043e\u043d|\u043a\u043e\u0442\u0435\u043b\u044c\u043d\u0430\u044f|"
+    r"\u0433\.\s*\S+|\u0434\.\s*\d+)\b",
+    re.IGNORECASE,
+)
+_EMBEDDED_TECHNICAL_SPECIFICATION_PATTERN = re.compile(
+    r"^\s*(?P<product>.+?)\s*[;:]\s*"
+    r"(?:\u0442\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0435?\s+"
+    r"\u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0438?)\s*[:;]\s*"
+    r"(?P<specification>.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
 def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -84,6 +100,67 @@ def _clean(value: Any) -> str:
 def _missing(value: Any) -> bool:
     return value is None or value == ""
 
+
+def _is_address_characteristic(value: Any) -> bool:
+    return bool(_ADDRESS_CHARACTERISTIC_PATTERN.search(_clean(value)))
+
+
+def _sanitize_catalog_candidate(position: TenderPosition) -> TenderPosition:
+    """Keep addresses and embedded specifications out of the retrieval query."""
+    characteristics = [
+        characteristic
+        for characteristic in position.characteristics
+        if not _is_address_characteristic(characteristic.value)
+    ]
+    product = _clean(position.product)
+    requirements = _clean(position.requirements)
+    match = _EMBEDDED_TECHNICAL_SPECIFICATION_PATTERN.fullmatch(product)
+    if match:
+        product = _clean(match.group("product")).strip(" ;:")
+        specification = _clean(match.group("specification"))
+        if product and specification:
+            if not any(
+                _identity(item.value) == _identity(specification)
+                for item in characteristics
+            ):
+                characteristics.append(
+                    ProductCharacteristic(
+                        name="Технические характеристики",
+                        value=specification,
+                        associationMethod="same_row",
+                        associationConfidence=0.98,
+                        associationStatus="confirmed",
+                    )
+                )
+            requirements = _clean(" ; ".join(filter(None, (requirements, specification))))
+    if (
+        product == position.product
+        and characteristics == position.characteristics
+        and requirements == position.requirements
+    ):
+        return position
+    return position.model_copy(
+        update={
+            "product": product,
+            "productQuery": product,
+            "characteristics": characteristics,
+            "requirements": requirements,
+        }
+    )
+
+
+def _duplicate_source_scope(
+    left: TenderPosition | None,
+    right: TenderPosition,
+) -> bool:
+    if left is None or left.sourceReference is None or right.sourceReference is None:
+        return False
+    left_reference = left.sourceReference
+    right_reference = right.sourceReference
+    return (
+        _identity(left_reference.fileName) != _identity(right_reference.fileName)
+        or _identity(left_reference.table) != _identity(right_reference.table)
+    )
 
 def _deterministic_non_product_role(value: Any) -> str | None:
     text = _clean(value)
@@ -113,7 +190,14 @@ def _identity(value: Any) -> str:
 
 
 def _model_tokens(position: TenderPosition) -> set[str]:
-    text = " ".join((position.product, position.productQuery or "", position.article))
+    text = " ".join(
+        (
+            position.product,
+            position.productQuery or "",
+            position.article,
+            *(characteristic.value for characteristic in position.characteristics),
+        )
+    )
     tokens = {
         match.group(0).casefold()
         for match in _MODEL_TOKEN_PATTERN.finditer(text)
@@ -164,6 +248,15 @@ def _duplicate_supported(left: TenderPosition, right: TenderPosition) -> bool:
     left_name = _identity(left.productQuery or left.product)
     right_name = _identity(right.productQuery or right.product)
     if not left_name or not right_name:
+        return False
+    left_reference = left.sourceReference
+    right_reference = right.sourceReference
+    if (
+        left_reference is not None
+        and right_reference is not None
+        and _identity(left_reference.fileName) == _identity(right_reference.fileName)
+        and _identity(left_reference.table) == _identity(right_reference.table)
+    ):
         return False
     if left_name == right_name:
         return True
@@ -319,9 +412,15 @@ def apply_product_candidate_audit(
         if assignment.role == "ambiguous":
             require_review(index, assignment.rationale or "Роль позиции неоднозначна")
             continue
-        # Equal titles can be independent rows in the source table. Never
-        # remove a candidate merely because the model calls it a duplicate.
-        if assignment.role == "duplicate":
+        # Equal titles can be independent rows in one source table.  A duplicate
+        # from a distinct table/file is processed below only after deterministic
+        # confirmation of a shared model, article, or close name.
+        if assignment.role == "duplicate" and not _duplicate_source_scope(
+            working[assignment.duplicateOf - 1]
+            if assignment.duplicateOf and assignment.duplicateOf < index
+            else None,
+            position,
+        ):
             continue
         if assignment.role == "purchase_item":
             if assignment.confidence < AUDIT_REVIEW_CONFIDENCE:
@@ -669,6 +768,7 @@ def validate_product_candidates(
     retained: list[TenderPosition] = []
     deterministic_rejections: list[dict[str, Any]] = []
     for index, position in enumerate(positions, start=1):
+        position = _sanitize_catalog_candidate(position)
         rejected_role = _deterministic_non_product_role(position.product)
         if rejected_role:
             deterministic_rejections.append(

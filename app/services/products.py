@@ -290,6 +290,16 @@ def _unit_from_quantity_header(value: Any) -> str:
     return ""
 
 
+def _unit_from_quantity_value(value: Any) -> str:
+    """Read a unit where a quantity cell contains both value and unit."""
+    match = re.fullmatch(
+        rf"\s*[+-]?\d+(?:[.,]\d+)?\s*({UNITS})\s*",
+        _clean(value),
+        re.IGNORECASE,
+    )
+    return _clean(match.group(1)).rstrip(".") if match else ""
+
+
 def _table_unit(
     cells: dict[str, str],
     header_columns: dict[str, str],
@@ -1112,6 +1122,8 @@ def extract_deterministic_positions(
                 continue
             unit, unit_column = _table_unit(cells, header_columns, header_labels)
             raw_quantity = cells.get(quantity_column)
+            if not unit:
+                unit = _unit_from_quantity_value(raw_quantity)
             if not unit or raw_quantity is None:
                 continue
             unit_price_column = header_columns.get("unit_price", "")
@@ -1306,6 +1318,8 @@ def extract_deterministic_positions(
         unit, unit_column = _table_unit(cells, active_header_columns, header_labels)
         name = cells.get(product_column, "")
         raw_quantity = cells.get(quantity_column)
+        if not unit:
+            unit = _unit_from_quantity_value(raw_quantity)
         if not name or not unit or raw_quantity is None:
             adjusted_columns = _right_aligned_header_columns(
                 header_columns,
@@ -1317,6 +1331,10 @@ def extract_deterministic_positions(
                 adjusted_columns,
                 header_labels,
             )
+            if not adjusted_unit:
+                adjusted_unit = _unit_from_quantity_value(
+                    cells.get(adjusted_columns["quantity"])
+                )
             adjusted_product_column = adjusted_columns["product"]
             adjusted_quantity_column = adjusted_columns["quantity"]
             adjusted_name = cells.get(adjusted_product_column, "")

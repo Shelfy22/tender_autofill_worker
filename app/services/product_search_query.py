@@ -860,11 +860,16 @@ def build_search_query(
             ),
             item.get("name") or "",
         )
-    selected = _prepend_required_tokens(
-        [
+    required_tokens = (
+        []
+        if strong_model_only
+        else [
             *_designation_identity_tokens(position),
             *_cable_identity_tokens(position, semantic),
-        ],
+        ]
+    )
+    selected = _prepend_required_tokens(
+        required_tokens,
         [] if strong_model_only else _compose_search_tokens(selected_items),
         base=base,
     )

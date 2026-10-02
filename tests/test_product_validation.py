@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from app.models import (
     ProductCandidateAssignment,
+    ProductCharacteristic,
     ProductCandidateAuditResponse,
     ProductSourceReference,
     SpreadsheetCandidateDecision,
@@ -9,6 +10,7 @@ from app.models import (
     TenderPosition,
 )
 from app.services.product_validation import (
+    _duplicate_supported,
     apply_product_candidate_audit,
     apply_spreadsheet_candidate_review,
     review_spreadsheet_candidate_positions,
@@ -590,3 +592,55 @@ def test_llm_audit_failure_blocks_automatic_decision_without_dropping_positions(
     assert validated == positions
     assert debug["requiresManualReview"] is True
     assert any("расчёт покрытия продолжен" in item for item in warnings)
+
+
+def test_duplicate_model_in_characteristics_is_merged_only_across_tables() -> None:
+    positions = [
+        TenderPosition(
+            product="Managed switch",
+            quantity=4,
+            sourceReference=ProductSourceReference(
+                fileName="notice.docx",
+                table="Word 12",
+            ),
+            characteristics=[
+                ProductCharacteristic(
+                    name="Characteristic",
+                    value="ELTEX MES2348B",
+                )
+            ],
+        ),
+        TenderPosition(
+            product="Managed switch",
+            quantity=4,
+            sourceReference=ProductSourceReference(
+                fileName="notice.docx",
+                table="Word 15",
+            ),
+            characteristics=[
+                ProductCharacteristic(
+                    name="Characteristic",
+                    value="ELTEX MES2348B",
+                )
+            ],
+        ),
+    ]
+    response = ProductCandidateAuditResponse(
+        assignments=[
+            ProductCandidateAssignment(
+                positionIndex=1, role="purchase_item", confidence=0.99
+            ),
+            ProductCandidateAssignment(
+                positionIndex=2,
+                role="duplicate",
+                duplicateOf=1,
+                confidence=0.99,
+            ),
+        ]
+    )
+
+    assert _duplicate_supported(positions[0], positions[1])
+    validated, _, debug = apply_product_candidate_audit(positions, response)
+
+    assert len(validated) == 1
+    assert debug["duplicateCount"] == 1
