@@ -5,11 +5,13 @@ from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any
 
 from app.models import (
+    FinalProductIntegrityResponse,
     ProductCandidateAssignment,
     ProductCandidateAuditResponse,
     ProductHierarchyAssignment,
     ProductHierarchyResponse,
     ProductCharacteristic,
+    ProductMatchItem,
     SpreadsheetCandidateReviewResponse,
     TenderPosition,
 )
@@ -847,3 +849,193 @@ def validate_product_candidates(
     audit_debug["applied"] = audit_debug["applied"] or bool(deterministic_rejections)
     audit_debug["originalPositionCount"] = len(positions)
     return validated, list(dict.fromkeys(warnings + audit_warnings)), audit_debug
+
+
+def _same_original_match_position(left: ProductMatchItem, right: ProductMatchItem) -> bool:
+    if left.positionKey and right.positionKey and left.positionKey == right.positionKey:
+        return True
+    left_reference = left.sourceReference
+    right_reference = right.sourceReference
+    if left_reference is None or right_reference is None:
+        return False
+    left_file = _identity(left_reference.fileName)
+    right_file = _identity(right_reference.fileName)
+    left_container = _identity(left_reference.sheet or left_reference.table)
+    right_container = _identity(right_reference.sheet or right_reference.table)
+    return bool(
+        left_file
+        and left_file == right_file
+        and left_container
+        and left_container == right_container
+        and left_reference.row is not None
+        and left_reference.row == right_reference.row
+        and _identity(left_reference.productColumn)
+        == _identity(right_reference.productColumn)
+    )
+
+
+def apply_final_product_integrity_audit(
+    match_items: list[ProductMatchItem],
+    response: FinalProductIntegrityResponse,
+) -> tuple[list[ProductMatchItem], list[str], dict[str, Any]]:
+    assignments: dict[int, Any] = {}
+    repeated_assignments: set[int] = set()
+    for assignment in response.assignments:
+        if not 1 <= assignment.positionIndex <= len(match_items):
+            continue
+        if assignment.positionIndex in assignments:
+            repeated_assignments.add(assignment.positionIndex)
+            continue
+        assignments[assignment.positionIndex] = assignment
+
+    removed: set[int] = set()
+    rejected: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    warnings = list(response.warnings)
+
+    def require_review(index: int, reason: str) -> None:
+        unresolved.append(
+            {
+                "positionIndex": index,
+                "product": match_items[index - 1].product,
+                "reason": reason,
+            }
+        )
+
+    for index, item in enumerate(match_items, start=1):
+        assignment = assignments.get(index)
+        if assignment is None:
+            require_review(index, "Final integrity audit returned no decision")
+            continue
+        if index in repeated_assignments:
+            require_review(index, "Final integrity audit returned multiple decisions")
+            continue
+        if assignment.decision == "keep":
+            continue
+        if assignment.decision == "ambiguous":
+            require_review(index, assignment.rationale or "Ambiguous final report row")
+            continue
+        if assignment.confidence < AUDIT_ACTION_CONFIDENCE:
+            require_review(
+                index,
+                assignment.rationale or "Insufficient confidence for final row removal",
+            )
+            continue
+        if assignment.decision == "non_product":
+            removed.add(index)
+            rejected.append(
+                {
+                    "positionIndex": index,
+                    "product": item.product,
+                    "confidence": assignment.confidence,
+                    "rationale": assignment.rationale,
+                }
+            )
+            warnings.append(
+                f"Final report validation removed a non-product row: {item.product[:200]}."
+            )
+            continue
+        target_index = assignment.duplicateOf
+        target_is_valid = (
+            target_index is not None
+            and 1 <= target_index < index
+            and target_index not in removed
+        )
+        if (
+            assignment.decision == "duplicate"
+            and target_is_valid
+            and _same_original_match_position(match_items[target_index - 1], item)
+        ):
+            removed.add(index)
+            duplicates.append(
+                {
+                    "positionIndex": index,
+                    "duplicateOf": target_index,
+                    "product": item.product,
+                    "confidence": assignment.confidence,
+                    "rationale": assignment.rationale,
+                }
+            )
+            warnings.append(
+                "Final report validation removed a row duplicated from the same source position: "
+                f"{item.product[:200]} -> position {target_index}."
+            )
+        else:
+            require_review(
+                index,
+                "LLM duplicate decision was not confirmed by positionKey or source coordinates",
+            )
+
+    if match_items and len(removed) == len(match_items):
+        warnings.append(
+            "Final integrity audit attempted to remove every product row; all rows were retained for safety."
+        )
+        removed.clear()
+        rejected.clear()
+        duplicates.clear()
+        require_review(1, "Final integrity audit attempted to remove every product row")
+
+    validated = [
+        item
+        for index, item in enumerate(match_items, start=1)
+        if index not in removed
+    ]
+    debug = {
+        "reviewRequested": bool(match_items),
+        "applied": bool(removed),
+        "requiresManualReview": bool(unresolved),
+        "originalPositionCount": len(match_items),
+        "validatedPositionCount": len(validated),
+        "rejectedPositionCount": len(rejected),
+        "duplicateCount": len(duplicates),
+        "rejectedPositions": rejected,
+        "duplicates": duplicates,
+        "unresolved": unresolved,
+        "assignments": [
+            assignment.model_dump(mode="json")
+            for assignment in assignments.values()
+        ],
+    }
+    return validated, list(dict.fromkeys(warnings)), debug
+
+
+def validate_final_product_matches(
+    llm: LlmClient,
+    match_items: list[ProductMatchItem],
+) -> tuple[list[ProductMatchItem], list[str], dict[str, Any]]:
+    if not match_items:
+        return [], [], {
+            "reviewRequested": False,
+            "applied": False,
+            "requiresManualReview": False,
+            "originalPositionCount": 0,
+            "validatedPositionCount": 0,
+            "rejectedPositionCount": 0,
+            "duplicateCount": 0,
+            "rejectedPositions": [],
+            "duplicates": [],
+            "unresolved": [],
+            "assignments": [],
+        }
+    try:
+        response = llm.validate_final_product_matches(match_items)
+    except Exception as exc:
+        warning = (
+            "Final product integrity audit was unavailable; report rows were retained: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return match_items, [warning], {
+            "reviewRequested": True,
+            "applied": False,
+            "requiresManualReview": True,
+            "originalPositionCount": len(match_items),
+            "validatedPositionCount": len(match_items),
+            "rejectedPositionCount": 0,
+            "duplicateCount": 0,
+            "rejectedPositions": [],
+            "duplicates": [],
+            "unresolved": [{"positionIndex": None, "product": "", "reason": warning}],
+            "assignments": [],
+        }
+    return apply_final_product_integrity_audit(match_items, response)

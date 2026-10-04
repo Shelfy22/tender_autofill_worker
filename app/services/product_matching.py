@@ -25,7 +25,10 @@ from app.services.product_characteristics import (
     finalize_position_characteristics,
 )
 from app.services.product_search_query import enrich_product_search_queries
-from app.services.product_validation import validate_product_candidates
+from app.services.product_validation import (
+    validate_final_product_matches,
+    validate_product_candidates,
+)
 from app.services.products import extract_deterministic_positions, merge_positions
 
 
@@ -233,6 +236,12 @@ def run_product_matching_from_files(
             warnings.extend(search_query_warnings)
             match_items, catalog_warnings = catalog.match_all(catalog_positions)
             warnings.extend(catalog_warnings)
+            (
+                match_items,
+                final_validation_warnings,
+                final_validation_debug,
+            ) = validate_final_product_matches(llm, match_items)
+            warnings.extend(final_validation_warnings)
             product_check = summarize_product_coverage(
                 match_items,
                 supply_value_threshold_enabled=False,
@@ -257,6 +266,7 @@ def run_product_matching_from_files(
                 "preConsolidationDeduplication": consolidation_dedup_debug,
                 "incompleteUnitIds": consolidation.incompleteUnitIds,
                 "productCandidateValidation": validation_debug,
+                "finalProductIntegrityValidation": final_validation_debug,
                 "characteristicAssociation": {
                     **characteristic_association_debug,
                     **characteristic_finalize_debug,

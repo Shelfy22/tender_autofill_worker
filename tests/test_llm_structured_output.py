@@ -406,6 +406,8 @@ def test_product_candidate_audit_uses_structured_response_and_source_cells() -> 
     assert captured["operation"] == "audit_product_candidates"
     assert "duplicateOf" in str(captured["prompt"])
     assert "sourceReference" in str(captured["prompt"])
+    assert "sourceContext" in str(captured["prompt"])
+    assert "sameSourcePositionIndexes" in str(captured["prompt"])
 
 
 

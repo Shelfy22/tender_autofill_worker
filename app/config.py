@@ -125,6 +125,7 @@ class Settings(BaseSettings):
     # OpenRouter reasoning/thinking tokens are billed as completion tokens. Keep
     # structured JSON calls in non-thinking mode unless explicitly overridden.
     llm_reasoning_effort: str = "none"
+    product_audit_reasoning_effort: str = "none"
     catalog_selection_model: str = "openai/gpt-oss-120b"
     catalog_selection_fallback_models: str = "qwen/qwen3.7-flash,qwen/qwen3.5-flash-02-23"
     ocr_model: str = "deepseek/deepseek-v4-flash-0731"
@@ -185,14 +186,14 @@ class Settings(BaseSettings):
             )
         return normalized
 
-    @field_validator("llm_reasoning_effort")
+    @field_validator("llm_reasoning_effort", "product_audit_reasoning_effort")
     @classmethod
     def validate_llm_reasoning_effort(cls, value: str) -> str:
         normalized = value.strip().lower()
         allowed = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
         if normalized not in allowed:
             raise ValueError(
-                "llm_reasoning_effort must be none, minimal, low, medium, high, xhigh, or max"
+                "reasoning effort must be none, minimal, low, medium, high, xhigh, or max"
             )
         return normalized
 
@@ -258,6 +259,7 @@ class Settings(BaseSettings):
         elif normalized in {
             "extract_tender_products",
             "audit_product_candidates",
+            "validate_final_product_matches",
             "classify_product_characteristics",
             "classify_sku_importance",
         }:
@@ -283,7 +285,11 @@ class Settings(BaseSettings):
             return self.final_decision_timeout_seconds
         if normalized in {"classify_product_characteristics", "classify_sku_importance"}:
             return self.product_characteristic_timeout_seconds
-        if normalized in {"extract_tender_products", "audit_product_candidates"}:
+        if normalized in {
+            "extract_tender_products",
+            "audit_product_candidates",
+            "validate_final_product_matches",
+        }:
             return self.product_extraction_timeout_seconds
         if normalized in {"consolidate_tender_analysis", "consolidate_document_analysis"}:
             return self.consolidation_timeout_seconds

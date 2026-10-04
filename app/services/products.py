@@ -85,6 +85,14 @@ _POSITION_PRICE_PATTERN = re.compile(
     r"сумм[аы]\s+(?:строк[а-яё]*|позиц[а-яё]*))\b",
     re.IGNORECASE,
 )
+_DELIVERY_SCHEDULE_HEADING_PATTERN = re.compile(
+    r"(?:\u0433\u0440\u0430\u0444\u0438\u043a|\u043f\u043b\u0430\u043d)\s+(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043a|\u043e\u0442\u0433\u0440\u0443\u0437\u043a|\u0434\u043e\u0441\u0442\u0430\u0432\u043a)",
+    re.IGNORECASE,
+)
+_DELIVERY_SCHEDULE_COLUMN_PATTERN = re.compile(
+    r"(?:\u0441\u0440\u043e\u043a|\u0434\u0430\u0442\u0430|\u043f\u0435\u0440\u0438\u043e\u0434|\u043c\u0435\u0441\u044f\u0446)\s+(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043a|\u043e\u0442\u0433\u0440\u0443\u0437\u043a|\u0434\u043e\u0441\u0442\u0430\u0432\u043a)",
+    re.IGNORECASE,
+)
 
 
 UNITS = r"штука|штук|шт\.?|комплект|компл\.?|набор|ед\.?|метр|м|кг|л|уп\.?|упак\.?"
@@ -212,6 +220,8 @@ def parse_quantity(value: Any) -> float | None:
 
 def _normalize_header(value: Any) -> str:
     text = _clean(value).lower().replace("ё", "е")
+    text = re.sub(r"\bколи-\s*чество\b", "количество", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bдиа-\s*метр\b", "диаметр", text, flags=re.IGNORECASE)
     return re.sub(r"[^a-zа-я0-9№]+", " ", text).strip()
 
 
@@ -270,6 +280,17 @@ def _header_role(value: Any) -> str | None:
     ):
         return "product"
     return None
+
+
+def _is_delivery_schedule_header(cells: dict[str, str]) -> bool:
+    roles = {_header_role(value) for value in cells.values()}
+    return bool(
+        {"product", "quantity"}.issubset(roles)
+        and any(
+            _DELIVERY_SCHEDULE_COLUMN_PATTERN.search(_clean(value))
+            for value in cells.values()
+        )
+    )
 
 
 def _unit_from_quantity_header(value: Any) -> str:
@@ -888,6 +909,47 @@ def _drop_unresolved_generic_table_positions(
     return [position for index, position in enumerate(positions) if index not in skipped]
 
 
+def _consolidate_repeated_table_characteristic_rows(
+    positions: list[TenderPosition],
+) -> list[TenderPosition]:
+    """Keep one purchase position when a Word/PDF table uses one row per parameter."""
+    result: list[TenderPosition] = []
+    indexes: dict[tuple[str, str, str, str, float | None, str], int] = {}
+    for position in positions:
+        reference = position.sourceReference
+        table_scope = _clean(
+            reference.table or reference.sheet if reference is not None else ""
+        )
+        position_number = _clean(
+            reference.positionNumber if reference is not None else ""
+        )
+        if (
+            position.source != "excel_table_deterministic"
+            or reference is None
+            or not table_scope
+            or not position_number
+        ):
+            result.append(position)
+            continue
+        key = (
+            _word_table_key(reference.fileName) or "__single_document__",
+            _word_table_key(table_scope),
+            _word_table_key(position_number),
+            _position_name_key(position),
+            position.quantity,
+            _word_table_key(position.unit),
+        )
+        existing_index = indexes.get(key)
+        if existing_index is None:
+            indexes[key] = len(result)
+            result.append(position)
+            continue
+        result[existing_index] = _merge_replicated_position_details(
+            result[existing_index], position
+        )
+    return result
+
+
 def extract_deterministic_positions(
     text: str,
     spreadsheet_tables: list[SpreadsheetTable] | None = None,
@@ -1012,6 +1074,8 @@ def extract_deterministic_positions(
                 else SpreadsheetTable.model_validate(raw_table)
             )
         except Exception:
+            continue
+        if any(_is_delivery_schedule_header(row.cells) for row in table.rows):
             continue
         header_columns = dict(table.headerMap)
         header_labels = dict(table.headerLabels)
@@ -1210,6 +1274,8 @@ def extract_deterministic_positions(
     last_text_table_result_index: int | None = None
     pdf_inherited_headers_pending = False
     current_section_role = OTHER_ROLE
+    delivery_schedule_pending = False
+    skip_current_text_table = False
     for line in text.splitlines():
         if line.startswith("--- ДОКУМЕНТ "):
             current_file = ""
@@ -1219,10 +1285,14 @@ def extract_deterministic_positions(
             column_labels = {}
             header_width = 0
             current_section_role = OTHER_ROLE
+            delivery_schedule_pending = False
+            skip_current_text_table = False
             continue
         detected_section_role = detect_section_role(line)
         if detected_section_role != OTHER_ROLE:
             current_section_role = detected_section_role
+        if _DELIVERY_SCHEDULE_HEADING_PATTERN.search(line):
+            delivery_schedule_pending = True
         if line.startswith(("Таблица Word ", "Таблица PDF ", "Таблица RTF ")):
             inherit_pdf_headers = (
                 bool(re.search(r"\bPDF\s+\d", current_sheet, re.IGNORECASE))
@@ -1231,6 +1301,8 @@ def extract_deterministic_positions(
             )
             current_sheet = line.strip()
             pdf_inherited_headers_pending = inherit_pdf_headers
+            skip_current_text_table = delivery_schedule_pending
+            delivery_schedule_pending = False
             if not inherit_pdf_headers:
                 header_columns = {}
                 header_labels = {}
@@ -1262,6 +1334,8 @@ def extract_deterministic_positions(
             column_labels = {}
             header_width = 0
             last_text_table_result_index = None
+            delivery_schedule_pending = False
+            skip_current_text_table = False
             continue
         row_match = re.match(r"^Строка\s+(\d+)\s*:\s*(.+)$", line, re.I)
         if not row_match:
@@ -1272,6 +1346,10 @@ def extract_deterministic_positions(
             continue
         if re.search(r"\b(?:Word|PDF|RTF)\s+\d", current_sheet, re.IGNORECASE):
             structured_text_table_rows.add(_clean(line))
+        if _is_delivery_schedule_header(cells):
+            skip_current_text_table = True
+        if skip_current_text_table:
+            continue
         if _is_repeated_merged_row(cells):
             continue
         detected_headers = {
@@ -1548,7 +1626,9 @@ def extract_deterministic_positions(
             if len(result) >= max_positions:
                 return result
     return _drop_unresolved_generic_table_positions(
-        _enrich_structured_table_positions_with_characteristics(text, result)
+        _consolidate_repeated_table_characteristic_rows(
+            _enrich_structured_table_positions_with_characteristics(text, result)
+        )
     )
 
 
@@ -1728,6 +1808,23 @@ def _position_source_role(position: TenderPosition) -> str:
     return classify_document_role(reference.fileName, reference.sheet, reference.table)
 
 
+def _position_unit_key(value: Any) -> str:
+    unit = _word_table_key(value)
+    if re.fullmatch(r"\u0448\u0442(?:\u0443\u043a\u0430|\u0443\u043a\u0438|\u0443\u043a)?", unit):
+        return "\u0448\u0442"
+    return unit
+
+
+def _same_replicated_product(left: TenderPosition, right: TenderPosition) -> bool:
+    left_key = _position_name_key(left)
+    right_key = _position_name_key(right)
+    return bool(left_key and right_key) and (
+        left_key == right_key
+        or left_key.startswith(f"{right_key} ")
+        or right_key.startswith(f"{left_key} ")
+    )
+
+
 def _cross_document_position_key(position: TenderPosition) -> tuple[str, str, float | None, str] | None:
     reference = position.sourceReference
     if reference is None or not _clean(reference.fileName):
@@ -1744,7 +1841,7 @@ def _cross_document_position_key(position: TenderPosition) -> tuple[str, str, fl
             else ""
         )
     )
-    return (product, strong_identity, position.quantity, _word_table_key(position.unit))
+    return (product, strong_identity, position.quantity, _position_unit_key(position.unit))
 
 
 def _merge_replicated_position_details(
@@ -1813,7 +1910,9 @@ def _aligned_section_duplicate_pairs(
             aligned_grid = 0
             for (_, price), (_, technical) in zip(price_rows, technical_rows):
                 same_quantity = price.quantity == technical.quantity
-                same_unit = _word_table_key(price.unit) == _word_table_key(technical.unit)
+                same_unit = _position_unit_key(price.unit) == _position_unit_key(
+                    technical.unit
+                )
                 if same_quantity and same_unit:
                     aligned_grid += 1
                     if _position_name_key(price) == _position_name_key(technical):
@@ -1883,9 +1982,9 @@ def _aligned_replicated_table_pairs(
             aligned = 0
             for (_, left), (_, right) in zip(left_rows, right_rows):
                 if (
-                    _position_name_key(left) == _position_name_key(right)
+                    _same_replicated_product(left, right)
                     and left.quantity == right.quantity
-                    and _word_table_key(left.unit) == _word_table_key(right.unit)
+                    and _position_unit_key(left.unit) == _position_unit_key(right.unit)
                 ):
                     aligned += 1
             ratio = aligned / len(left_rows)

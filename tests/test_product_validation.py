@@ -1,9 +1,13 @@
 from types import SimpleNamespace
 
 from app.models import (
+    FinalProductIntegrityAssignment,
+    FinalProductIntegrityResponse,
     ProductCandidateAssignment,
     ProductCharacteristic,
     ProductCandidateAuditResponse,
+    ProductMatch,
+    ProductMatchItem,
     ProductSourceReference,
     SpreadsheetCandidateDecision,
     SpreadsheetCandidateReviewResponse,
@@ -12,6 +16,7 @@ from app.models import (
 from app.services.product_validation import (
     _duplicate_supported,
     apply_product_candidate_audit,
+    apply_final_product_integrity_audit,
     apply_spreadsheet_candidate_review,
     review_spreadsheet_candidate_positions,
     validate_product_candidates,
@@ -643,4 +648,101 @@ def test_duplicate_model_in_characteristics_is_merged_only_across_tables() -> No
     validated, _, debug = apply_product_candidate_audit(positions, response)
 
     assert len(validated) == 1
+    assert debug["duplicateCount"] == 1
+
+
+def _match_item(
+    product: str,
+    *,
+    position_key: str = "",
+    row: int = 1,
+) -> ProductMatchItem:
+    return ProductMatchItem(
+        positionIndex=row,
+        positionKey=position_key,
+        product=product,
+        productQuery=product,
+        sourceReference=ProductSourceReference(
+            fileName="specification.docx",
+            table="Word 1",
+            row=row,
+            productColumn="B",
+        ),
+        match=ProductMatch(),
+    )
+
+
+def test_final_integrity_audit_removes_non_product_row() -> None:
+    items = [_match_item("Cable", row=1), _match_item("220 V", row=2)]
+    response = FinalProductIntegrityResponse(
+        assignments=[
+            FinalProductIntegrityAssignment(
+                positionIndex=1,
+                decision="keep",
+                confidence=0.99,
+            ),
+            FinalProductIntegrityAssignment(
+                positionIndex=2,
+                decision="non_product",
+                confidence=0.99,
+                rationale="Bare characteristic value",
+            ),
+        ]
+    )
+
+    validated, _, debug = apply_final_product_integrity_audit(items, response)
+
+    assert [item.product for item in validated] == ["Cable"]
+    assert debug["rejectedPositionCount"] == 1
+
+
+def test_final_integrity_audit_does_not_merge_equal_names_from_distinct_rows() -> None:
+    items = [_match_item("Wall lamp", row=1), _match_item("Wall lamp", row=2)]
+    response = FinalProductIntegrityResponse(
+        assignments=[
+            FinalProductIntegrityAssignment(
+                positionIndex=1,
+                decision="keep",
+                confidence=0.99,
+            ),
+            FinalProductIntegrityAssignment(
+                positionIndex=2,
+                decision="duplicate",
+                duplicateOf=1,
+                confidence=0.99,
+            ),
+        ]
+    )
+
+    validated, _, debug = apply_final_product_integrity_audit(items, response)
+
+    assert validated == items
+    assert debug["duplicateCount"] == 0
+    assert debug["requiresManualReview"] is True
+
+
+def test_final_integrity_audit_removes_duplicate_with_shared_position_key() -> None:
+    items = [
+        _match_item("Wall lamp", position_key="pos-1", row=1),
+        _match_item("500 W", position_key="pos-1", row=2),
+    ]
+    response = FinalProductIntegrityResponse(
+        assignments=[
+            FinalProductIntegrityAssignment(
+                positionIndex=1,
+                decision="keep",
+                confidence=0.99,
+            ),
+            FinalProductIntegrityAssignment(
+                positionIndex=2,
+                decision="duplicate",
+                duplicateOf=1,
+                confidence=0.99,
+            ),
+        ]
+    )
+
+    validated, _, debug = apply_final_product_integrity_audit(items, response)
+
+    assert [item.product for item in validated] == ["Wall lamp"]
     assert debug["duplicateCount"] == 1

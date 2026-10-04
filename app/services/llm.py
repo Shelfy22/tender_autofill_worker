@@ -21,9 +21,11 @@ from app.models import (
     DocumentAnalysisResponse,
     DocumentAnalysisUnit,
     ExtractedFieldsResponse,
+    FinalProductIntegrityResponse,
     LlmDecision,
     ProductCandidateAuditResponse,
     ProductHierarchyResponse,
+    ProductMatchItem,
     ProductSemanticBatchResponse,
     ProductSkuBatchResponse,
     SpreadsheetCandidateReviewResponse,
@@ -61,6 +63,18 @@ class LlmMalformedResponseError(RuntimeError):
 
 PRODUCT_DIRECT_CALL_MAX_CHARS = 30_000
 PRODUCT_LLM_SKIP_DETERMINISTIC_COUNT = 25
+
+
+def _compact_source_cells(
+    source_cells: dict[str, str],
+    *,
+    max_items: int = 16,
+    max_value_chars: int = 300,
+) -> dict[str, str]:
+    return {
+        str(column)[:40]: str(value or "")[:max_value_chars]
+        for column, value in list(source_cells.items())[:max_items]
+    }
 
 
 def _json_candidates(source: str) -> list[tuple[str, str]]:
@@ -320,15 +334,32 @@ class LlmClient:
             return {}
         return {"models": models[1:]}
 
-    def _structured_extra_body(self, models: list[str]) -> dict[str, Any]:
+    def _reasoning_effort(self, operation: str) -> str:
+        if operation in {"audit_product_candidates", "validate_final_product_matches"}:
+            return str(
+                getattr(
+                    self.settings,
+                    "product_audit_reasoning_effort",
+                    self.settings.llm_reasoning_effort,
+                )
+                or "none"
+            )
+        return str(self.settings.llm_reasoning_effort or "none")
+
+    def _structured_extra_body(
+        self,
+        models: list[str],
+        *,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
         body = self._fallback_body(models)
         if not self._uses_openrouter_extensions():
             return body
         if self.settings.llm_require_supported_parameters:
             body["provider"] = {"require_parameters": True}
-        reasoning_effort = self.settings.llm_reasoning_effort
-        if reasoning_effort:
-            body["reasoning"] = {"effort": reasoning_effort}
+        effective_reasoning_effort = reasoning_effort or self.settings.llm_reasoning_effort
+        if effective_reasoning_effort:
+            body["reasoning"] = {"effort": effective_reasoning_effort}
         if self.settings.llm_enable_response_healing:
             body["plugins"] = [{"id": "response-healing"}]
         return body
@@ -571,7 +602,8 @@ class LlmClient:
     ) -> T:
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
         request_timeout = self.settings.timeout_for(operation) or self.settings.llm_timeout_seconds
-        thinking_hint = "/no_think\n" if self.settings.llm_reasoning_effort == "none" else ""
+        reasoning_effort = self._reasoning_effort(operation)
+        thinking_hint = "/no_think\n" if reasoning_effort == "none" else ""
         request_payload = f"{system}\n\n{thinking_hint}{prompt}\n\nJSON Schema:\n{schema_json}"
         input_sha256 = hashlib.sha256(request_payload.encode("utf-8")).hexdigest()
         logical_call_id = hashlib.sha256(
@@ -610,7 +642,10 @@ class LlmClient:
                                 "content": f"{thinking_hint}{prompt}{retry_hint}\n\nJSON Schema:\n{schema_json}",
                             },
                         ],
-                        extra_body=self._structured_extra_body([model]),
+                        extra_body=self._structured_extra_body(
+                            [model],
+                            reasoning_effort=reasoning_effort,
+                        ),
                     ),
                 )
             except Exception as exc:
@@ -796,6 +831,9 @@ class LlmClient:
 Не превращай заголовки, реквизиты, услуги площадки и обеспечения в товары.
 Не превращай в товары адреса поставки, почтовые адреса, названия заказчиков,
 получателей, грузополучателей, филиалов и производственных площадок.
+Не извлекай строки из графика/плана поставки как новые товарные позиции. Месячные,
+квартальные и иные партии одного товара являются расписанием исполнения, а не новой закупкой,
+даже если в строке есть наименование, срок поставки и количество.
 Не превращай в товары служебные значения отдельных ячеек: «ОЛ-5», «ОЛ-6»,
 «ОЛ-7», «Пример», номера строк, коды классификаторов и подписи образца заполнения.
 Сохрани полное наименование, brand/article, quantity и unit. Технические характеристики,
@@ -1059,9 +1097,47 @@ DocumentAnalysisResults:
         self,
         positions: list[TenderPosition],
     ) -> ProductCandidateAuditResponse:
-        items = [
-            {
+        source_groups: dict[str, list[int]] = {}
+        source_contexts: list[dict[str, Any]] = []
+        for index, position in enumerate(positions, start=1):
+            reference = position.sourceReference
+            context = {
+                "fileName": reference.fileName if reference is not None else "",
+                "container": (
+                    reference.sheet or reference.table if reference is not None else ""
+                ),
+                "sheet": reference.sheet if reference is not None else "",
+                "table": reference.table if reference is not None else "",
+                "row": reference.row if reference is not None else None,
+                "page": reference.page if reference is not None else None,
+                "sectionRole": reference.sectionRole if reference is not None else "other",
+                "lotNumber": reference.lotNumber if reference is not None else position.lotNumber,
+                "positionNumber": (
+                    reference.positionNumber if reference is not None else position.positionNumber
+                ),
+                "productHeader": reference.productHeader if reference is not None else "",
+                "quantityHeader": reference.quantityHeader if reference is not None else "",
+                "unitHeader": reference.unitHeader if reference is not None else "",
+                "extractionMethod": reference.extractionMethod if reference is not None else position.source,
+            }
+            source_identity = "|".join(
+                str(context.get(field) or "").strip().casefold()
+                for field in ("fileName", "container", "row", "positionNumber")
+            )
+            if position.positionKey:
+                source_identity = f"position-key:{position.positionKey}"
+            context["sourceIdentity"] = source_identity
+            source_contexts.append(context)
+            if source_identity.strip("|"):
+                source_groups.setdefault(source_identity, []).append(index)
+
+        items = []
+        for index, position in enumerate(positions, start=1):
+            source_context = source_contexts[index - 1]
+            items.append({
                 "positionIndex": index,
+                "candidateId": position.candidateId,
+                "positionKey": position.positionKey,
                 "product": position.product,
                 "productQuery": position.productQuery,
                 "article": position.article,
@@ -1073,17 +1149,36 @@ DocumentAnalysisResults:
                     if position.sourceReference is not None
                     else None
                 ),
-                "sourceCells": position.sourceCells,
+                "sourceCells": _compact_source_cells(position.sourceCells),
+                "sourceContext": source_context,
+                "sameSourcePositionIndexes": source_groups.get(
+                    str(source_context["sourceIdentity"]),
+                    [],
+                ),
                 "requirements": position.requirements[:800],
                 "characteristics": [
-                    characteristic.model_dump(mode="json")
+                    {
+                        "name": characteristic.name[:160],
+                        "value": characteristic.value[:400],
+                        "associationStatus": characteristic.associationStatus,
+                        "sourceReference": characteristic.sourceReference,
+                    }
                     for characteristic in position.characteristics[:40]
                 ],
                 "evidence": position.evidence[:800],
-            }
-            for index, position in enumerate(positions, start=1)
-        ]
+            })
         prompt = f"""
+SOURCE STRUCTURE RULES:
+- sourceContext identifies the document, sheet/table, row/page, section role, lot and position number.
+- sameSourcePositionIndexes lists candidates produced from the same stable source position. More than one
+  candidate in that list is a strong signal that one source row was split into multiple output rows.
+- A characteristics table, delivery schedule, price justification, contract copy, and technical specification
+  may repeat the same purchase item. Use sectionRole, table/sheet names, headers and coordinates together.
+- Keep repeated equal names when they are distinct rows of the primary specification or distinct lot positions.
+- Do not treat a characteristic row, address, date, bare number, code, quantity, table header, delivery stage,
+  or a schedule copy as a purchase item merely because Qdrant could search that text.
+- When marking duplicate, duplicateOf must point to the earlier canonical purchase position.
+
 Проведи финальный аудит кандидатов на товарные позиции до поиска в каталоге.
 Верни назначение ровно для каждого positionIndex и только JSON.
 
@@ -1104,6 +1199,9 @@ DocumentAnalysisResults:
   даже если рядом в таблице есть число, единица измерения или цена.
 - Условия закупки не являются товарами: сроки поставки/гарантии/действия, требования к документам,
   порядок приемки, доставка, упаковка, оплата, монтаж/работы/услуги, "согласно ТЗ", "по техническому заданию".
+- Строки графика/плана поставки не являются новыми purchase_item. Повтор товара по месяцам,
+  кварталам, датам или партиям классифицируй как duplicate ранее найденной основной позиции;
+  плановые количества поставок не суммируй и не используй как количество закупаемой позиции.
 - Фразы про аналоги и допуски не являются товарами: "аналоги рассматриваются", "эквивалент допускается",
   "допуск габаритов ±5%", "допуск по толщине ±15%", "без аналогов".
 - Отдельные значения характеристик не являются товарами: "не менее 12 месяцев", "220 В", "IP54",
@@ -1143,6 +1241,91 @@ DocumentAnalysisResults:
             prompt=prompt,
             schema=ProductCandidateAuditResponse,
             operation="audit_product_candidates",
+        )
+
+    def validate_final_product_matches(
+        self,
+        match_items: list[ProductMatchItem],
+    ) -> FinalProductIntegrityResponse:
+        source_groups: dict[str, list[int]] = {}
+        payload: list[dict[str, Any]] = []
+        for index, item in enumerate(match_items, start=1):
+            reference = item.sourceReference
+            source_context = {
+                "fileName": reference.fileName if reference is not None else "",
+                "sheet": reference.sheet if reference is not None else "",
+                "table": reference.table if reference is not None else "",
+                "row": reference.row if reference is not None else None,
+                "page": reference.page if reference is not None else None,
+                "sectionRole": reference.sectionRole if reference is not None else "other",
+                "lotNumber": reference.lotNumber if reference is not None else "",
+                "positionNumber": reference.positionNumber if reference is not None else "",
+            }
+            source_identity = (
+                f"position-key:{item.positionKey}"
+                if item.positionKey
+                else "|".join(
+                    str(source_context.get(field) or "").strip().casefold()
+                    for field in ("fileName", "sheet", "table", "row", "positionNumber")
+                )
+            )
+            source_context["sourceIdentity"] = source_identity
+            payload.append(
+                {
+                    "positionIndex": index,
+                    "positionKey": item.positionKey,
+                    "product": item.product,
+                    "productQuery": item.productQuery,
+                    "quantity": item.quantity,
+                    "unit": item.unit,
+                    "evidence": item.evidence[:500],
+                    "requirements": item.requirements[:500],
+                    "sourceContext": source_context,
+                    "sourceCells": _compact_source_cells(item.sourceCells),
+                    "characteristics": [
+                        {"name": value.name[:160], "value": value.value[:400]}
+                        for value in item.characteristics[:20]
+                    ],
+                }
+            )
+            if source_identity.strip("|"):
+                source_groups.setdefault(source_identity, []).append(index)
+
+        for row in payload:
+            identity = str(row["sourceContext"]["sourceIdentity"])
+            row["sameSourcePositionIndexes"] = source_groups.get(identity, [])
+
+        prompt = f"""
+Perform a narrow final integrity check of report rows after catalog search.
+The catalog match itself is intentionally not provided. Do not evaluate match quality,
+correspondence, analog status, catalog class, prices, or selected catalog characteristics.
+
+For every positionIndex return exactly one decision:
+- keep: the source row is a physical product/material/equipment purchase position;
+- non_product: it is only a characteristic, address, date, number, quantity, code, header,
+  delivery condition, schedule stage, service text, or another value that is not a product;
+- duplicate: the same original source position was accidentally expanded into multiple report rows;
+- ambiguous: evidence is insufficient for safe removal.
+
+Rules:
+- Equal product names in distinct specification rows are separate positions and must be kept.
+- Different characteristics, lot numbers, position numbers, rows, or quantities can represent real positions.
+- Use duplicate only when positionKey or complete source coordinates prove a shared original position.
+- For duplicate, duplicateOf must refer to an earlier canonical row.
+- A poor or missing catalog result never makes a source position non_product.
+- Prefer ambiguous over deletion when source structure is incomplete.
+
+Rows:
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+""".strip()
+        return self.json_call(
+            system=(
+                "You are the final integrity validator for extracted tender product rows. "
+                "You do not select catalog products and do not reassess catalog matches. Return JSON only."
+            ),
+            prompt=prompt,
+            schema=FinalProductIntegrityResponse,
+            operation="validate_final_product_matches",
         )
 
     def classify_product_characteristics(

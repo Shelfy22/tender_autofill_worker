@@ -509,6 +509,57 @@ def test_identical_tables_in_one_document_are_collapsed_without_losing_rows() ->
     assert any("replicated table" in warning for warning in warnings)
 
 
+def test_replicated_tables_allow_unit_alias_and_shortened_product_name() -> None:
+    detailed_rows = [
+        ("Power distribution block", 4),
+        ("Monitor bracket", 2),
+        ("USB charging station", 2),
+        ("USB charging cable", 20),
+    ]
+    short_rows = [
+        ("Power distribution", 4),
+        ("Monitor bracket", 2),
+        ("USB charging station", 2),
+        ("USB charging cable", 20),
+    ]
+    positions = [
+        TenderPosition(
+            product=product,
+            quantity=quantity,
+            unit="\u0448\u0442.",
+            characteristics=[
+                ProductCharacteristic(name="Requirement", value="present")
+            ],
+            sourceReference={
+                "fileName": "specification.docx",
+                "table": "Table 1",
+                "row": index,
+                "sectionRole": "technical_specification",
+            },
+        )
+        for index, (product, quantity) in enumerate(detailed_rows, start=2)
+    ] + [
+        TenderPosition(
+            product=product,
+            quantity=quantity,
+            unit="\u0448\u0442\u0443\u043a\u0430",
+            sourceReference={
+                "fileName": "specification.docx",
+                "table": "Table 2",
+                "row": index,
+                "sectionRole": "other",
+            },
+        )
+        for index, (product, quantity) in enumerate(short_rows, start=2)
+    ]
+
+    merged, warnings = merge_positions(positions, None)
+
+    assert [position.product for position in merged] == [row[0] for row in detailed_rows]
+    assert all(position.characteristics for position in merged)
+    assert any("replicated table" in warning for warning in warnings)
+
+
 def test_repeated_merged_word_row_is_not_extracted_as_a_product() -> None:
     text = "\n".join(
         (
@@ -593,6 +644,52 @@ def test_equal_product_names_receive_characteristics_from_their_own_rows() -> No
     assert "760 Вт" in positions[1].requirements
     assert "760 Вт" not in positions[0].requirements
     assert "500 Вт" not in positions[1].requirements
+
+
+def test_repeated_parameter_rows_are_one_numbered_purchase_position() -> None:
+    text = "\n".join(
+        (
+            "Таблица Word 1",
+            (
+                "Строка 1: A: № п/п | B: Наименование товара | "
+                "C: Ед. изм. | D: Кол-во | Требуемый параметр | F: Значение"
+            ),
+            "Строка 2: A: 1 | B: Прожектор | C: шт. | D: 4 | E: Мощность | F: 100-240 Вт",
+            "Строка 3: A: 1 | B: Прожектор | C: шт. | D: 4 | E: CRI | F: не менее 98",
+            "Строка 4: A: 2 | B: Стойка | C: шт. | D: 2 | E: Высота | F: 2 м",
+        )
+    )
+
+    positions = extract_deterministic_positions(text)
+
+    assert [(item.product, item.quantity) for item in positions] == [
+        ("Прожектор", 4),
+        ("Стойка", 2),
+    ]
+
+
+def test_delivery_schedule_rows_are_not_purchase_positions() -> None:
+    text = "\n".join(
+        (
+            "Таблица Word 1",
+            "Строка 1: A: Наименование | B: Диаметр, мм | C: Коли- чество, кг | D: Технические характеристики",
+            "Строка 2: A: УОНИ-13/55 | B: 5 | C: 2904 | D: ГОСТ 9466-75",
+            "Строка 3: A: ОЗН-400М | B: 4 | C: 2040 | D: ГОСТ 10051-75",
+            "График поставки (планируемый): ежемесячный объем поставки",
+            "Таблица Word 2",
+            "Строка 1: A: Наименование поставляемого товара | B: Срок поставки | C: Количество, кг",
+            "Строка 2: A: УОНИ-13/55 x5 мм | B: Ноябрь 2026 | C: 242",
+            "Строка 3: A: УОНИ-13/55 x5 мм | B: Декабрь 2026 | C: 242",
+            "Строка 4: A: ОЗН-400М x4 мм | B: Ноябрь 2026 | C: 170",
+        )
+    )
+
+    positions = extract_deterministic_positions(text)
+
+    assert [(item.product, item.quantity) for item in positions] == [
+        ("УОНИ-13/55", 2904),
+        ("ОЗН-400М", 2040),
+    ]
 
 
 def test_deterministic_word_row_wins_over_llm_characteristic_as_product() -> None:

@@ -388,6 +388,22 @@ class ProductCandidateAuditResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class FinalProductIntegrityAssignment(BaseModel):
+    positionIndex: int = Field(ge=1)
+    decision: Literal["keep", "non_product", "duplicate", "ambiguous"] = "ambiguous"
+    duplicateOf: int | None = Field(default=None, ge=1)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    rationale: str = ""
+
+
+class FinalProductIntegrityResponse(BaseModel):
+    assignments: list[FinalProductIntegrityAssignment] = Field(
+        default_factory=list,
+        max_length=200,
+    )
+    warnings: list[str] = Field(default_factory=list)
+
+
 class SpreadsheetCandidateDecision(BaseModel):
     candidateId: str
     decision: Literal["KEEP", "CORRECT", "REMOVE", "NEW"]

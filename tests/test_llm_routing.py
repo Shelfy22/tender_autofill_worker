@@ -49,6 +49,24 @@ def test_openrouter_structured_body_contains_routing_and_healing() -> None:
     }
 
 
+def test_product_audits_use_operation_specific_reasoning() -> None:
+    client = LlmClient(
+        settings(
+            llm_reasoning_effort="none",
+            product_audit_reasoning_effort="medium",
+        ),
+        attempt=1,
+    )
+
+    assert client._reasoning_effort("audit_product_candidates") == "medium"
+    assert client._reasoning_effort("validate_final_product_matches") == "medium"
+    assert client._reasoning_effort("extract_tender_products") == "none"
+    assert client._structured_extra_body(
+        ["model-a"],
+        reasoning_effort=client._reasoning_effort("audit_product_candidates"),
+    )["reasoning"] == {"effort": "medium"}
+
+
 def test_openai_compatible_provider_does_not_receive_router_parameters() -> None:
     client = LlmClient(settings(llm_provider="openai_compatible"), attempt=1)
     assert client._fallback_body(client.model_chain) == {}

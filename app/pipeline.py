@@ -38,6 +38,7 @@ from app.services.llm import LlmClient, LlmResponseTruncatedError, LlmWallTimeou
 from app.services.normalization import deduplicate_strings, normalize_job_payload
 from app.services.product_validation import (
     review_spreadsheet_candidate_positions,
+    validate_final_product_matches,
     validate_product_candidates,
 )
 from app.services.product_characteristics import (
@@ -534,6 +535,11 @@ class TenderPipeline:
                 lambda: catalog.match_all(catalog_positions),
             )
             self.warnings.extend(catalog_warnings)
+            match_items, final_validation_warnings, final_validation_debug = self._run_stage(
+                "Validate Final Product Rows",
+                lambda: validate_final_product_matches(llm, match_items),
+            )
+            self.warnings.extend(final_validation_warnings)
             product_check = self._run_stage(
                 "Summarize Product Coverage",
                 lambda: summarize_product_coverage(
@@ -545,6 +551,7 @@ class TenderPipeline:
                 ),
             )
             product_check["validation"] = validation_debug
+            product_check["finalIntegrityValidation"] = final_validation_debug
             product_check["hierarchy"] = validation_debug.get("hierarchy", {})
             product_check["validationAdvisoryOnly"] = (
                 validation_debug.get("requiresManualReview") is True
