@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 from app.config import Settings
-from app.models import SpreadsheetTable, SpreadsheetTableSchemaResponse
+from app.models import ParsedDocument, SpreadsheetRow, SpreadsheetTable, SpreadsheetTableSchemaResponse
 
 
 _NUMBER_PATTERN = re.compile(r"^[+-]?\d+(?:[,.]\d+)?$")
@@ -13,6 +13,10 @@ _UNIT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CODE_PATTERN = re.compile(r"^(?:\d{2,}|\d{2}(?:[.\-]\d{1,4}){2,})$")
+_TEXT_TABLE_MARKER = re.compile(r"^\s*Таблица\s+(?:Word|PDF|RTF)\s+\d+\s*$", re.IGNORECASE)
+_TEXT_ROW = re.compile(r"^\s*Строка\s+(\d+)\s*:\s*(.+)$", re.IGNORECASE)
+_TEXT_CELL = re.compile(r"\s*([A-Z]{1,3})\s*:\s*(.*?)(?=\s*\|\s*[A-Z]{1,3}\s*:|$)")
+_BLOCKED_TABLE_ROLES = {"delivery_schedule", "offer_form", "contract_template", "other", "ambiguous"}
 
 
 def _clean(value: Any) -> str:
@@ -41,6 +45,51 @@ def _sample_row_indexes(row_count: int, limit: int = 16) -> list[int]:
     for numerator in range(1, 5):
         indexes.add((row_count - 1) * numerator // 5)
     return sorted(indexes)[:limit]
+
+
+def extract_text_document_tables(documents: list[ParsedDocument]) -> list[SpreadsheetTable]:
+    """Build compact table objects from Word/PDF/RTF parser markers."""
+    tables: list[SpreadsheetTable] = []
+    for document in documents:
+        current_name = ""
+        current_rows: list[SpreadsheetRow] = []
+
+        def flush() -> None:
+            nonlocal current_name, current_rows
+            if current_name and current_rows:
+                tables.append(SpreadsheetTable(fileName=document.fileName, sheet=current_name, rows=current_rows))
+            current_name = ""
+            current_rows = []
+
+        for raw_line in (document.text or "").splitlines():
+            line = raw_line.strip()
+            if _TEXT_TABLE_MARKER.fullmatch(line):
+                flush()
+                current_name = line
+                continue
+            if not current_name:
+                continue
+            match = _TEXT_ROW.match(line)
+            if not match:
+                continue
+            cells = {column: _clean(value) for column, value in _TEXT_CELL.findall(match.group(2)) if _clean(value)}
+            if cells:
+                current_rows.append(SpreadsheetRow(row=int(match.group(1)), cells=cells))
+        flush()
+    return tables
+
+
+def table_schema_summaries(tables: list[SpreadsheetTable]) -> dict[str, list[str]]:
+    """Return bounded, document-local hints for the document-analysis LLM."""
+    summaries: dict[str, list[str]] = {}
+    for table in tables:
+        if not table.tableRole or table.tableSchemaConfidence <= 0:
+            continue
+        mapping = ", ".join(f"{role}={column}" for role, column in table.headerMap.items() if column) or "columns not mapped"
+        summaries.setdefault(table.fileName, []).append(
+            f"{table.sheet}: role={table.tableRole}; confidence={table.tableSchemaConfidence:.2f}; {mapping}"
+        )
+    return {file_name: lines[:24] for file_name, lines in summaries.items()}
 
 
 def build_table_schema_profile(table: SpreadsheetTable) -> dict[str, Any]:
@@ -103,8 +152,11 @@ def apply_table_schema(
 ) -> tuple[SpreadsheetTable, str | None]:
     if schema.confidence < min_confidence:
         return table, f"confidence={schema.confidence:.2f} below threshold"
-    if schema.tableRole in {"other", "ambiguous"}:
-        return table, f"tableRole={schema.tableRole}"
+    classified = table.model_copy(
+        update={"tableRole": schema.tableRole, "tableSchemaConfidence": schema.confidence}
+    )
+    if schema.tableRole in _BLOCKED_TABLE_ROLES:
+        return classified, None
 
     columns = set(_table_columns(table))
     selected = {
@@ -130,7 +182,7 @@ def apply_table_schema(
         if column not in labels:
             labels[column] = column
     return (
-        table.model_copy(
+        classified.model_copy(
             update={
                 "headerMap": selected,
                 "headerLabels": labels,

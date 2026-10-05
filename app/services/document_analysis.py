@@ -383,6 +383,7 @@ def _spreadsheet_units_for_document(
     positions: list[TenderPosition],
     settings: Settings,
     unit_number: int,
+    table_schema_summary: list[str] | None = None,
 ) -> tuple[list[DocumentAnalysisUnit], int]:
     max_rows = max(1, int(settings.spreadsheet_candidate_review_max_rows))
     max_chars = max(
@@ -427,6 +428,12 @@ def _spreadsheet_units_for_document(
                 text=(
                     f"Spreadsheet candidate batch for {document.fileName}; "
                     "raw table metadata is in spreadsheetCandidates."
+                    + (
+                        "\n--- TABLE SCHEMA SUMMARY ---\n"
+                        + "\n".join(table_schema_summary)
+                        if table_schema_summary
+                        else ""
+                    )
                 ),
                 spreadsheetCandidates=batch,
                 inputSha256=_sha256(f"{unit_id}\n{normalized}"),
@@ -461,6 +468,7 @@ def build_document_analysis_units(
     settings: Settings,
     *,
     skip_spreadsheet_candidate_units: bool = False,
+    table_schema_summaries: dict[str, list[str]] | None = None,
 ) -> tuple[list[DocumentAnalysisUnit], list[str]]:
     """Create bounded source-oriented analysis units before any LLM call.
 
@@ -507,6 +515,9 @@ def build_document_analysis_units(
     )
 
     def document_section(document: ParsedDocument, text_part: str, index: int, total: int) -> str:
+        schema_summary = "\n".join(
+            table_schema_summaries.get(document.fileName, []) if table_schema_summaries else []
+        )
         return "\n".join(
             section
             for section in (
@@ -521,6 +532,7 @@ def build_document_analysis_units(
                 f"extension: {document.fileExtension}",
                 f"parserStatus: {document.parserStatus}",
                 f"part: {index}/{total}",
+                "--- TABLE SCHEMA SUMMARY ---\n" + schema_summary if schema_summary else "",
                 "",
                 text_part,
             )
@@ -643,6 +655,7 @@ def build_document_analysis_units(
                 document_positions,
                 settings,
                 unit_number,
+                table_schema_summaries.get(document.fileName, []) if table_schema_summaries else [],
             )
             if spreadsheet_units:
                 units.extend(spreadsheet_units)

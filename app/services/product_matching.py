@@ -30,7 +30,11 @@ from app.services.product_validation import (
     validate_product_candidates,
 )
 from app.services.products import extract_deterministic_positions, merge_positions
-from app.services.table_schema import classify_spreadsheet_tables
+from app.services.table_schema import (
+    classify_spreadsheet_tables,
+    extract_text_document_tables,
+    table_schema_summaries,
+)
 
 
 @dataclass(frozen=True)
@@ -87,14 +91,23 @@ def run_product_matching_from_files(
             spreadsheet_tables = [
                 table for document in parsed_documents for table in document.spreadsheetTables
             ]
-            spreadsheet_tables, table_schema_warnings, table_schema_debug = (
-                classify_spreadsheet_tables(llm, spreadsheet_tables, settings)
+            text_document_tables = extract_text_document_tables(parsed_documents)
+            classified_tables, table_schema_warnings, table_schema_debug = (
+                classify_spreadsheet_tables(
+                    llm,
+                    spreadsheet_tables + text_document_tables,
+                    settings,
+                )
             )
+            spreadsheet_tables = classified_tables[: len(spreadsheet_tables)]
+            text_document_tables = classified_tables[len(spreadsheet_tables):]
+            document_table_summaries = table_schema_summaries(classified_tables)
             warnings.extend(table_schema_warnings)
             deterministic_positions = extract_deterministic_positions(
                 combined_text,
                 spreadsheet_tables,
                 settings.max_tender_positions,
+                text_document_tables,
             )
 
             units, unit_warnings = build_document_analysis_units(
@@ -103,6 +116,7 @@ def run_product_matching_from_files(
                 deterministic_positions,
                 settings,
                 skip_spreadsheet_candidate_units=False,
+                table_schema_summaries=document_table_summaries,
             )
             warnings.extend(unit_warnings)
 

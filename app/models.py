@@ -819,6 +819,8 @@ class SpreadsheetTable(BaseModel):
     headerLabels: dict[str, str] = Field(default_factory=dict)
     rows: list[SpreadsheetRow] = Field(default_factory=list)
     parserWarnings: list[str] = Field(default_factory=list)
+    tableRole: str = ""
+    tableSchemaConfidence: float = 0
 
 
 class SpreadsheetTableSchemaResponse(BaseModel):

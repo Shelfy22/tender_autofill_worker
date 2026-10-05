@@ -47,7 +47,11 @@ from app.services.product_characteristics import (
 )
 from app.services.product_search_query import enrich_product_search_queries
 from app.services.product_matching_export import build_product_matching_workbook
-from app.services.table_schema import classify_spreadsheet_tables
+from app.services.table_schema import (
+    classify_spreadsheet_tables,
+    extract_text_document_tables,
+    table_schema_summaries,
+)
 from app.services.products import (
     extract_deterministic_positions,
     extract_seldon_positions,
@@ -253,10 +257,18 @@ class TenderPipeline:
                 for document in parsed_documents
                 for table in document.spreadsheetTables
             ]
-            spreadsheet_tables, table_schema_warnings, table_schema_debug = self._run_stage(
+            text_document_tables = extract_text_document_tables(parsed_documents)
+            classified_tables, table_schema_warnings, table_schema_debug = self._run_stage(
                 "Classify Spreadsheet Table Schemas",
-                lambda: classify_spreadsheet_tables(llm, spreadsheet_tables, self.settings),
+                lambda: classify_spreadsheet_tables(
+                    llm,
+                    spreadsheet_tables + text_document_tables,
+                    self.settings,
+                ),
             )
+            spreadsheet_tables = classified_tables[: len(spreadsheet_tables)]
+            text_document_tables = classified_tables[len(spreadsheet_tables):]
+            document_table_summaries = table_schema_summaries(classified_tables)
             self.warnings.extend(table_schema_warnings)
             deterministic_positions = self._run_stage(
                 "Детерминированное извлечение товарных позиций из Excel",
@@ -264,6 +276,7 @@ class TenderPipeline:
                     deterministic_text,
                     spreadsheet_tables,
                     self.settings.max_tender_positions,
+                    text_document_tables,
                 ),
             )
 
@@ -288,6 +301,7 @@ class TenderPipeline:
                         deterministic_positions,
                         self.settings,
                         skip_spreadsheet_candidate_units=True,
+                        table_schema_summaries=document_table_summaries,
                     ),
                 )
                 self.warnings.extend(unit_warnings)

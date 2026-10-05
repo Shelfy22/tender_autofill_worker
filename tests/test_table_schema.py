@@ -1,9 +1,11 @@
 from types import SimpleNamespace
-from app.models import SpreadsheetTable, SpreadsheetTableSchemaResponse
+from app.models import ParsedDocument, SpreadsheetTable, SpreadsheetTableSchemaResponse
 from app.services.table_schema import (
     apply_table_schema,
     build_table_schema_profile,
     classify_spreadsheet_tables,
+    extract_text_document_tables,
+    table_schema_summaries,
 )
 
 
@@ -100,3 +102,36 @@ def test_table_schema_uses_product_audit_reasoning_llm_method() -> None:
     assert not warnings
     assert tables[0].headerMap["product"] == "C"
     assert debug["applied"] == 1
+
+
+def test_text_document_tables_keep_exact_document_and_table_scope() -> None:
+    document = ParsedDocument(
+        documentIndex=1,
+        fileName="specification.docx",
+        text=(
+            "Таблица Word 2\n"
+            "Строка 1: A: Наименование | B: Ед. изм. | C: Количество\n"
+            "Строка 2: A: Лампа | B: шт | C: 5"
+        ),
+    )
+
+    tables = extract_text_document_tables([document])
+
+    assert len(tables) == 1
+    assert tables[0].fileName == "specification.docx"
+    assert tables[0].sheet == "Таблица Word 2"
+    assert tables[0].rows[1].cells["A"] == "Лампа"
+
+
+def test_blocked_table_role_is_retained_for_extraction_guard_and_summary() -> None:
+    table = _price_table()
+    schema = SpreadsheetTableSchemaResponse(
+        tableRole="delivery_schedule",
+        confidence=0.95,
+    )
+
+    updated, reason = apply_table_schema(table, schema, min_confidence=0.75)
+
+    assert reason is None
+    assert updated.tableRole == "delivery_schedule"
+    assert table_schema_summaries([updated])["price.xlsx"][0].startswith("Sheet1: role=delivery_schedule")

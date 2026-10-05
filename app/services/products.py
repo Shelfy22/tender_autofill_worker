@@ -970,6 +970,7 @@ def extract_deterministic_positions(
     text: str,
     spreadsheet_tables: list[SpreadsheetTable] | None = None,
     max_positions: int = 5_000,
+    text_table_schemas: list[SpreadsheetTable] | None = None,
 ) -> list[TenderPosition]:
     normalized = _clean(text)
     patterns = [
@@ -1094,6 +1095,14 @@ def extract_deterministic_positions(
                 else SpreadsheetTable.model_validate(raw_table)
             )
         except Exception:
+            continue
+        if table.tableRole in {
+            "delivery_schedule",
+            "offer_form",
+            "contract_template",
+            "other",
+            "ambiguous",
+        }:
             continue
         if any(_is_delivery_schedule_header(row.cells) for row in table.rows):
             continue
@@ -1300,6 +1309,10 @@ def extract_deterministic_positions(
     current_section_role = OTHER_ROLE
     delivery_schedule_pending = False
     skip_current_text_table = False
+    text_schema_by_key = {
+        (table.fileName, table.sheet): table
+        for table in text_table_schemas or []
+    }
     for line in text.splitlines():
         if line.startswith("--- ДОКУМЕНТ "):
             current_file = ""
@@ -1368,6 +1381,19 @@ def extract_deterministic_positions(
         cells = _parse_structured_cells(row_match.group(2))
         if not cells:
             continue
+        table_schema = text_schema_by_key.get((current_file, current_sheet))
+        if table_schema and table_schema.tableRole in {
+            "delivery_schedule",
+            "offer_form",
+            "contract_template",
+            "other",
+            "ambiguous",
+        }:
+            skip_current_text_table = True
+        schema_headers_locked = bool(table_schema and table_schema.headerMap)
+        if schema_headers_locked and table_schema:
+            header_columns = dict(table_schema.headerMap)
+            header_labels = dict(table_schema.headerLabels)
         if re.search(r"\b(?:Word|PDF|RTF)\s+\d", current_sheet, re.IGNORECASE):
             structured_text_table_rows.add(_clean(line))
         if _is_delivery_schedule_header(cells):
@@ -1390,6 +1416,8 @@ def extract_deterministic_positions(
         }
         is_header_row = "product" in detected_headers or len(core_header_roles) >= 2
         if is_header_row:
+            if schema_headers_locked:
+                continue
             if pdf_inherited_headers_pending:
                 header_columns = {}
                 header_labels = {}
