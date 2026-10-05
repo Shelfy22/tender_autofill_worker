@@ -2,6 +2,7 @@ from app.models import (
     DocumentPriceSource,
     ProductCharacteristic,
     ProductMatchItem,
+    ProductSourceReference,
     TenderPosition,
     TenderPositionsResponse,
 )
@@ -46,6 +47,85 @@ def test_equivalent_suffix_and_missing_quantity_remain_separate_positions() -> N
     assert [item.quantity for item in merged] == [None, 12]
 
 
+def test_blank_okpd_offer_form_is_dropped_when_aligned_technical_table_exists() -> None:
+    quantities = (0.15, 0.14, 100, 325)
+    template_rows = [
+        TenderPosition(
+            product=f"Cable (\u041e\u041a\u041f\u0414 27.32.14.11{index})",
+            quantity=quantity,
+            unit="km" if index < 2 else "pcs",
+            source="llm",
+            sourceReference=ProductSourceReference(
+                fileName="Documentation.docx",
+                table="Offer form",
+                row=index + 2,
+                sectionRole="other",
+            ),
+        )
+        for index, quantity in enumerate(quantities)
+    ]
+    technical_rows = [
+        TenderPosition(
+            product=product,
+            quantity=quantity,
+            unit="km" if index < 2 else "pcs",
+            source="llm",
+            sourceReference=ProductSourceReference(
+                fileName="Technical specification.docx",
+                table="Technical specification",
+                row=index + 3,
+                sectionRole="technical_specification",
+            ),
+        )
+        for index, (product, quantity) in enumerate(
+            zip(
+                (
+                    "Cable AABl-10 3x120",
+                    "Cable AABl-10 3x240",
+                    "Cable joint 3STP-10-70/120",
+                    "Cable joint 3STP-10-150/240",
+                ),
+                quantities,
+            )
+        )
+    ]
+
+    merged, warnings = merge_positions(
+        [],
+        TenderPositionsResponse(products=template_rows + technical_rows),
+    )
+
+    assert [position.product for position in merged] == [
+        position.product for position in technical_rows
+    ]
+    assert any("blank offer-form table" in warning for warning in warnings)
+
+
+def test_blank_okpd_offer_form_is_retained_without_aligned_technical_table() -> None:
+    template_rows = [
+        TenderPosition(
+            product=f"Cable (\u041e\u041a\u041f\u0414 27.32.14.11{index})",
+            quantity=quantity,
+            unit="pcs",
+            source="llm",
+            sourceReference=ProductSourceReference(
+                fileName="Documentation.docx",
+                table="Offer form",
+                row=index + 2,
+                sectionRole="other",
+            ),
+        )
+        for index, quantity in enumerate((1, 2, 3, 4))
+    ]
+
+    merged, warnings = merge_positions([], TenderPositionsResponse(products=template_rows))
+
+    assert [position.product for position in merged] == [
+        position.product for position in template_rows
+    ]
+    assert not any("blank offer-form table" in warning for warning in warnings)
+
+
 def test_llm_category_without_quantity_is_skipped_when_structured_rows_exist() -> None:
     deterministic = [
         TenderPosition(
@@ -70,6 +150,32 @@ def test_llm_category_without_quantity_is_skipped_when_structured_rows_exist() -
 
     assert [item.product for item in merged] == ["Cable APvBShp 4x25"]
     assert any("without quantity" in warning for warning in warnings)
+
+
+def test_unreferenced_llm_category_without_unit_is_skipped_when_table_exists() -> None:
+    deterministic = [
+        TenderPosition(
+            product="LED lamp E27 10W",
+            quantity=None,
+            unit="pcs",
+            source="excel_table_deterministic",
+        )
+    ]
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product="Lighting",
+                quantity=80.29,
+                unit="",
+                source="llm",
+            )
+        ]
+    )
+
+    merged, warnings = merge_positions(deterministic, llm)
+
+    assert [item.product for item in merged] == ["LED lamp E27 10W"]
+    assert any("category without a unit" in warning for warning in warnings)
 
 
 def test_merge_filters_tender_conditions_misread_as_products() -> None:
@@ -789,6 +895,87 @@ def test_aligned_llm_copy_without_references_does_not_double_table_rows() -> Non
     assert any("aligned LLM copy" in warning for warning in warnings)
 
 
+def test_unreferenced_llm_table_copy_after_extra_candidates_is_dropped() -> None:
+    deterministic = [
+        TenderPosition(
+            product=name,
+            quantity=1,
+            unit="pcs",
+            source="excel_table_deterministic",
+            sourceReference=ProductSourceReference(
+                fileName="Price offer.xlsx",
+                sheet="Sheet1",
+                row=index + 10,
+            ),
+        )
+        for index, name in enumerate(("STP-25/10/0.4", "MTP-40/10/0.4", "KTPK-63/10/0.4", "KTPK-100/10"))
+    ]
+    llm = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product="\u041a\u0422\u041f, \u0421\u0422\u041f, \u041c\u0422\u041f \u0431\u0435\u0437 \u0441\u0438\u043b\u043e\u0432\u044b\u0445 \u0442\u0440\u0430\u043d\u0441\u0444\u043e\u0440\u043c\u0430\u0442\u043e\u0440\u043e\u0432",
+                quantity=1,
+                unit="pcs",
+                source="llm",
+            ),
+            TenderPosition(
+                product="Kiosk transformer substation",
+                quantity=1,
+                unit="pcs",
+                source="llm",
+                sourceReference=ProductSourceReference(
+                    fileName="\u041e\u041b \u2116 4 \u041a\u0422\u041f-63.xls",
+                    row=4,
+                ),
+            ),
+            *[
+                TenderPosition(
+                    product=position.product,
+                    quantity=position.quantity,
+                    unit=position.unit,
+                    source="llm",
+                )
+                for position in deterministic
+            ],
+        ]
+    )
+
+    merged, warnings = merge_positions(deterministic, llm)
+
+    assert [position.product for position in merged] == [
+        position.product for position in deterministic
+    ]
+    assert any("unreferenced LLM copy" in warning for warning in warnings)
+
+
+def test_tender_subject_and_llm_survey_title_are_not_products() -> None:
+    response = TenderPositionsResponse(
+        products=[
+            TenderPosition(
+                product="\u041a\u0422\u041f, \u0421\u0422\u041f, \u041c\u0422\u041f \u0431\u0435\u0437 \u0441\u0438\u043b\u043e\u0432\u044b\u0445 \u0442\u0440\u0430\u043d\u0441\u0444\u043e\u0440\u043c\u0430\u0442\u043e\u0440\u043e\u0432",
+                quantity=1,
+                unit="pcs",
+                source="llm",
+            ),
+            TenderPosition(
+                product="Kiosk transformer substation",
+                quantity=1,
+                unit="pcs",
+                source="llm",
+                sourceReference=ProductSourceReference(
+                    fileName="\u041e\u041b \u2116 4 \u041a\u0422\u041f-63.xls",
+                    row=4,
+                ),
+            ),
+            TenderPosition(product="KTPK-63/10/0.4", quantity=1, unit="pcs"),
+        ]
+    )
+
+    merged, _ = merge_positions([], response)
+
+    assert [position.product for position in merged] == ["KTPK-63/10/0.4"]
+
+
 def test_invalid_structured_table_falls_back_to_text_extraction() -> None:
     text = chr(10).join(
         (
@@ -1208,6 +1395,67 @@ def test_excel_characteristics_are_extracted_from_arbitrary_columns() -> None:
         ("Частота", "50 Гц"),
     ]
     assert "Напряжение питания: 220 В" in positions[0].requirements
+
+
+def test_word_companion_uses_nazvanie_materiala_as_product_column() -> None:
+    positions = extract_deterministic_positions(
+        "\n".join(
+            (
+                "\u0422\u0430\u0431\u043b\u0438\u0446\u0430 Word 1",
+                "\u0421\u0442\u0440\u043e\u043a\u0430 1: A: \u2116 | B: \u041d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435 | C: \u0415\u0434. \u0438\u0437\u043c. | D: \u041a\u043e\u043b-\u0432\u043e",
+                "\u0421\u0442\u0440\u043e\u043a\u0430 2: A: 1 | B: \u041b\u0430\u043c\u043f\u0430 LED E27 | C: \u0448\u0442 | D: 10",
+                "\u0422\u0430\u0431\u043b\u0438\u0446\u0430 Word 2",
+                "\u0421\u0442\u0440\u043e\u043a\u0430 1: A: \u2116 | B: \u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u0430 | C: \u0422\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438\u0435",
+                "\u0421\u0442\u0440\u043e\u043a\u0430 2: A: 1 | B: \u041b\u0430\u043c\u043f\u0430 LED E27 | C: \u041c\u043e\u0449\u043d\u043e\u0441\u0442\u044c: 10 \u0412\u0442",
+            )
+        )
+    )
+
+    assert len(positions) == 1
+    assert [(item.name, item.value) for item in positions[0].characteristics] == [
+        ("\u041c\u043e\u0449\u043d\u043e\u0441\u0442\u044c", "10 \u0412\u0442")
+    ]
+
+
+def test_price_list_uses_brief_material_text_and_keeps_price_out_of_quantity() -> None:
+    positions = extract_deterministic_positions(
+        "",
+        [
+            {
+                "fileName": "price_list.xlsx",
+                "sheet": "Sheet1",
+                "rows": [
+                    {
+                        "row": 6,
+                        "cells": {
+                            "B": "\u041c\u0430\u0442\u0435\u0440\u0438\u0430\u043b",
+                            "C": "\u041a\u0440\u0430\u0442\u043a\u0438\u0439 \u0442\u0435\u043a\u0441\u0442 \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u0430",
+                            "G": "\u0411\u0430\u0437\u0438\u0441\u043d\u0430\u044f \u0415\u0418",
+                            "H": "\u0426\u0435\u043d\u0430, \u0440\u0443\u0431. \u0431\u0435\u0437 \u041d\u0414\u0421",
+                        },
+                    },
+                    {
+                        "row": 7,
+                        "cells": {
+                            "B": "3466190042",
+                            "C": "\u041b\u0430\u043c\u043f\u0430 LED E27 10\u0412\u0442 \u041060 220\u0412 1000\u043b\u043c",
+                            "G": "\u0428\u0422",
+                            "H": "80.29",
+                        },
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert len(positions) == 1
+    assert positions[0].product == "\u041b\u0430\u043c\u043f\u0430 LED E27 10\u0412\u0442 \u041060 220\u0412 1000\u043b\u043c"
+    assert positions[0].quantity is None
+    assert positions[0].unit == "\u0428\u0422"
+    assert positions[0].documentUnitPriceRub == 80.29
+    assert positions[0].sourceReference is not None
+    assert positions[0].sourceReference.productColumn == "C"
+    assert positions[0].sourceReference.quantityColumn == ""
 
 
 def test_excel_continuation_row_enriches_previous_position() -> None:

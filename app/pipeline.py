@@ -47,6 +47,7 @@ from app.services.product_characteristics import (
 )
 from app.services.product_search_query import enrich_product_search_queries
 from app.services.product_matching_export import build_product_matching_workbook
+from app.services.table_schema import classify_spreadsheet_tables
 from app.services.products import (
     extract_deterministic_positions,
     extract_seldon_positions,
@@ -252,6 +253,11 @@ class TenderPipeline:
                 for document in parsed_documents
                 for table in document.spreadsheetTables
             ]
+            spreadsheet_tables, table_schema_warnings, table_schema_debug = self._run_stage(
+                "Classify Spreadsheet Table Schemas",
+                lambda: classify_spreadsheet_tables(llm, spreadsheet_tables, self.settings),
+            )
+            self.warnings.extend(table_schema_warnings)
             deterministic_positions = self._run_stage(
                 "Детерминированное извлечение товарных позиций из Excel",
                 lambda: extract_deterministic_positions(
@@ -261,7 +267,10 @@ class TenderPipeline:
                 ),
             )
 
-            document_analysis_debug: dict[str, Any] = {"enabled": self.settings.enable_document_analysis_pipeline}
+            document_analysis_debug: dict[str, Any] = {
+                "enabled": self.settings.enable_document_analysis_pipeline,
+                "tableSchemaAudit": table_schema_debug,
+            }
             characteristic_association_debug: dict[str, Any] = {"applied": False}
             document_consolidation = None
             spreadsheet_review_debug: dict[str, Any] = {"reviewRequested": False}

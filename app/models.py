@@ -821,6 +821,50 @@ class SpreadsheetTable(BaseModel):
     parserWarnings: list[str] = Field(default_factory=list)
 
 
+class SpreadsheetTableSchemaResponse(BaseModel):
+    """LLM classification of a table layout, never of its individual rows."""
+
+    tableRole: Literal[
+        "purchase_items",
+        "price_list",
+        "technical_specification",
+        "delivery_schedule",
+        "offer_form",
+        "contract_template",
+        "other",
+        "ambiguous",
+    ] = "ambiguous"
+    productColumn: str = ""
+    unitColumn: str = ""
+    quantityColumn: str = ""
+    unitPriceColumn: str = ""
+    lineTotalColumn: str = ""
+    characteristicColumns: list[str] = Field(default_factory=list, max_length=24)
+    confidence: float = Field(default=0, ge=0, le=1)
+    rationale: str = ""
+    warnings: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator(
+        "productColumn",
+        "unitColumn",
+        "quantityColumn",
+        "unitPriceColumn",
+        "lineTotalColumn",
+        mode="before",
+    )
+    @classmethod
+    def normalize_column(cls, value: Any) -> str:
+        column = str(value or "").strip().upper()
+        return column if column.isalpha() and len(column) <= 3 else ""
+
+    @field_validator("characteristicColumns", mode="before")
+    @classmethod
+    def normalize_characteristic_columns(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return list(dict.fromkeys(cls.normalize_column(item) for item in value if cls.normalize_column(item)))
+
+
 class ParsedDocument(BaseModel):
     documentIndex: int
     documentUrl: str = ""

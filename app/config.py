@@ -126,6 +126,9 @@ class Settings(BaseSettings):
     # structured JSON calls in non-thinking mode unless explicitly overridden.
     llm_reasoning_effort: str = "none"
     product_audit_reasoning_effort: str = "none"
+    table_schema_audit_enabled: bool = True
+    table_schema_llm_max_tables: int = Field(default=24, ge=0, le=100)
+    table_schema_min_confidence: float = Field(default=0.75, ge=0, le=1)
     catalog_selection_model: str = "openai/gpt-oss-120b"
     catalog_selection_fallback_models: str = "qwen/qwen3.7-flash,qwen/qwen3.5-flash-02-23"
     ocr_model: str = "deepseek/deepseek-v4-flash-0731"

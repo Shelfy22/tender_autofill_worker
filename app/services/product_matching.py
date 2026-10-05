@@ -30,6 +30,7 @@ from app.services.product_validation import (
     validate_product_candidates,
 )
 from app.services.products import extract_deterministic_positions, merge_positions
+from app.services.table_schema import classify_spreadsheet_tables
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,10 @@ def run_product_matching_from_files(
             spreadsheet_tables = [
                 table for document in parsed_documents for table in document.spreadsheetTables
             ]
+            spreadsheet_tables, table_schema_warnings, table_schema_debug = (
+                classify_spreadsheet_tables(llm, spreadsheet_tables, settings)
+            )
+            warnings.extend(table_schema_warnings)
             deterministic_positions = extract_deterministic_positions(
                 combined_text,
                 spreadsheet_tables,
@@ -261,6 +266,7 @@ def run_product_matching_from_files(
                 "documentsParsed": sum(document.textQualityOk for document in parsed_documents),
                 "documentCount": len(parsed_documents),
                 "documentTextLengths": document_lengths,
+                "tableSchemaAudit": table_schema_debug,
                 "documentAnalysisUnits": len(units),
                 "documentAnalysisResults": len(analysis_results),
                 "preConsolidationDeduplication": consolidation_dedup_debug,

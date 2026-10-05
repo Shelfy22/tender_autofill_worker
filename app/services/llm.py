@@ -29,6 +29,7 @@ from app.models import (
     ProductSemanticBatchResponse,
     ProductSkuBatchResponse,
     SpreadsheetCandidateReviewResponse,
+    SpreadsheetTableSchemaResponse,
     TenderConsolidationResponse,
     TenderPosition,
     TenderPositionsResponse,
@@ -335,7 +336,11 @@ class LlmClient:
         return {"models": models[1:]}
 
     def _reasoning_effort(self, operation: str) -> str:
-        if operation in {"audit_product_candidates", "validate_final_product_matches"}:
+        if operation in {
+            "audit_product_candidates",
+            "validate_final_product_matches",
+            "classify_spreadsheet_table_schema",
+        }:
             return str(
                 getattr(
                     self.settings,
@@ -906,6 +911,48 @@ documentLineTotalRub (сумма/стоимость всей строки), то
                     f"skipped chunk retry and continued with deterministic/Seldon positions. Error: {exc}"
                 ],
             )
+
+
+    def classify_spreadsheet_table_schema(
+        self,
+        profile: dict[str, Any],
+    ) -> SpreadsheetTableSchemaResponse:
+        prompt = f"""
+Classify the layout of one procurement table. Return JSON only.
+
+You receive column headers, column statistics, and a small representative row sample.
+You do not receive every row and must not infer individual products or quantities.
+
+Choose tableRole exactly from:
+- purchase_items: item list with product and procurement quantity;
+- price_list: item list with price, quantity may be absent;
+- technical_specification: requirements or characteristics;
+- delivery_schedule: repeated delivery dates/stages, not a new item list;
+- offer_form: supplier form/template;
+- contract_template: contract or specification copy;
+- other;
+- ambiguous.
+
+Column rules:
+- productColumn is the column containing purchasable item names, never a code-only column;
+- quantityColumn is only a procurement quantity column; never price, cost, total, VAT, date, or classifier code;
+- unitPriceColumn is a price for one unit; lineTotalColumn is a row total;
+- if there is no quantity, return an empty quantityColumn. Do not invent it;
+- characteristicColumns contain technical parameter/requirement columns and not names, quantities, units, or money;
+- if uncertain, use tableRole=ambiguous and confidence below 0.75.
+
+Table profile:
+{json.dumps(profile, ensure_ascii=False, indent=2)}
+""".strip()
+        return self.json_call(
+            system=(
+                "You classify table schemas before deterministic extraction. "
+                "Never extract products row by row and never return a search query."
+            ),
+            prompt=prompt,
+            schema=SpreadsheetTableSchemaResponse,
+            operation="classify_spreadsheet_table_schema",
+        )
 
 
     def review_spreadsheet_candidates(

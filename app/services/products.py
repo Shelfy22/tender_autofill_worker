@@ -16,6 +16,7 @@ from app.models import (
 from app.services.document_roles import (
     COMPOSITE_ROLE,
     OTHER_ROLE,
+    TECHNICAL_ROLE,
     classify_document_role,
     detect_section_role,
     source_role_priority,
@@ -170,6 +171,7 @@ def _is_noise_position(position: TenderPosition) -> bool:
         or _SERVICE_POSITION_PATTERN.search(product)
         or _CONDITION_POSITION_PATTERN.fullmatch(product)
         or _ADDRESS_OR_RECIPIENT_PATTERN.search(product)
+        or _is_tender_subject_or_survey_title(position)
     )
 
 
@@ -265,6 +267,11 @@ def _header_role(value: Any) -> str | None:
     ):
         return "unit_price"
     if re.fullmatch(
+        r"цена(?:\s+руб(?:л(?:ей)?)?)?(?:\s+(?:без|с)\s+ндс)?",
+        header,
+    ):
+        return "unit_price"
+    if re.fullmatch(
         r"(?:общее\s+)?(?:количество|кол\s+во|кол)"
         r"(?:\s+(?:товара|продукции|изделий|единиц))?",
         header,
@@ -272,10 +279,13 @@ def _header_role(value: Any) -> str | None:
         return "quantity"
     if re.search(r"(?:количество|кол\s+во|кол)\s+(?:шт|штук|ед|м|кг|л)\b", header):
         return "quantity"
-    if re.search(r"единица\s+измерения|ед\s+изм", header):
+    if re.search(r"единица\s+измерения|ед\s+изм", header) or re.fullmatch(
+        r"(?:базисная\s+)?е\s*и",
+        header,
+    ):
         return "unit"
     if re.search(
-        r"^(?:наименование|название)(?:\s|$)|^товар$|^предмет\s+закупки$",
+        r"^(?:наименование|название)(?:\s|$)|^товар$|^предмет\s+закупки$|^(?:краткий\s+текст\s+)?материала?$",
         header,
     ):
         return "product"
@@ -480,6 +490,12 @@ def _word_table_characteristic_columns(cells: dict[str, str]) -> tuple[str, list
             not product_column
             and "\u043d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d" in normalized
             and "\u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a" not in normalized
+        ):
+            product_column = column
+        if (
+            not product_column
+            and "назван" in normalized
+            and "характеристик" not in normalized
         ):
             product_column = column
     return product_column, characteristic_columns
@@ -988,8 +1004,12 @@ def extract_deterministic_positions(
     ) -> None:
         name, unit = _normalize_extracted_product_name(name), _clean(unit)
         quantity = parse_quantity(raw_quantity)
-        if (
+        price_only_row = (
             quantity is None
+            and (document_unit_price not in {None, ""} or document_line_total not in {None, ""})
+        )
+        if (
+            (quantity is None and not price_only_row)
             or _ONLY_ROW_NUMBER_PATTERN.fullmatch(name)
             or _ONLY_CLASSIFIER_CODE_PATTERN.fullmatch(name)
             or re.search(r"наименование\s+товара|кол-?во", name, re.I)
@@ -1090,7 +1110,9 @@ def extract_deterministic_positions(
                     current = column_labels.get(column, "")
                     if label not in current.split(" / "):
                         column_labels[column] = " / ".join(filter(None, (current, label)))
-        use_precomputed_headers = {"product", "quantity"}.issubset(header_columns)
+        use_precomputed_headers = "product" in header_columns and bool(
+            {"quantity", "unit_price", "line_total"} & set(header_columns)
+        )
         last_result_index: int | None = None
         for row in table.rows:
             cells = row.cells
@@ -1127,10 +1149,12 @@ def extract_deterministic_positions(
                         header_columns[role] = column
                         header_labels[role] = label
                     continue
-            if not {"product", "quantity"}.issubset(header_columns):
+            if "product" not in header_columns or not (
+                {"quantity", "unit_price", "line_total"} & set(header_columns)
+            ):
                 continue
             product_column = header_columns["product"]
-            quantity_column = header_columns["quantity"]
+            quantity_column = header_columns.get("quantity", "")
             ignored_columns = {
                 column
                 for column in header_columns.values()
@@ -1185,11 +1209,9 @@ def extract_deterministic_positions(
                     structured_spreadsheet_rows.add(_clean(continuation_evidence))
                 continue
             unit, unit_column = _table_unit(cells, header_columns, header_labels)
-            raw_quantity = cells.get(quantity_column)
+            raw_quantity = cells.get(quantity_column) if quantity_column else None
             if not unit:
                 unit = _unit_from_quantity_value(raw_quantity)
-            if not unit or raw_quantity is None:
-                continue
             unit_price_column = header_columns.get("unit_price", "")
             line_total_column = header_columns.get("line_total", "")
             raw_unit_price = cells.get(unit_price_column) if unit_price_column else None
@@ -1198,6 +1220,8 @@ def extract_deterministic_positions(
                 raw_unit_price not in {None, ""}
                 or raw_line_total not in {None, ""}
             )
+            if not unit or (raw_quantity is None and not has_document_price):
+                continue
             evidence = (
                 f"Строка {row.row}: "
                 + " | ".join(
@@ -2107,6 +2131,154 @@ def _deduplicate_cross_document_positions(
     )
 
 
+_OKPD_PLACEHOLDER_PRODUCT_PATTERN = re.compile(
+    r"^\s*\S+(?:\s+\S+){0,4}\s*\(\s*\u043e\u043a\u043f\u0434\s+\d{2}(?:\.\d{1,3}){1,4}\s*\)\s*$",
+    re.IGNORECASE,
+)
+_SURVEY_SHEET_FILE_PATTERN = re.compile(
+    r"(?:\b\u043e\u043f\u0440\u043e\u0441\u043d\w*\s+\u043b\u0438\u0441\u0442\b|"
+    r"(?:^|\W)\u043e\u043b\s*(?:\u2116|n|#)?\s*\d+)",
+    re.IGNORECASE,
+)
+_TENDER_SUBJECT_PRODUCT_PATTERN = re.compile(
+    r"^\s*(?:\u043a\u0442\u043f|\u0441\u0442\u043f|\u043c\u0442\u043f)"
+    r"(?:\s*,\s*(?:\u043a\u0442\u043f|\u0441\u0442\u043f|\u043c\u0442\u043f)){1,}"
+    r"\s+\u0431\u0435\u0437\s+\u0441\u0438\u043b\u043e\u0432\w*\s+\u0442\u0440\u0430\u043d\u0441\u0444\u043e\u0440\u043c\u0430\u0442\u043e\u0440\w*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_tender_subject_or_survey_title(position: TenderPosition) -> bool:
+    """Reject tender-level labels and LLM guesses from an OL document title."""
+    product = _clean(position.product)
+    if _TENDER_SUBJECT_PRODUCT_PATTERN.fullmatch(product):
+        return True
+
+    reference = position.sourceReference
+    return bool(
+        position.source == "llm"
+        and reference is not None
+        and _SURVEY_SHEET_FILE_PATTERN.search(_clean(reference.fileName))
+        and not _clean(reference.productColumn)
+        and not _clean(position.model)
+        and not _clean(position.article)
+        and not position.sourceCells
+    )
+
+
+def _is_blank_okpd_template_position(position: TenderPosition) -> bool:
+    """Recognize an LLM label inferred from a blank offer-form product cell."""
+    reference = position.sourceReference
+    return bool(
+        position.source == "llm"
+        and reference is not None
+        and reference.row is not None
+        and _position_source_role(position) in {OTHER_ROLE, COMPOSITE_ROLE}
+        and _OKPD_PLACEHOLDER_PRODUCT_PATTERN.fullmatch(_clean(position.product))
+        and not _clean(position.model)
+        and not _clean(position.article)
+        and not position.characteristics
+        and not _clean(position.requirements)
+        and not position.sourceCells
+    )
+
+
+def _contiguous_template_groups(
+    positions: list[TenderPosition],
+) -> list[list[tuple[int, TenderPosition]]]:
+    grouped: dict[tuple[str, str], list[tuple[int, TenderPosition]]] = {}
+    for index, position in enumerate(positions):
+        if not _is_blank_okpd_template_position(position):
+            continue
+        reference = position.sourceReference
+        if reference is None:
+            continue
+        key = (
+            _word_table_key(reference.fileName),
+            _word_table_key(reference.table) or "__document__",
+        )
+        grouped.setdefault(key, []).append((index, position))
+
+    result: list[list[tuple[int, TenderPosition]]] = []
+    for entries in grouped.values():
+        current: list[tuple[int, TenderPosition]] = []
+        previous_row: int | None = None
+        for entry in entries:
+            row = entry[1].sourceReference.row if entry[1].sourceReference else None
+            if current and (row is None or previous_row is None or row != previous_row + 1):
+                result.append(current)
+                current = []
+            current.append(entry)
+            previous_row = row
+        if current:
+            result.append(current)
+    return result
+
+
+def _technical_position_groups(
+    positions: list[TenderPosition],
+) -> list[list[TenderPosition]]:
+    grouped: dict[tuple[str, str], list[TenderPosition]] = {}
+    for position in positions:
+        reference = position.sourceReference
+        if (
+            reference is None
+            or reference.row is None
+            or _position_source_role(position) != TECHNICAL_ROLE
+            or _is_blank_okpd_template_position(position)
+        ):
+            continue
+        key = (
+            _word_table_key(reference.fileName),
+            _word_table_key(reference.table) or "__document__",
+        )
+        grouped.setdefault(key, []).append(position)
+    return [
+        sorted(group, key=lambda position: position.sourceReference.row or 0)
+        for group in grouped.values()
+    ]
+
+
+def _drop_blank_okpd_template_positions(
+    positions: list[TenderPosition],
+) -> tuple[list[TenderPosition], list[str]]:
+    """Drop an aligned blank offer form when a detailed technical table exists."""
+    skipped_indexes: set[int] = set()
+    technical_groups = _technical_position_groups(positions)
+    for template_group in _contiguous_template_groups(positions):
+        if len(template_group) < 4:
+            continue
+        template_grid = [
+            (position.quantity, _position_unit_key(position.unit))
+            for _, position in template_group
+        ]
+        matching_group = next(
+            (
+                technical_group
+                for technical_group in technical_groups
+                if len(technical_group) == len(template_group)
+                and [
+                    (position.quantity, _position_unit_key(position.unit))
+                    for position in technical_group
+                ]
+                == template_grid
+            ),
+            None,
+        )
+        if matching_group is not None:
+            skipped_indexes.update(index for index, _ in template_group)
+
+    if not skipped_indexes:
+        return positions, []
+    return (
+        [position for index, position in enumerate(positions) if index not in skipped_indexes],
+        [
+            "Skipped a blank offer-form table inferred only from OKPD codes after "
+            "an aligned technical specification confirmed the detailed product rows."
+        ],
+    )
+
+
 def _apparel_family_key(position: TenderPosition) -> str:
     """Recognize a clothing family without treating its size grid as new goods."""
     value = _word_table_key(position.productQuery or position.product)
@@ -2171,6 +2343,114 @@ def _drop_unconfirmed_llm_quantity_breakdowns(
     )
 
 
+def _position_table_identity(position: TenderPosition) -> tuple[str, float | None, str]:
+    return (
+        _position_name_key(position),
+        position.quantity,
+        _position_unit_key(position.unit),
+    )
+
+
+def _source_backed_table_groups(
+    positions: list[TenderPosition],
+) -> list[list[tuple[int, TenderPosition]]]:
+    grouped: dict[tuple[str, str], list[tuple[int, TenderPosition]]] = {}
+    for index, position in enumerate(positions):
+        reference = position.sourceReference
+        if (
+            reference is None
+            or reference.row is None
+            or not _clean(reference.fileName)
+            or not (reference.sheet or reference.table)
+        ):
+            continue
+        key = (
+            _word_table_key(reference.fileName),
+            _word_table_key(reference.sheet or reference.table),
+        )
+        grouped.setdefault(key, []).append((index, position))
+    return [
+        sorted(group, key=lambda entry: entry[1].sourceReference.row or 0)
+        for group in grouped.values()
+    ]
+
+
+def _unreferenced_llm_runs(
+    positions: list[TenderPosition],
+) -> list[list[tuple[int, TenderPosition]]]:
+    runs: list[list[tuple[int, TenderPosition]]] = []
+    current: list[tuple[int, TenderPosition]] = []
+    for index, position in enumerate(positions):
+        if _position_source_key(position):
+            if current:
+                runs.append(current)
+                current = []
+            continue
+        current.append((index, position))
+    if current:
+        runs.append(current)
+    return runs
+
+
+def _drop_unreferenced_llm_table_copies(
+    deterministic: list[TenderPosition],
+    llm_products: list[TenderPosition],
+) -> tuple[list[TenderPosition], list[TenderPosition], list[str]]:
+    """Remove a complete, source-less LLM copy of a structured table.
+
+    The LLM can emit a valid copy of a table after unrelated document-level
+    candidates. Whole-list alignment then cannot recognize it. Requiring a
+    complete table, source-row ordering, and a four-row minimum avoids merging
+    genuine repeated purchase positions inside the table.
+    """
+    removed_indexes: set[int] = set()
+    warnings: list[str] = []
+    for source_group in _source_backed_table_groups(deterministic):
+        if len(source_group) < 4:
+            continue
+        source_identities = [
+            _position_table_identity(position) for _, position in source_group
+        ]
+        if not all(identity[0] for identity in source_identities):
+            continue
+        for llm_run in _unreferenced_llm_runs(llm_products):
+            if len(llm_run) < len(source_group):
+                continue
+            llm_identities = [
+                _position_table_identity(position) for _, position in llm_run
+            ]
+            for start in range(len(llm_run) - len(source_group) + 1):
+                end = start + len(source_group)
+                if llm_identities[start:end] != source_identities:
+                    continue
+                for (source_index, source_position), (_, llm_position) in zip(
+                    source_group, llm_run[start:end]
+                ):
+                    deterministic[source_index] = _merge_replicated_position_details(
+                        source_position,
+                        llm_position,
+                    )
+                removed_indexes.update(index for index, _ in llm_run[start:end])
+                reference = source_group[0][1].sourceReference
+                warnings.append(
+                    "Skipped an unreferenced LLM copy of structured table rows; "
+                    f"retained {reference.fileName if reference else 'source-backed'} rows."
+                )
+                break
+
+    if not removed_indexes:
+        return deterministic, llm_products, []
+    return (
+        deterministic,
+        [
+            position
+            for index, position in enumerate(llm_products)
+            if index not in removed_indexes
+        ],
+        list(dict.fromkeys(warnings)),
+    )
+
+
 def _merge_aligned_llm_table_copy(
     deterministic: list[TenderPosition],
     llm_products: list[TenderPosition],
@@ -2220,6 +2500,9 @@ def merge_positions(
         llm_products,
         deterministic + seldon + llm_products,
     )
+    deterministic, llm_products, unreferenced_copy_warnings = (
+        _drop_unreferenced_llm_table_copies(deterministic, llm_products)
+    )
     deterministic, llm_products, aligned_copy_warnings = (
         _merge_aligned_llm_table_copy(deterministic, llm_products)
     )
@@ -2228,6 +2511,7 @@ def merge_positions(
     warnings = (
         list(llm_response.warnings if llm_response else [])
         + breakdown_warnings
+        + unreferenced_copy_warnings
         + aligned_copy_warnings
     )
     seldon_by_source = {
@@ -2282,6 +2566,21 @@ def merge_positions(
             warnings.append(
                 "Skipped LLM product without quantity that was not confirmed by structured product rows: "
                 f"{_clean(position.product)[:200]}"
+            )
+            continue
+        if (
+            id(raw_position) in llm_product_ids
+            and (deterministic or seldon)
+            and not source_key
+            and not _clean(position.unit)
+            and len(_position_name_key(position).split()) <= 2
+            and not _clean(position.model)
+            and not _clean(position.article)
+            and not position.characteristics
+        ):
+            warnings.append(
+                "Skipped unreferenced LLM category without a unit when structured "
+                f"product rows are available: {_clean(position.product)[:200]}"
             )
             continue
         quantity = (
@@ -2373,5 +2672,6 @@ def merge_positions(
         result.append(position.model_copy(update=update))
         if len(result) >= max_positions:
             break
+    result, blank_template_warnings = _drop_blank_okpd_template_positions(result)
     result, cross_document_warnings = _deduplicate_cross_document_positions(result)
-    return result, warnings + cross_document_warnings
+    return result, warnings + blank_template_warnings + cross_document_warnings
