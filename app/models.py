@@ -295,6 +295,10 @@ class TenderPosition(BaseModel):
     documentPriceEvidence: str = ""
     documentPriceSource: DocumentPriceSource | None = None
     sourceReference: ProductSourceReference | None = None
+    # The primary reference points to the most specific product row. Copies
+    # merged from price lists, technical specifications, and contracts remain
+    # available here for diagnostics and report generation.
+    sourceReferences: list[ProductSourceReference] = Field(default_factory=list, max_length=50)
     sourceCells: dict[str, str] = Field(default_factory=dict)
     characteristics: list[ProductCharacteristic] = Field(default_factory=list, max_length=100)
     characteristicConflicts: list[CharacteristicConflict] = Field(default_factory=list, max_length=50)
@@ -711,6 +715,7 @@ class ProductMatchItem(BaseModel):
     documentPriceEvidence: str = ""
     documentPriceSource: DocumentPriceSource | None = None
     sourceReference: ProductSourceReference | None = None
+    sourceReferences: list[ProductSourceReference] = Field(default_factory=list, max_length=50)
     sourceCells: dict[str, str] = Field(default_factory=dict)
     match: ProductMatch
 

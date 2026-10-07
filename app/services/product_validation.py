@@ -226,6 +226,16 @@ def _unit_compatible(left: TenderPosition, right: TenderPosition) -> bool:
     return not left.unit or not right.unit or left.unit.casefold() == right.unit.casefold()
 
 
+def _is_structured_table_position(position: TenderPosition) -> bool:
+    reference = position.sourceReference
+    return bool(
+        reference is not None
+        and reference.row is not None
+        and (reference.sheet or reference.table)
+        and position.source == "excel_table_deterministic"
+    )
+
+
 def _structured_source_issue(position: TenderPosition) -> str | None:
     evidence = str(position.evidence or "")
     row_match = re.search(r"(?:^|\n)Строка\s+(\d+)\s*:\s*", evidence, re.IGNORECASE)
@@ -603,7 +613,20 @@ def apply_spreadsheet_candidate_review(
             continue
         if decision.decision == "REMOVE":
             target_ok = not decision.duplicateOfCandidateId or decision.duplicateOfCandidateId in by_id
-            if decision.confidence >= AUDIT_ACTION_CONFIDENCE and target_ok:
+            duplicate_index = by_id.get(decision.duplicateOfCandidateId or "")
+            duplicate_confirmed = (
+                duplicate_index is not None
+                and _duplicate_supported(positions[duplicate_index], position)
+            )
+            safe_non_product = (
+                _deterministic_non_product_role(position.product) is not None
+                or bool(re.fullmatch(r"\s*\d+(?:[.,]\d+)?\s*", position.product or ""))
+            )
+            if (
+                decision.confidence >= AUDIT_ACTION_CONFIDENCE
+                and target_ok
+                and (not _is_structured_table_position(position) or duplicate_confirmed or safe_non_product)
+            ):
                 removed_ids.add(position.candidateId)
                 warnings.append(
                     "Excel candidate исключён до Qdrant: "

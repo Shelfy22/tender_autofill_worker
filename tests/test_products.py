@@ -666,6 +666,211 @@ def test_replicated_tables_allow_unit_alias_and_shortened_product_name() -> None
     assert any("replicated table" in warning for warning in warnings)
 
 
+def test_aligned_table_copies_across_documents_merge_into_one_canonical_position() -> None:
+    price_rows = [
+        ("Transformer TMGF-1000/10-11", 2, 123_000),
+        ("Transformer TMG-250/10-11", 1, 55_000),
+    ]
+    technical_rows = [
+        ("Power transformer TMGF 1000 kVA UHL1", 2, "sealed"),
+        ("Power transformer TMG 250 kVA UHL1", 1, "oil"),
+    ]
+    positions = [
+        TenderPosition(
+            product=name,
+            quantity=quantity,
+            unit="pcs",
+            documentUnitPriceRub=price,
+            documentPriceSource={"fileName": "nmcd.xlsx", "sheet": "Prices", "row": index},
+            sourceReference={
+                "fileName": "nmcd.xlsx",
+                "sheet": "Prices",
+                "row": index,
+                "sectionRole": "price_justification",
+            },
+        )
+        for index, (name, quantity, price) in enumerate(price_rows, start=2)
+    ] + [
+        TenderPosition(
+            product=name,
+            quantity=quantity,
+            unit="pcs",
+            characteristics=[ProductCharacteristic(name="Execution", value=execution)],
+            sourceReference={
+                "fileName": "technical.docx",
+                "table": "Table 1",
+                "row": index,
+                "sectionRole": "technical_specification",
+            },
+        )
+        for index, (name, quantity, execution) in enumerate(technical_rows, start=2)
+    ]
+
+    merged, warnings = merge_positions(positions, None)
+
+    assert len(merged) == 2
+    assert [position.product for position in merged] == [row[0] for row in price_rows]
+    assert [position.documentUnitPriceRub for position in merged] == [123_000, 55_000]
+    assert [position.characteristics[0].value for position in merged] == ["sealed", "oil"]
+    assert all(len(position.sourceReferences) == 2 for position in merged)
+    assert any("replicated table copies" in warning for warning in warnings)
+
+
+def test_repeated_names_in_one_table_remain_separate_positions() -> None:
+    positions = [
+        TenderPosition(
+            product="Lamp",
+            quantity=1,
+            unit="pcs",
+            characteristics=[ProductCharacteristic(name="Power", value=value)],
+            sourceReference={
+                "fileName": "technical.docx",
+                "table": "Table 1",
+                "row": row,
+                "sectionRole": "technical_specification",
+            },
+        )
+        for row, value in ((2, "20 W"), (3, "40 W"))
+    ]
+
+    merged, _ = merge_positions(positions, None)
+
+    assert len(merged) == 2
+    assert [position.characteristics[0].value for position in merged] == ["20 W", "40 W"]
+
+
+def test_short_replicated_power_transformer_tables_are_merged_by_series_and_capacity() -> None:
+    positions = [
+        TenderPosition(
+            product="Трансформатор ТМГФ-1000/10-11 УХЛ1 D/Yн-11",
+            quantity=1,
+            unit="шт",
+            sourceReference={
+                "fileName": "price.xls",
+                "sheet": "Лист3",
+                "row": 10,
+                "sectionRole": "price_justification",
+            },
+        ),
+        TenderPosition(
+            product="Трансформатор ТМГ-250/10-11 УХЛ1 Y/Yн-0",
+            quantity=1,
+            unit="шт",
+            sourceReference={
+                "fileName": "price.xls",
+                "sheet": "Лист3",
+                "row": 11,
+                "sectionRole": "price_justification",
+            },
+        ),
+        TenderPosition(
+            product="Трансформатор ТМГФ 1000 кВА",
+            quantity=1,
+            unit="шт",
+            characteristics=[ProductCharacteristic(name="Исполнение", value="герметичный")],
+            sourceReference={
+                "fileName": "technical.docx",
+                "table": "Таблица Word 1",
+                "row": 3,
+                "sectionRole": "technical_specification",
+            },
+        ),
+        TenderPosition(
+            product="Силовой трансформатор ТМГ 250 кВА",
+            quantity=1,
+            unit="шт",
+            sourceReference={
+                "fileName": "technical.docx",
+                "table": "Таблица Word 1",
+                "row": 36,
+                "sectionRole": "technical_specification",
+            },
+        ),
+        TenderPosition(
+            product="Силовой трансформатор ТМГ 250 кВА",
+            quantity=1,
+            unit="шт",
+            sourceReference={
+                "fileName": "contract.docx",
+                "table": "Таблица Word 4",
+                "row": 2,
+                "sectionRole": "contract",
+            },
+        ),
+    ]
+
+    merged, warnings = merge_positions(positions, None)
+
+    assert len(merged) == 2
+    assert {position.product for position in merged} == {
+        "Трансформатор ТМГФ-1000/10-11 УХЛ1 D/Yн-11",
+        "Трансформатор ТМГ-250/10-11 УХЛ1 Y/Yн-0",
+    }
+    assert any("power-transformer" in warning for warning in warnings)
+
+
+def test_variants_from_same_source_row_are_merged_when_product_stems_match() -> None:
+    positions = [
+        TenderPosition(
+            product="Однофазный многотарифный счетчик электрической энергии прямого включения",
+            quantity=445,
+            unit="шт",
+            sourceReference={"fileName": "spec.docx", "row": 2},
+        ),
+        TenderPosition(
+            product="Однофазный многотарифный счетчик учета электроэнергии прямого включения CE207",
+            quantity=445,
+            unit="шт",
+            characteristics=[ProductCharacteristic(name="Ток", value="80 А")],
+            sourceReference={"fileName": "spec.docx", "table": "Таблица Word 1", "row": 2},
+        ),
+    ]
+
+    merged, warnings = merge_positions(positions, None)
+
+    assert len(merged) == 1
+    assert merged[0].product.endswith("CE207")
+    assert merged[0].characteristics[0].value == "80 А"
+    assert any("same source row" in warning for warning in warnings)
+
+
+def test_generic_short_table_copy_is_merged_into_detailed_table() -> None:
+    positions = [
+        TenderPosition(
+            product="Коммутатор",
+            quantity=1,
+            unit="шт",
+            sourceReference={"fileName": "technical.pdf", "row": 1},
+        ),
+        TenderPosition(
+            product="Коммутатор",
+            quantity=1,
+            unit="шт",
+            sourceReference={"fileName": "technical.pdf", "row": 2},
+        ),
+        TenderPosition(
+            product="Коммутатор агрегации 10G MES5310-48",
+            quantity=1,
+            unit="шт",
+            sourceReference={"fileName": "prices.xlsx", "sheet": "НМЦД", "row": 8},
+        ),
+        TenderPosition(
+            product="Коммутатор доступа PoE MES2300-48P",
+            quantity=1,
+            unit="шт",
+            sourceReference={"fileName": "prices.xlsx", "sheet": "НМЦД", "row": 14},
+        ),
+    ]
+
+    merged, warnings = merge_positions(positions, None)
+
+    assert [position.product for position in merged] == [
+        "Коммутатор агрегации 10G MES5310-48",
+        "Коммутатор доступа PoE MES2300-48P",
+    ]
+    assert any("generic product-table copy" in warning for warning in warnings)
+
+
 def test_repeated_merged_word_row_is_not_extracted_as_a_product() -> None:
     text = "\n".join(
         (

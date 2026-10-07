@@ -1877,6 +1877,80 @@ def _same_replicated_product(left: TenderPosition, right: TenderPosition) -> boo
     )
 
 
+_GENERIC_NAME_WORDS = {
+    "или", "эквивалент", "поставка", "товар", "товары", "для", "с",
+    "и", "в", "на", "по", "из", "со",
+}
+
+
+def _product_name_stems(position: TenderPosition) -> set[str]:
+    words = re.findall(r"[a-zа-яё0-9]+", _clean(position.product).casefold())
+    return {
+        word[:5]
+        for word in words
+        if len(word) >= 3 and word not in _GENERIC_NAME_WORDS and not word.isdigit()
+    }
+
+
+def _same_source_row_product_variant(left: TenderPosition, right: TenderPosition) -> bool:
+    left_reference = left.sourceReference
+    right_reference = right.sourceReference
+    if (
+        left_reference is None
+        or right_reference is None
+        or left_reference.row is None
+        or right_reference.row is None
+        or _word_table_key(left_reference.fileName) != _word_table_key(right_reference.fileName)
+        or left_reference.row != right_reference.row
+        or left.quantity != right.quantity
+        or _position_unit_key(left.unit) != _position_unit_key(right.unit)
+    ):
+        return False
+    if _same_replicated_product(left, right):
+        return True
+    return len(_product_name_stems(left) & _product_name_stems(right)) >= 2
+
+
+def _is_generic_product_copy(position: TenderPosition) -> bool:
+    name = _clean(position.product).casefold()
+    stems = _product_name_stems(position)
+    return "поставка" in name or len(stems) <= 1
+
+
+def _generic_copy_matches_detail(generic: TenderPosition, detailed: TenderPosition) -> bool:
+    if generic.quantity != detailed.quantity or _position_unit_key(generic.unit) != _position_unit_key(detailed.unit):
+        return False
+    generic_stems = _product_name_stems(generic)
+    detailed_stems = _product_name_stems(detailed)
+    if not generic_stems or not detailed_stems:
+        return False
+    shared = generic_stems & detailed_stems
+    return len(shared) >= min(2, len(generic_stems))
+
+
+_POWER_TRANSFORMER_SERIES_PATTERN = re.compile(r"\bтмгф?\b", re.IGNORECASE)
+_POWER_TRANSFORMER_CAPACITY_PATTERN = re.compile(
+    r"(?:\bтмгф?\s*[- ]*|\b)(\d{2,5})(?=\s*(?:ква|кв\s*а|/))",
+    re.IGNORECASE,
+)
+
+
+def _power_transformer_identity(position: TenderPosition) -> tuple[str, str] | None:
+    """Return the stable series/capacity pair used in replicated transformer tables."""
+    text = " ".join(
+        (
+            position.product,
+            position.productQuery or "",
+            *(item.value for item in position.characteristics),
+        )
+    )
+    series = _POWER_TRANSFORMER_SERIES_PATTERN.search(text)
+    capacity = _POWER_TRANSFORMER_CAPACITY_PATTERN.search(text)
+    if series is None or capacity is None:
+        return None
+    return series.group(0).casefold(), capacity.group(1)
+
+
 def _cross_document_position_key(position: TenderPosition) -> tuple[str, str, float | None, str] | None:
     reference = position.sourceReference
     if reference is None or not _clean(reference.fileName):
@@ -1896,10 +1970,75 @@ def _cross_document_position_key(position: TenderPosition) -> tuple[str, str, fl
     return (product, strong_identity, position.quantity, _position_unit_key(position.unit))
 
 
+def _source_reference_key(reference: ProductSourceReference | None) -> tuple[str, str, int | None, str]:
+    if reference is None:
+        return ("", "", None, "")
+    return (
+        _word_table_key(reference.fileName),
+        _word_table_key(reference.sheet or reference.table),
+        reference.row,
+        _word_table_key(reference.productColumn),
+    )
+
+
+def _all_source_references(position: TenderPosition) -> list[ProductSourceReference]:
+    references = list(position.sourceReferences)
+    if position.sourceReference is not None:
+        references.append(position.sourceReference)
+    result: list[ProductSourceReference] = []
+    seen: set[tuple[str, str, int | None, str]] = set()
+    for reference in references:
+        key = _source_reference_key(reference)
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        result.append(reference)
+    return result
+
+
+def _product_identity_specificity(position: TenderPosition) -> tuple[int, int, int, int]:
+    """Prefer a concrete model/article over a generic table label."""
+    title = _clean(position.product)
+    model_or_article = int(bool(_clean(position.model) or _clean(position.article)))
+    model_tokens = len(re.findall(r"(?=.*[a-zа-яё])(?=.*\d)[a-zа-яё0-9./_-]{3,}", title.casefold()))
+    return (
+        model_or_article,
+        model_tokens,
+        len(_product_name_stems(position)),
+        len(title),
+    )
+
+
+def _preferred_product_identity(
+    canonical: TenderPosition,
+    duplicate: TenderPosition,
+) -> TenderPosition:
+    # A document LLM often repeats a structured row as a verbose phrase. It
+    # must not replace the table's product identity merely because it is longer.
+    if duplicate.source == "llm" and canonical.source != "llm":
+        return canonical
+    # A price-list row is already a valid canonical name unless the other
+    # structured table explicitly supplies a model or article.
+    if (
+        _position_source_role(canonical) == "price_justification"
+        and not (_clean(duplicate.model) or _clean(duplicate.article))
+    ):
+        return canonical
+    if _product_identity_specificity(duplicate) <= _product_identity_specificity(canonical):
+        return canonical
+    updates: dict[str, Any] = {"product": duplicate.product}
+    for field in ("productQuery", "model", "article", "brand", "sourceReference", "sourceCells"):
+        value = getattr(duplicate, field)
+        if not _missing(value):
+            updates[field] = value
+    return canonical.model_copy(update=updates)
+
+
 def _merge_replicated_position_details(
     canonical: TenderPosition,
     duplicate: TenderPosition,
 ) -> TenderPosition:
+    canonical = _preferred_product_identity(canonical, duplicate)
     updates: dict[str, Any] = {}
     characteristics = list(canonical.characteristics)
     seen_characteristics = {
@@ -1930,6 +2069,32 @@ def _merge_replicated_position_details(
         updates["evidence"] = _clean(
             " | ".join(filter(None, (canonical_evidence, duplicate_evidence)))
         )[:1200]
+
+    source_references = _all_source_references(canonical) + _all_source_references(duplicate)
+    deduplicated_references: list[ProductSourceReference] = []
+    seen_references: set[tuple[str, str, int | None, str]] = set()
+    for reference in source_references:
+        key = _source_reference_key(reference)
+        if key in seen_references:
+            continue
+        seen_references.add(key)
+        deduplicated_references.append(reference)
+    if deduplicated_references != canonical.sourceReferences:
+        updates["sourceReferences"] = deduplicated_references
+
+    # Price is authoritative in an NMC/price-justification table, regardless
+    # of which source donated the most concrete product title.
+    if _position_source_role(duplicate) == "price_justification":
+        for field in (
+            "documentUnitPriceRub",
+            "documentLineTotalRub",
+            "documentCurrency",
+            "documentPriceEvidence",
+            "documentPriceSource",
+        ):
+            value = getattr(duplicate, field)
+            if not _missing(value):
+                updates[field] = value
     return canonical.model_copy(update=updates) if updates else canonical
 
 
@@ -2001,7 +2166,7 @@ def _aligned_replicated_table_pairs(
     positions: list[TenderPosition],
     skipped_indexes: set[int],
 ) -> list[tuple[int, int]]:
-    """Pair whole repeated tables in one file without collapsing same-table rows."""
+    """Pair full table copies across documents without collapsing rows in one table."""
     by_scope: dict[tuple[str, str], list[tuple[int, TenderPosition]]] = {}
     for index, position in enumerate(positions):
         if index in skipped_indexes:
@@ -2016,36 +2181,52 @@ def _aligned_replicated_table_pairs(
         by_scope.setdefault((file_name, table_scope), []).append((index, position))
 
     scopes = list(by_scope)
-    options: list[tuple[float, tuple[str, str], tuple[str, str]]] = []
+    options: list[tuple[float, float, tuple[str, str], tuple[str, str]]] = []
     for left_offset, left_scope in enumerate(scopes):
         left_rows = by_scope[left_scope]
         is_identified_single_row = (
             len(left_rows) == 1
             and bool(re.search(r"\d", _position_name_key(left_rows[0][1])))
         )
-        if len(left_rows) < 4 and not is_identified_single_row:
+        if len(left_rows) < 2 and not is_identified_single_row:
             continue
         for right_scope in scopes[left_offset + 1 :]:
-            if left_scope[0] != right_scope[0]:
-                continue
             right_rows = by_scope[right_scope]
             if len(left_rows) != len(right_rows):
                 continue
-            aligned = 0
+            aligned_grid = 0
+            strong_identity = 0
             for (_, left), (_, right) in zip(left_rows, right_rows):
+                if left.quantity != right.quantity or _position_unit_key(left.unit) != _position_unit_key(right.unit):
+                    continue
+                aligned_grid += 1
+                left_identity = _power_transformer_identity(left)
+                right_identity = _power_transformer_identity(right)
+                left_stems = _product_name_stems(left)
+                right_stems = _product_name_stems(right)
+                exact_model = bool(
+                    _clean(left.model or left.article)
+                    and _word_table_key(left.model or left.article)
+                    == _word_table_key(right.model or right.article)
+                )
                 if (
                     _same_replicated_product(left, right)
-                    and left.quantity == right.quantity
-                    and _position_unit_key(left.unit) == _position_unit_key(right.unit)
+                    or exact_model
+                    or (left_identity is not None and left_identity == right_identity)
+                    or len(left_stems & right_stems) >= 2
                 ):
-                    aligned += 1
-            ratio = aligned / len(left_rows)
-            if ratio >= 0.90:
-                options.append((ratio, left_scope, right_scope))
+                    strong_identity += 1
+            grid_ratio = aligned_grid / len(left_rows)
+            identity_ratio = strong_identity / len(left_rows)
+            # A two-row table must match both rows. Longer tables allow one
+            # noisy row, but never rely on quantity/unit alone.
+            required_identity = 1.0 if len(left_rows) <= 3 else 0.80
+            if grid_ratio >= 0.90 and identity_ratio >= required_identity:
+                options.append((identity_ratio, grid_ratio, left_scope, right_scope))
 
     pairs: list[tuple[int, int]] = []
     used_scopes: set[tuple[str, str]] = set()
-    for _, left_scope, right_scope in sorted(options, reverse=True):
+    for _, _, left_scope, right_scope in sorted(options, reverse=True):
         if left_scope in used_scopes or right_scope in used_scopes:
             continue
         left_rows = by_scope[left_scope]
@@ -2101,8 +2282,150 @@ def _deduplicate_cross_document_positions(
         skipped_indexes.add(duplicate_index)
     if table_pairs:
         warnings.append(
-            "Skipped a replicated table in the same document after aligned "
-            "product, quantity, and unit rows were confirmed."
+            "Merged replicated table copies after aligned row order, quantity, "
+            "unit, and stable product identities were confirmed."
+        )
+
+    # Some tenders repeat only two or three technical positions. The generic
+    # aligned-table safeguard deliberately leaves such short lists alone.
+    # For power transformers, however, series plus nominal capacity is a
+    # stable identity: it lets us merge copies from price, technical, and
+    # contract tables without collapsing different transformer executions.
+    transformer_groups: dict[tuple[str, str, float | None, str], list[tuple[int, TenderPosition]]] = {}
+    for index, position in enumerate(positions):
+        if index in skipped_indexes or position.sourceReference is None:
+            continue
+        identity = _power_transformer_identity(position)
+        reference = position.sourceReference
+        scope = _word_table_key(reference.sheet or reference.table)
+        if identity is None or not scope:
+            continue
+        transformer_groups.setdefault(
+            (*identity, position.quantity, _position_unit_key(position.unit)), []
+        ).append((index, position))
+
+    transformer_duplicates = 0
+    for group in transformer_groups.values():
+        scopes = {
+            (_word_table_key(position.sourceReference.fileName), _word_table_key(position.sourceReference.sheet or position.sourceReference.table))
+            for _, position in group
+            if position.sourceReference is not None
+        }
+        # A repeated item within one source table remains a separate tender row.
+        if len(group) < 2 or len(scopes) < 2 or len(scopes) != len(group):
+            continue
+        canonical_index, canonical = min(
+            group,
+            key=lambda entry: (
+                source_role_priority(_position_source_role(entry[1])),
+                entry[0],
+            ),
+        )
+        for duplicate_index, duplicate in group:
+            if duplicate_index == canonical_index:
+                continue
+            canonical = _merge_replicated_position_details(canonical, duplicate)
+            positions[canonical_index] = canonical
+            skipped_indexes.add(duplicate_index)
+            transformer_duplicates += 1
+    if transformer_duplicates:
+        warnings.append(
+            "Merged replicated power-transformer rows by stable series and nominal capacity."
+        )
+
+    same_row_groups: dict[tuple[str, int, float | None, str], list[tuple[int, TenderPosition]]] = {}
+    for index, position in enumerate(positions):
+        if index in skipped_indexes or position.sourceReference is None:
+            continue
+        reference = position.sourceReference
+        if reference.row is None:
+            continue
+        same_row_groups.setdefault(
+            (
+                _word_table_key(reference.fileName),
+                reference.row,
+                position.quantity,
+                _position_unit_key(position.unit),
+            ),
+            [],
+        ).append((index, position))
+
+    same_row_duplicates = 0
+    for group in same_row_groups.values():
+        if len(group) < 2:
+            continue
+        canonical_index, canonical = max(
+            group,
+            key=lambda entry: (
+                len(_clean(entry[1].product)),
+                len(entry[1].characteristics),
+                -entry[0],
+            ),
+        )
+        for duplicate_index, duplicate in group:
+            if duplicate_index == canonical_index or not _same_source_row_product_variant(canonical, duplicate):
+                continue
+            canonical = _merge_replicated_position_details(canonical, duplicate)
+            positions[canonical_index] = canonical
+            skipped_indexes.add(duplicate_index)
+            same_row_duplicates += 1
+    if same_row_duplicates:
+        warnings.append(
+            "Merged repeated product variants extracted from the same source row."
+        )
+
+    source_groups: dict[tuple[str, str], list[tuple[int, TenderPosition]]] = {}
+    for index, position in enumerate(positions):
+        if index in skipped_indexes or position.sourceReference is None:
+            continue
+        reference = position.sourceReference
+        scope = _word_table_key(reference.sheet or reference.table) or "__document_text__"
+        source_groups.setdefault((_word_table_key(reference.fileName), scope), []).append(
+            (index, position)
+        )
+
+    generic_table_pairs: list[tuple[int, int]] = []
+    scopes = list(source_groups)
+    consumed_generic_scopes: set[tuple[str, str]] = set()
+    for generic_scope in scopes:
+        generic_rows = source_groups[generic_scope]
+        if generic_scope in consumed_generic_scopes or not generic_rows:
+            continue
+        if not all(_is_generic_product_copy(position) for _, position in generic_rows):
+            continue
+        matches: list[tuple[int, tuple[str, str], list[tuple[int, TenderPosition]]]] = []
+        for detailed_scope in scopes:
+            if detailed_scope == generic_scope:
+                continue
+            detailed_rows = source_groups[detailed_scope]
+            if len(detailed_rows) != len(generic_rows) or not detailed_rows:
+                continue
+            if all(
+                _generic_copy_matches_detail(generic, detailed)
+                for (_, generic), (_, detailed) in zip(generic_rows, detailed_rows)
+            ):
+                specificity = sum(
+                    len(_clean(position.product)) + len(position.characteristics) * 80
+                    for _, position in detailed_rows
+                )
+                matches.append((specificity, detailed_scope, detailed_rows))
+        if not matches:
+            continue
+        _, _, detailed_rows = max(matches, key=lambda item: item[0])
+        generic_table_pairs.extend(
+            (detailed_index, generic_index)
+            for (generic_index, _), (detailed_index, _) in zip(generic_rows, detailed_rows)
+        )
+        consumed_generic_scopes.add(generic_scope)
+
+    for canonical_index, duplicate_index in generic_table_pairs:
+        positions[canonical_index] = _merge_replicated_position_details(
+            positions[canonical_index], positions[duplicate_index]
+        )
+        skipped_indexes.add(duplicate_index)
+    if generic_table_pairs:
+        warnings.append(
+            "Merged a generic product-table copy into the matching detailed table."
         )
 
     grouped: dict[tuple[str, str, float | None, str], list[tuple[int, TenderPosition]]] = {}

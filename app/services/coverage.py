@@ -157,6 +157,10 @@ def summarize_product_coverage(
                     if item.sourceReference is not None
                     else None
                 ),
+                "sourceReferences": [
+                    reference.model_dump()
+                    for reference in item.sourceReferences
+                ],
                 "sourceCells": item.sourceCells,
                 "supplied": supplied,
                 "fullMatch": full_match,
