@@ -32,3 +32,28 @@ def test_result_json_contract_for_finalizer() -> None:
     assert result["fields"]["toCode"] == "TO-1"
     assert result["reportFields"]["ID"] == "42"
     assert result["sourceTender"]["seldonId"] == 42
+
+
+def test_result_syncs_normalized_lot_divisibility_to_daily_column() -> None:
+    job = NormalizedJob(
+        job_record_key="daily:b:1:42",
+        batch_id="b",
+        report_id=1,
+        seldon_id="42",
+        report_fields={"Лот делимый": ""},
+    )
+
+    result = build_result_json(
+        job,
+        fields={"lotDivisible": "yes"},
+        meta={},
+        product_check=None,
+        decision=None,
+        warnings=[],
+        logs=[],
+        debug=None,
+    )
+
+    assert result["fields"]["lotDivisible"] == "yes"
+    assert result["reportFields"]["Лот делимый"] == "Да"
+    assert result["reportFields"]["lotDivisible"] == "yes"

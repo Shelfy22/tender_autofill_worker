@@ -8,6 +8,7 @@ from app.config import Settings
 from app.models import CatalogSelection, ProductCharacteristic, ProductMatch, TenderPosition
 from app.services.catalog import (
     _catalog_value_matches,
+    _finalize_characteristic_audit,
     CatalogMatcher,
     hydrate_catalog_selection,
     limit_catalog_positions,
@@ -529,3 +530,48 @@ def test_catalog_value_match_does_not_confuse_current_and_voltage() -> None:
     assert _catalog_value_matches("400 А", "400 А")
     assert not _catalog_value_matches("400 А", "400 В")
     assert not _catalog_value_matches("400 А", "4000 А")
+
+
+def test_characteristic_audit_marks_unclassified_document_specs_as_missing() -> None:
+    selection = CatalogSelection(
+        selectedPointId="123",
+        correspondence="Полное соответствие",
+        matchedCharacteristicIds=["c1"],
+    )
+
+    audited = _finalize_characteristic_audit(
+        selection,
+        [
+            {"id": "c1", "name": "Мощность", "value": "500 Вт"},
+            {"id": "c2", "name": "Напряжение", "value": "220 В"},
+        ],
+    )
+
+    assert audited.correspondence == "Аналог"
+    assert audited.matched_characteristic_ids == ["c1"]
+    assert audited.missing_characteristic_ids == ["c2"]
+    assert "1 из 2" in audited.rationale
+    assert "Напряжение: 220 В" in audited.rationale
+
+
+def test_characteristic_audit_rejects_selected_candidate_with_direct_conflict() -> None:
+    selection = CatalogSelection(
+        selectedPointId="123",
+        correspondence="Полное соответствие",
+        matchedCharacteristicIds=["c1"],
+        conflictingCharacteristics=[
+            {"characteristicId": "c2", "catalogValue": "6 А"},
+        ],
+    )
+
+    audited = _finalize_characteristic_audit(
+        selection,
+        [
+            {"id": "c1", "name": "Напряжение", "value": "220 В"},
+            {"id": "c2", "name": "Ток", "value": "8 А"},
+        ],
+    )
+
+    assert audited.correspondence == "Товар не найден"
+    assert audited.selected_point_id is None
+    assert "Ток: 8 А; ETM: 6 А" in audited.rationale

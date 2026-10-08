@@ -661,12 +661,30 @@ class ProductMatch(BaseModel):
         return _parse_money_value(value)
 
 
+class CatalogCharacteristicConflict(BaseModel):
+    """A direct contradiction between a document characteristic and ETM params."""
+
+    characteristic_id: str = Field(alias="characteristicId")
+    catalog_value: str = Field(default="", alias="catalogValue")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class CatalogSelection(BaseModel):
     selected_point_id: str | None = Field(default=None, alias="selectedPointId")
     correspondence: Literal["Полное соответствие", "Аналог", "Товар не найден"] = (
         "Товар не найден"
     )
     rationale: str = ""
+    matched_characteristic_ids: list[str] = Field(
+        default_factory=list, alias="matchedCharacteristicIds"
+    )
+    missing_characteristic_ids: list[str] = Field(
+        default_factory=list, alias="missingCharacteristicIds"
+    )
+    conflicting_characteristics: list[CatalogCharacteristicConflict] = Field(
+        default_factory=list, alias="conflictingCharacteristics"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 

@@ -6,6 +6,15 @@ from typing import Any
 from app.models import NormalizedJob, TenderResult
 
 
+def _lot_divisible_report_value(value: Any) -> str:
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"yes", "true", "1", "да"}:
+        return "Да"
+    if normalized in {"no", "false", "0", "нет"}:
+        return "Нет"
+    return ""
+
+
 def build_result_json(
     job: NormalizedJob,
     *,
@@ -18,6 +27,13 @@ def build_result_json(
     debug: dict[str, Any] | None,
 ) -> dict[str, Any]:
     result_fields = {**fields, "legalEntity": None, "toCode": job.to_code}
+    report_fields = dict(job.report_fields)
+    lot_divisible = _lot_divisible_report_value(fields.get("lotDivisible"))
+    if lot_divisible:
+        # Downstream XLSX generation uses the original Russian Daily headers.
+        # Keep that column in sync with the normalized decision field.
+        report_fields["Лот делимый"] = lot_divisible
+        report_fields["lotDivisible"] = fields["lotDivisible"]
     result = TenderResult(
         fields=result_fields,
         meta=meta,
@@ -41,7 +57,7 @@ def build_result_json(
         lawCode=job.law_code,
         sectionName=job.section_name,
         filterName=job.filter_name,
-        reportFields=job.report_fields,
+        reportFields=report_fields,
         sourceTender=job.seldon_purchase,
         processedAt=datetime.now(timezone.utc),
     )

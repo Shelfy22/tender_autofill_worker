@@ -230,6 +230,108 @@ def _selection_specs(product: TenderPosition) -> list[tuple[str, str]]:
     return list(dict.fromkeys(specs))[:40]
 
 
+def _selection_characteristics(specs: list[tuple[str, str]]) -> list[dict[str, str]]:
+    """Give every source characteristic a stable ID for the selection LLM."""
+    return [
+        {"id": f"c{index}", "name": name, "value": value}
+        for index, (name, value) in enumerate(specs, start=1)
+    ]
+
+
+def _known_selection_ids(values: list[str], known_ids: dict[str, str]) -> set[str]:
+    return {
+        known_ids[value.strip().casefold()]
+        for value in values
+        if isinstance(value, str) and value.strip().casefold() in known_ids
+    }
+
+
+def _characteristic_label(characteristic: dict[str, str]) -> str:
+    return f"{characteristic['name']}: {characteristic['value']}"
+
+
+def _finalize_characteristic_audit(
+    selection: CatalogSelection,
+    characteristics: list[dict[str, str]],
+) -> CatalogSelection:
+    """Make the LLM's characteristic accounting conservative and reportable.
+
+    A missing classification is never evidence of a match. This avoids treating a
+    sparse ETM params object as a full technical match merely because the model
+    selected a plausible product by name.
+    """
+    if not characteristics:
+        return selection
+
+    by_id = {item["id"]: item for item in characteristics}
+    known_ids = {item_id.casefold(): item_id for item_id in by_id}
+    matched = _known_selection_ids(selection.matched_characteristic_ids, known_ids)
+    missing = _known_selection_ids(selection.missing_characteristic_ids, known_ids)
+    conflicts: dict[str, str] = {}
+    for conflict in selection.conflicting_characteristics:
+        raw_id = conflict.characteristic_id.strip().casefold()
+        item_id = known_ids.get(raw_id)
+        if item_id:
+            conflicts[item_id] = conflict.catalog_value.strip()
+
+    # A contradiction has priority over an optimistic or incomplete LLM label.
+    matched -= set(conflicts) | missing
+    missing -= set(conflicts)
+    missing.update(set(by_id) - matched - missing - set(conflicts))
+
+    total = len(characteristics)
+    if conflicts:
+        details = "; ".join(
+            f"{_characteristic_label(by_id[item_id])}; ETM: {value or 'значение не указано'}"
+            for item_id, value in conflicts.items()
+        )
+        return selection.model_copy(
+            update={
+                "selected_point_id": None,
+                "correspondence": "Товар не найден",
+                "rationale": f"Товар не найден. Противоречия характеристик ({len(conflicts)}): {details}.",
+                "matched_characteristic_ids": sorted(matched),
+                "missing_characteristic_ids": sorted(missing),
+            }
+        )
+
+    if not selection.selected_point_id:
+        return selection.model_copy(
+            update={
+                "correspondence": "Товар не найден",
+                "matched_characteristic_ids": sorted(matched),
+                "missing_characteristic_ids": sorted(missing),
+            }
+        )
+
+    matched_count = len(matched)
+    if missing:
+        missing_details = "; ".join(
+            _characteristic_label(by_id[item_id]) for item_id in sorted(missing)
+        )
+        rationale = (
+            f"Подтверждено характеристик: {matched_count} из {total}. "
+            f"Не подтверждены в базе ETM ({len(missing)}): {missing_details}. "
+            "Требуется отдельная проверка сотрудником."
+        )
+        correspondence = "Аналог"
+    else:
+        rationale = (
+            f"Подтверждено характеристик: {matched_count} из {total}. "
+            "Все характеристики из документа присутствуют в params ETM и совпадают."
+        )
+        correspondence = "Полное соответствие"
+
+    return selection.model_copy(
+        update={
+            "correspondence": correspondence,
+            "rationale": rationale,
+            "matched_characteristic_ids": sorted(matched),
+            "missing_characteristic_ids": sorted(missing),
+        }
+    )
+
+
 def _catalog_value_matches(requested: str, actual: Any) -> bool:
     expected = _catalog_identity(requested)
     found = _catalog_identity(actual)
@@ -863,6 +965,7 @@ class CatalogMatcher:
             return result
         shortlisted = _selection_shortlist(product, normalized_candidates)
         specs = _selection_specs(product)
+        characteristics = _selection_characteristics(specs)
         request = {
             "originalProduct": product.product,
             "searchQuery": product.productQuery or product.product,
@@ -871,15 +974,15 @@ class CatalogMatcher:
             "article": product.article,
             "analogsAllowed": product.analogsAllowed,
             "requirements": product.requirements[:1500],
-            "characteristics": [
-                {"name": name, "value": value} for name, value in specs
-            ],
+            "characteristics": characteristics,
         }
         candidates_json = _selection_candidates_json(shortlisted, specs)
         prompt = f"""
 Сопоставь исходную позицию тендера с normalizedCandidates. searchQuery использовался
 для поиска; окончательный выбор делай по originalProduct, характеристикам и требованиям.
-params кандидата и явно указанные параметры в его названии/модели — доказательства.
+params кандидата — единственный источник подтверждения характеристик документа.
+Название, модель и артикул помогают определить тип товара, но не подтверждают
+характеристику для подсчёта совпадений.
 Отсутствие параметра в params означает «неизвестно», а не «совпадает» или «не совпадает».
 Сопоставляй смысл параметров и единицы измерения, а не только одинаковые слова или цифры.
 Проверяй ограничения «не менее», «не более», диапазоны и допуски по фактическому значению
@@ -900,13 +1003,35 @@ params кандидата и явно указанные параметры в �
 В rationale кратко укажи совпавшие и спорные ключевые параметры; не придумывай
 отсутствующие значения. selectedPointId должен быть pointId из normalizedCandidates.
 Верни только selectedPointId, correspondence и rationale. Выбирай не по цене.
+For every item in characteristics return its id exactly once in one of the three
+lists: matchedCharacteristicIds, missingCharacteristicIds, or
+conflictingCharacteristics. Count a characteristic as matched only when its
+semantic equivalent and compatible value are explicitly present in the chosen
+candidate's params. Candidate name, model, vendor code, or other text may help
+choose a product class, but must not confirm a characteristic for this count.
+Candidate-only params are irrelevant.
+
+missingCharacteristicIds means that the corresponding characteristic cannot be
+confirmed from params; it is not a contradiction. conflictingCharacteristics
+contains objects with characteristicId and catalogValue. Put a characteristic
+there only for a direct semantic contradiction, for example document 8 A and
+ETM params 6 A. If at least one contradiction exists, return
+selectedPointId=null and correspondence "Товар не найден". If all ids match,
+return "Полное соответствие". If some ids are missing and none conflict,
+return "Аналог". Do not select a candidate with a contradiction.
+
+selectedPointId must be a pointId from normalizedCandidates. Return only
+selectedPointId, correspondence, rationale, matchedCharacteristicIds,
+missingCharacteristicIds, and conflictingCharacteristics. Do not choose by price.
 Позиция: {json.dumps(request, ensure_ascii=False)}
 normalizedCandidates: {candidates_json}
 """.strip()
         selection = self.llm.json_call(
             system=(
                 "Выбери pointId товара из каталога. Верни только selectedPointId, "
-                "correspondence и rationale; не копируй catalog fields."
+                "correspondence, rationale, matchedCharacteristicIds, "
+                "missingCharacteristicIds и conflictingCharacteristics; "
+                "не копируй catalog fields."
             ),
             prompt=prompt,
             schema=CatalogSelection,
@@ -914,6 +1039,7 @@ normalizedCandidates: {candidates_json}
             audit_details=self._position_context,
             model_chain=self.settings.models_for_catalog_selection(),
         )
+        selection = _finalize_characteristic_audit(selection, characteristics)
         selected = next(
             (
                 candidate

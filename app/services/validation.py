@@ -33,6 +33,89 @@ _DELIVERY_DEADLINE_EVIDENCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_SECURITY_FIELD_PATTERNS = {
+    "applicationSecurity": re.compile(
+        r"(?:размер\s+)?обеспечени[ея]\s+заявк[ие]\s*(?:составляет|[-:–—])?\s*([^\n;]{1,180})",
+        re.IGNORECASE,
+    ),
+    "contractSecurity": re.compile(
+        r"(?:размер\s+)?обеспечени[ея]\s+(?:исполнени[ея]\s+)?(?:контракт[а-яё]*|договор[а-яё]*)\s*(?:составляет|[-:–—])?\s*([^\n;]{1,180})",
+        re.IGNORECASE,
+    ),
+    "warrantySecurity": re.compile(
+        r"(?:размер\s+)?обеспечени[ея]\s+гарантийн[а-яё\s]{0,50}(?:обязательств[а-яё]*)?\s*(?:составляет|[-:–—])?\s*([^\n;]{1,180})",
+        re.IGNORECASE,
+    ),
+}
+_WARRANTY_MONTHS_PATTERN = re.compile(
+    r"гарантийн[а-яё]*\s+срок[^\n;]{0,100}?(\d{1,3})\s*(?:месяц[а-яё]*|мес\.?)(?:\b|\s)",
+    re.IGNORECASE,
+)
+_DELIVERY_DAYS_PATTERN = re.compile(
+    r"(?:срок[а-яё\s]{0,35}(?:поставк[аи]|доставк[аи])|"
+    r"(?:поставк[а-яё]*|доставк[а-яё]*)[\s\S]{0,80}?(?:в\s+течение))"
+    r"[\s\S]{0,80}?(\d{1,4})\s*(?:рабоч(?:их|ие)?|календарн(?:ых|ые)?)?\s*"
+    r"(?:дн(?:ей|я)?|сут(?:ок|ки)?)\b",
+    re.IGNORECASE,
+)
+_DELIVERY_DATE_PATTERN = re.compile(
+    r"(?:срок[а-яё\s]{0,35}(?:поставк[аи]|доставк[аи])|"
+    r"(?:поставк[а-яё]*|доставк[а-яё]*)[\s\S]{0,80}?(?:до|не\s+позднее|по))"
+    r"[\s\S]{0,80}?(\d{1,2}\.\d{1,2}\.\d{4})",
+    re.IGNORECASE,
+)
+_PAYMENT_DELAY_PATTERN = re.compile(
+    r"(?:отсрочк[а-яё]*\s+(?:платеж[а-яё]*|оплат[а-яё]*)|"
+    r"оплат[а-яё\s]{0,100}?в\s+течение)"
+    r"[\s\S]{0,80}?(\d{1,4})\s*(?:рабоч(?:их|ие)?|календарн(?:ых|ые)?)?\s*д",
+    re.IGNORECASE,
+)
+_SECURITY_VALUE_PATTERN = re.compile(r"\d")
+_NON_NUMERIC_SECURITY_VALUE_PATTERN = re.compile(
+    r"^(?:не\s+(?:требуется|установлен[ао]?|предусмотрен[ао]?)|отсутствует|без\s+обеспечения)\b",
+    re.IGNORECASE,
+)
+
+
+def _explicit_security_fields(text: str) -> dict[str, tuple[str, str]]:
+    """Extract direct security and warranty terms if a document unit missed them."""
+    result: dict[str, tuple[str, str]] = {}
+    normalized = re.sub(r"\s+", " ", re.sub(r"[\r\n]+", "; ", str(text or ""))).strip()
+    for field, pattern in _SECURITY_FIELD_PATTERNS.items():
+        match = pattern.search(normalized)
+        if match is None:
+            continue
+        value = re.sub(r"\s+", " ", match.group(1)).strip(" .,:;–—-")
+        if not value:
+            continue
+        if (
+            _NON_NUMERIC_SECURITY_VALUE_PATTERN.search(value)
+            or not _SECURITY_VALUE_PATTERN.search(value)
+        ):
+            continue
+        result[field] = (value[:300], match.group(0)[:500])
+
+    warranty_match = _WARRANTY_MONTHS_PATTERN.search(normalized)
+    if warranty_match is not None:
+        result["warrantyMonths"] = (warranty_match.group(1), warranty_match.group(0)[:500])
+    return result
+
+
+def _explicit_commercial_fields(text: str) -> dict[str, tuple[Any, str]]:
+    """Capture only direct delivery and payment facts that survive LLM chunking."""
+    result: dict[str, tuple[Any, str]] = {}
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    patterns: tuple[tuple[str, re.Pattern[str], Any], ...] = (
+        ("deliveryDays", _DELIVERY_DAYS_PATTERN, lambda match: int(match.group(1))),
+        ("deliveryDate", _DELIVERY_DATE_PATTERN, lambda match: _normalize_date(match.group(1))),
+        ("paymentDelayDays", _PAYMENT_DELAY_PATTERN, lambda match: int(match.group(1))),
+    )
+    for field, pattern, value_factory in patterns:
+        match = pattern.search(normalized)
+        if match is not None:
+            result[field] = (value_factory(match), match.group(0)[:500])
+    return result
+
 
 def _has_explicit_delivery_deadline_evidence(evidence: Any) -> bool:
     text = re.sub(r"\s+", " ", str(evidence or "")).strip()
@@ -49,6 +132,97 @@ def _normalize_date(value: Any) -> Any:
     if match:
         return f"{match.group(3)}-{match.group(2).zfill(2)}-{match.group(1).zfill(2)}"
     return text
+
+
+def _structured_submission_deadline(job: NormalizedJob) -> tuple[str | None, str | None, str]:
+    """Read the application deadline from Seldon/Daily, never from document AI."""
+    purchase = job.seldon_purchase if isinstance(job.seldon_purchase, dict) else {}
+    values = (
+        purchase.get("endDate"),
+        purchase.get("dateEnd"),
+        purchase.get("submissionDeadline"),
+        purchase.get("submissionDeadlineDate"),
+        purchase.get("applicationEndDate"),
+        job.report_fields.get("Дата окончания приёма заявок"),
+        job.report_fields.get("Дата окончания приема заявок"),
+    )
+    for value in values:
+        if value is None or str(value).strip() == "":
+            continue
+        if isinstance(value, datetime):
+            return value.date().isoformat(), value.strftime("%H:%M:%S"), str(value)
+        if isinstance(value, date):
+            return value.isoformat(), None, str(value)
+
+        text = str(value).strip()
+        normalized = text.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return parsed.date().isoformat(), parsed.strftime("%H:%M:%S"), text
+
+        match = re.search(
+            r"(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+|T)?(\d{1,2}):(\d{2})(?::(\d{2}))?",
+            text,
+        )
+        if match:
+            day, month, year, hour, minute, second = match.groups()
+            return (
+                f"{year}-{month.zfill(2)}-{day.zfill(2)}",
+                f"{hour.zfill(2)}:{minute}:{second or '00'}",
+                text,
+            )
+        match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
+        if match:
+            day, month, year = match.groups()
+            return f"{year}-{month.zfill(2)}-{day.zfill(2)}", None, text
+    return None, None, ""
+
+
+def _structured_result_date(job: NormalizedJob) -> tuple[str | None, str]:
+    """Take the result date only from Seldon/Daily, not document LLM output."""
+    purchase = job.seldon_purchase if isinstance(job.seldon_purchase, dict) else {}
+    values = (
+        purchase.get("resultDate"),
+        purchase.get("dateResult"),
+        purchase.get("summarizingDate"),
+        purchase.get("dateSummingUp"),
+        purchase.get("protocolDate"),
+        purchase.get("protocolPublishDate"),
+        job.report_fields.get("Дата подведения итогов"),
+    )
+    for value in values:
+        if value is None or str(value).strip() == "":
+            continue
+        if isinstance(value, datetime):
+            return value.date().isoformat(), str(value)
+        if isinstance(value, date):
+            return value.isoformat(), str(value)
+        text = str(value).strip()
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat(), text
+        except ValueError:
+            normalized = _normalize_date(text)
+            if isinstance(normalized, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+                return normalized, text
+    return None, ""
+
+
+def _normalize_delivery_type(value: Any) -> str | None:
+    text = re.sub(r"\s+", " ", str(value or "").casefold().replace("ё", "е")).strip()
+    if not text:
+        return None
+    if text in {"by_requests", "single_date", "during_period"}:
+        return text
+    if re.search(r"по\s+заявк|парт|график|разнаряд", text):
+        return "by_requests"
+    if re.search(r"к\s+дат|единовременно\s+(?:до|на\s+дат)", text):
+        return "single_date"
+    if re.search(r"в\s+течение|срок", text):
+        return "during_period"
+    return None
 
 
 def _set(
@@ -86,6 +260,41 @@ def validate_fields(
     else:
         warnings.append("LLM extraction не выполнен; применены deterministic fallbacks.")
 
+    # The autofill columns must contain only an explicitly stated amount or
+    # percentage. Do not turn an absent requirement into "not required".
+    for key in ("applicationSecurity", "contractSecurity", "warrantySecurity"):
+        value = str(fields.get(key) or "").strip()
+        if value and (
+            _NON_NUMERIC_SECURITY_VALUE_PATTERN.search(value)
+            or not _SECURITY_VALUE_PATTERN.search(value)
+        ):
+            fields.pop(key, None)
+            meta.pop(key, None)
+
+    for key, (value, evidence) in _explicit_security_fields(deterministic_text).items():
+        if not fields.get(key):
+            _set(
+                fields,
+                meta,
+                key,
+                value,
+                "Документы / прямое условие обеспечения или гарантии",
+                "high",
+                evidence,
+            )
+
+    for key, (value, evidence) in _explicit_commercial_fields(deterministic_text).items():
+        if not fields.get(key):
+            _set(
+                fields,
+                meta,
+                key,
+                value,
+                "Документы / прямое условие поставки или оплаты",
+                "high",
+                evidence,
+            )
+
     if not fields.get("counterpartyName") and fields.get("counterparty"):
         fields["counterpartyName"] = fields["counterparty"]
     if not fields.get("counterpartyInn") and fields.get("inn"):
@@ -99,6 +308,54 @@ def validate_fields(
     _set(fields, meta, "finalPrice", fields.get("finalPrice") or "0", "Default", "low", "Конечная цена не найдена")
 
     purchase = job.seldon_purchase
+    # These dates have a deterministic Seldon/Daily source and must not be
+    # guessed by an LLM from a contract or a document template.
+    fields.pop("resultDate", None)
+    meta.pop("resultDate", None)
+    fields.pop("contractDate", None)
+    meta.pop("contractDate", None)
+    deadline_date, deadline_time, deadline_evidence = _structured_submission_deadline(job)
+    if deadline_date:
+        _set(
+            fields,
+            meta,
+            "submissionDeadlineDate",
+            deadline_date,
+            "Seldon/Daily / дата окончания подачи",
+            "high",
+            deadline_evidence,
+        )
+    result_date, result_evidence = _structured_result_date(job)
+    if result_date:
+        _set(
+            fields,
+            meta,
+            "resultDate",
+            result_date,
+            "Seldon/Daily / дата подведения итогов",
+            "high",
+            result_evidence,
+        )
+        contract_date = date.fromisoformat(result_date) + timedelta(days=14)
+        _set(
+            fields,
+            meta,
+            "contractDate",
+            contract_date.isoformat(),
+            "Расчёт / дата подведения итогов + 14 календарных дней",
+            "high",
+            f"{result_date} + 14 календарных дней",
+        )
+    if deadline_time:
+        _set(
+            fields,
+            meta,
+            "submissionDeadlineTime",
+            deadline_time,
+            "Seldon/Daily / дата окончания подачи",
+            "high",
+            deadline_evidence,
+        )
     if not fields.get("initialPrice"):
         value = purchase.get("purchasePrice") or purchase.get("initialPrice") or purchase.get("price")
         if value is not None and str(value).strip() != "":
@@ -158,10 +415,24 @@ def validate_fields(
         match = re.search(r"оплат[а-я\s]{0,80}в\s+течение\s+(\d+)\s*(?:рабоч|календарн)?\s*д", deterministic_text, re.I)
         if match:
             _set(fields, meta, "paymentDelayDays", int(match.group(1)), "Fallback validation", "high", match.group(0))
-    if re.search(r"по\s+заявк|партиями|график(?:у|а)?\s+поставки", deterministic_text, re.I):
-        _set(fields, meta, "deliveryType", "by_requests", "Fallback validation", "high", "Поставка партиями/по заявкам")
-        if not fields.get("deliveryNote"):
-            _set(fields, meta, "deliveryNote", "Поставка партиями/по заявкам", "Fallback validation", "high", "Поставка партиями/по заявкам")
+    delivery_type = _normalize_delivery_type(fields.get("deliveryType"))
+    if delivery_type is None:
+        if re.search(r"по\s+заявк|партиями|график(?:у|а)?\s+поставки|разнаряд", deterministic_text, re.I):
+            delivery_type = "by_requests"
+        elif fields.get("deliveryDate"):
+            delivery_type = "single_date"
+        elif fields.get("deliveryDays"):
+            delivery_type = "during_period"
+    if delivery_type:
+        _set(
+            fields,
+            meta,
+            "deliveryType",
+            delivery_type,
+            "Документы / условия отгрузки",
+            "high" if "deliveryType" not in meta else meta["deliveryType"].get("confidence", "medium"),
+            str(meta.get("deliveryType", {}).get("evidence") or "Условие поставки"),
+        )
 
     lot_text = f"{fields.get('lotDivisible', '')} {meta.get('lotDivisible', {}).get('evidence', '')}"
     direct_lot = re.search(r"лот\s+неделим|делени[ея]\s+лота\s+не\s+допуска|лот\s+делим|подач[а-я]+\s+на\s+част[ьи]\s+лота", lot_text, re.I)

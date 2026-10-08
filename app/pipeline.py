@@ -654,10 +654,9 @@ class TenderPipeline:
             }
             if self.settings.yandex_disk_token is not None:
                 tender_id = job.seldon_id or job.etp_id or job.job_record_key
-                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
                 filename = safe_filename(
-                    f"autopodbor_{tender_id}_{timestamp}.xlsx",
-                    f"autopodbor_{timestamp}.xlsx",
+                    f"autopodbor_{tender_id}.xlsx",
+                    "autopodbor.xlsx",
                 )
                 try:
                     workbook = build_product_matching_workbook(
