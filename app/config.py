@@ -94,6 +94,8 @@ class Settings(BaseSettings):
     consolidation_timeout_seconds: float | None = Field(default=180, gt=0)
     product_extraction_timeout_seconds: float | None = Field(default=90, gt=0)
     product_characteristic_timeout_seconds: float | None = Field(default=120, gt=0)
+    table_schema_timeout_seconds: float | None = Field(default=75, gt=0)
+    table_schema_llm_max_attempts: int = Field(default=1, ge=1, le=3)
     catalog_selection_timeout_seconds: float | None = Field(default=45, gt=0)
     final_decision_timeout_seconds: float | None = Field(default=60, gt=0)
     ocr_timeout_seconds: float | None = Field(default=360, gt=0)
@@ -126,8 +128,15 @@ class Settings(BaseSettings):
     # structured JSON calls in non-thinking mode unless explicitly overridden.
     llm_reasoning_effort: str = "none"
     product_audit_reasoning_effort: str = "none"
+    # Table-schema classification is deliberately separate from the product
+    # audit: column mapping needs concise structural judgment, not long-form
+    # reasoning about individual positions.
+    table_schema_reasoning_effort: str = "none"
     table_schema_audit_enabled: bool = True
-    table_schema_llm_max_tables: int = Field(default=24, ge=0, le=100)
+    table_schema_llm_max_tables: int = Field(default=12, ge=0, le=100)
+    table_schema_audit_max_seconds: float = Field(default=240, ge=0)
+    table_schema_profile_max_cell_chars: int = Field(default=320, ge=80, le=4_000)
+    table_schema_profile_max_chars: int = Field(default=20_000, ge=2_000, le=100_000)
     table_schema_min_confidence: float = Field(default=0.75, ge=0, le=1)
     catalog_selection_model: str = "openai/gpt-oss-120b"
     catalog_selection_fallback_models: str = "qwen/qwen3.7-flash,qwen/qwen3.5-flash-02-23"
@@ -288,6 +297,8 @@ class Settings(BaseSettings):
             return self.final_decision_timeout_seconds
         if normalized in {"classify_product_characteristics", "classify_sku_importance"}:
             return self.product_characteristic_timeout_seconds
+        if normalized == "classify_spreadsheet_table_schema":
+            return self.table_schema_timeout_seconds
         if normalized in {
             "extract_tender_products",
             "audit_product_candidates",

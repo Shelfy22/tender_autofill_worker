@@ -307,6 +307,25 @@ class TenderPosition(BaseModel):
     searchCategoryCode: str = "other"
     searchQueries: list[str] = Field(default_factory=list, max_length=4)
 
+    @field_validator(
+        "candidateId",
+        "positionKey",
+        "lotNumber",
+        "positionNumber",
+        "model",
+        "brand",
+        "article",
+        "unit",
+        "evidence",
+        "requirements",
+        "source",
+        "documentPriceEvidence",
+        mode="before",
+    )
+    @classmethod
+    def normalize_nullable_position_strings(cls, value: Any) -> str:
+        return str(value or "").strip()
+
     @field_validator("sourceCells", mode="before")
     @classmethod
     def normalize_source_cells(cls, value: Any) -> dict[str, str]:
@@ -499,6 +518,39 @@ class DocumentAnalysisResponse(BaseModel):
     fieldCandidates: list[DocumentFieldCandidate] = Field(default_factory=list, max_length=80)
     analysisIncomplete: bool = False
     warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_invalid_llm_product_rows(cls, value: Any) -> Any:
+        """Do not discard an entire document result because one LLM row is malformed."""
+        if not isinstance(value, dict) or not isinstance(value.get("products"), list):
+            return value
+        normalized = dict(value)
+        products: list[dict[str, Any]] = []
+        skipped = 0
+        for raw in value["products"]:
+            if isinstance(raw, TenderPosition):
+                products.append(raw.model_dump(mode="json"))
+                continue
+            if not isinstance(raw, dict):
+                skipped += 1
+                continue
+            item = dict(raw)
+            product = item.get("product") or item.get("productName") or item.get("name")
+            if not str(product or "").strip():
+                skipped += 1
+                continue
+            item["product"] = str(product).strip()
+            for field in ("positionNumber", "lotNumber", "candidateId", "positionKey", "model", "brand", "article"):
+                if item.get(field) is None:
+                    item[field] = ""
+            products.append(item)
+        normalized["products"] = products
+        if skipped:
+            warnings = list(normalized.get("warnings") or [])
+            warnings.append(f"Skipped {skipped} malformed product rows from document LLM response.")
+            normalized["warnings"] = warnings
+        return normalized
 
 
 class DocumentAnalysisResult(DocumentAnalysisResponse):

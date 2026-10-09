@@ -48,6 +48,16 @@ def test_table_schema_profile_is_bounded_and_contains_column_statistics() -> Non
     ] == 0.5
 
 
+def test_table_schema_profile_clips_long_cells_and_total_payload() -> None:
+    table = _price_table()
+    table.rows[1].cells["C"] = "x" * 4_000
+
+    profile = build_table_schema_profile(table, max_cell_chars=120, max_chars=1_000)
+
+    assert len(profile["sampleRows"][1]["cells"]["C"]) <= 120
+    assert len(str(profile)) <= 1_500
+
+
 def test_table_schema_overrides_parser_headers_only_when_confident() -> None:
     table = _price_table()
     schema = SpreadsheetTableSchemaResponse(
@@ -96,6 +106,11 @@ def test_table_schema_uses_product_audit_reasoning_llm_method() -> None:
         table_schema_audit_enabled=True,
         table_schema_llm_max_tables=1,
         table_schema_min_confidence=0.75,
+        table_schema_audit_max_seconds=240,
+        table_schema_timeout_seconds=75,
+        table_schema_llm_max_attempts=1,
+        table_schema_profile_max_cell_chars=320,
+        table_schema_profile_max_chars=20_000,
     )
     tables, warnings, debug = classify_spreadsheet_tables(StubLlm(), [_price_table()], settings)
 

@@ -336,10 +336,18 @@ class LlmClient:
         return {"models": models[1:]}
 
     def _reasoning_effort(self, operation: str) -> str:
+        if operation == "classify_spreadsheet_table_schema":
+            return str(
+                getattr(
+                    self.settings,
+                    "table_schema_reasoning_effort",
+                    self.settings.llm_reasoning_effort,
+                )
+                or "none"
+            )
         if operation in {
             "audit_product_candidates",
             "validate_final_product_matches",
-            "classify_spreadsheet_table_schema",
         }:
             return str(
                 getattr(
@@ -604,6 +612,7 @@ class LlmClient:
         operation: str = "structured_json",
         audit_details: dict[str, Any] | None = None,
         model_chain: list[str] | None = None,
+        max_attempts_override: int | None = None,
     ) -> T:
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
         request_timeout = self.settings.timeout_for(operation) or self.settings.llm_timeout_seconds
@@ -617,7 +626,7 @@ class LlmClient:
         input_chars = len(prompt) + len(system)
         schema_chars = len(schema_json)
         last_error: Exception | None = None
-        max_attempts = max(1, int(self.settings.llm_max_attempts_per_unit))
+        max_attempts = max(1, int(max_attempts_override or self.settings.llm_max_attempts_per_unit))
         models = list(model_chain or self.model_chain or [self.model])[:max_attempts]
         primary_model = models[0]
         for index, model in enumerate(models):
@@ -952,6 +961,7 @@ Table profile:
             prompt=prompt,
             schema=SpreadsheetTableSchemaResponse,
             operation="classify_spreadsheet_table_schema",
+            max_attempts_override=self.settings.table_schema_llm_max_attempts,
         )
 
 
