@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from math import ceil
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -70,6 +71,36 @@ _PAYMENT_DELAY_PATTERN = re.compile(
     r"[\s\S]{0,80}?(\d{1,4})\s*(?:рабоч(?:их|ие)?|календарн(?:ых|ые)?)?\s*д",
     re.IGNORECASE,
 )
+_PAYMENT_TERM_CONTEXT_PATTERN = re.compile(
+    r"(?:\u043e\u0442\u0441\u0440\u043e\u0447\w*\s+(?:\u043f\u043b\u0430\u0442\u0435\u0436\w*|\u043e\u043f\u043b\u0430\u0442\w*)|"
+    r"\u043e\u043f\u043b\u0430\u0442\w*(?:(?![.;\n]).){0,80}?"
+    r"(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435|\u043d\u0435\s+\u043f\u043e\u0437\u0434\u043d\u0435\u0435|\u043f\u043e\u0441\u043b\u0435))"
+    r"[^.\n]{0,180}",
+    re.IGNORECASE,
+)
+_PAYMENT_DELAY_VALUE_PATTERN = re.compile(
+    r"(?<!\d)(\d{1,4})\s*(?:(?:-|\u2013|\u2014|\u0434\u043e)\s*(\d{1,4}))?\s*"
+    r"(\u0440\u0430\u0431\u043e\u0447\w*|\u043a\u0430\u043b\u0435\u043d\u0434\u0430\u0440\u043d\w*)?\s*"
+    r"\u0434\u043d(?:\u0435\u0439|\u044f)?\b",
+    re.IGNORECASE,
+)
+_CONTRACT_EXPIRY_DATE_PATTERN = re.compile(
+    r"(?:\u0441\u0440\u043e\u043a\s+\u0434\u0435\u0439\u0441\u0442\u0432\w*\s+\u0434\u043e\u0433\u043e\u0432\u043e\u0440\w*|"
+    r"\u0434\u043e\u0433\u043e\u0432\u043e\u0440\w*[^.\n]{0,120}?\u0434\u0435\u0439\u0441\u0442\u0432\w*)"
+    r"[^.\n]{0,180}?(?:\u0434\u043e|\u043f\u043e)\s*(\d{1,2}\.\d{1,2}\.\d{4})",
+    re.IGNORECASE,
+)
+_NATIONAL_REGIME_CONTEXT_PATTERN = re.compile(
+    r"(?:\u043d\u0430\u0446\u0438\u043e\u043d\u0430\u043b\u044c\u043d\w*\s+\u0440\u0435\u0436\u0438\u043c|"
+    r"\u043f\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0438\w*\s*№?\s*1875|"
+    r"\u043f\u043f\s*№?\s*1875)",
+    re.IGNORECASE,
+)
+_NATIONAL_REGIME_PATTERNS = (
+    ("ban", re.compile(r"\u0437\u0430\u043f\u0440\u0435\u0442\w*", re.IGNORECASE)),
+    ("restriction", re.compile(r"\u043e\u0433\u0440\u0430\u043d\u0438\u0447\w*", re.IGNORECASE)),
+    ("preference", re.compile(r"\u043f\u0440\u0435\u0438\u043c\u0443\u0449\u0435\u0441\u0442\u0432\w*", re.IGNORECASE)),
+)
 _SECURITY_VALUE_PATTERN = re.compile(r"\d")
 _NON_NUMERIC_SECURITY_VALUE_PATTERN = re.compile(
     r"^(?:не\s+(?:требуется|установлен[ао]?|предусмотрен[ао]?)|отсутствует|без\s+обеспечения)\b",
@@ -108,13 +139,54 @@ def _explicit_commercial_fields(text: str) -> dict[str, tuple[Any, str]]:
     patterns: tuple[tuple[str, re.Pattern[str], Any], ...] = (
         ("deliveryDays", _DELIVERY_DAYS_PATTERN, lambda match: int(match.group(1))),
         ("deliveryDate", _DELIVERY_DATE_PATTERN, lambda match: _normalize_date(match.group(1))),
-        ("paymentDelayDays", _PAYMENT_DELAY_PATTERN, lambda match: int(match.group(1))),
     )
     for field, pattern, value_factory in patterns:
         match = pattern.search(normalized)
         if match is not None:
             result[field] = (value_factory(match), match.group(0)[:500])
     return result
+
+
+def _payment_delay_from_text(text: str) -> tuple[int, str] | None:
+    """Return the largest stated payment delay as calendar days.
+
+    Tender documents commonly contain separate terms for SMEs and other
+    suppliers, or a range such as ``30-60 days``. The card needs the longest
+    permissible delay. Working days are converted using the business rule
+    ``ceil(days * 1.4)``; explicitly calendar days are left as-is.
+    """
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    candidates: list[tuple[int, str]] = []
+    for context_match in _PAYMENT_TERM_CONTEXT_PATTERN.finditer(normalized):
+        evidence = context_match.group(0).strip()
+        for value_match in _PAYMENT_DELAY_VALUE_PATTERN.finditer(evidence):
+            lower, upper, unit = value_match.groups()
+            days = max(int(lower), int(upper or lower))
+            if unit and unit.casefold().startswith("\u0440\u0430\u0431\u043e\u0447"):
+                days = ceil(days * 1.4)
+            candidates.append((days, evidence[:500]))
+    return max(candidates, key=lambda candidate: candidate[0]) if candidates else None
+
+
+def _contract_expiry_date(text: str) -> tuple[str, str] | None:
+    """Find the contract expiry date for the delivery-date fallback."""
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    match = _CONTRACT_EXPIRY_DATE_PATTERN.search(normalized)
+    if match is None:
+        return None
+    return _normalize_date(match.group(1)), match.group(0)[:500]
+
+
+def _national_regime_from_text(text: str) -> tuple[str, str] | None:
+    """Resolve mixed national-regime tables by the required priority."""
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not _NATIONAL_REGIME_CONTEXT_PATTERN.search(normalized):
+        return None
+    for regime, pattern in _NATIONAL_REGIME_PATTERNS:
+        match = pattern.search(normalized)
+        if match is not None:
+            return regime, match.group(0)[:500]
+    return None
 
 
 def _has_explicit_delivery_deadline_evidence(evidence: Any) -> bool:
@@ -184,15 +256,33 @@ def _structured_submission_deadline(job: NormalizedJob) -> tuple[str | None, str
 def _structured_result_date(job: NormalizedJob) -> tuple[str | None, str]:
     """Take the result date only from Seldon/Daily, not document LLM output."""
     purchase = job.seldon_purchase if isinstance(job.seldon_purchase, dict) else {}
-    values = (
+    values: list[Any] = [
         purchase.get("resultDate"),
         purchase.get("dateResult"),
+        purchase.get("dateResults"),
         purchase.get("summarizingDate"),
+        purchase.get("summarizeDate"),
         purchase.get("dateSummingUp"),
+        purchase.get("dateOfSummingUp"),
+        purchase.get("summarizationDate"),
         purchase.get("protocolDate"),
         purchase.get("protocolPublishDate"),
         job.report_fields.get("Дата подведения итогов"),
-    )
+    ]
+    # Different Seldon exports use several names for this same date. Scan
+    # scalar fields too, while keeping the source restricted to Seldon/Daily.
+    for source in (purchase, job.report_fields):
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            key_text = str(key).casefold().replace("_", "").replace(" ", "")
+            if not any(
+                marker in key_text
+                for marker in ("result", "summar", "подвед", "итог")
+            ):
+                continue
+            if not isinstance(value, (dict, list, tuple, set)):
+                values.append(value)
     for value in values:
         if value is None or str(value).strip() == "":
             continue
@@ -404,17 +494,33 @@ def validate_fields(
     if not fields.get("specialAccount"):
         special = goz or "спецсчет" in text_lower
         _set(fields, meta, "specialAccount", "yes" if special else "no", "Проверка спецсчёта", "high" if special else "medium", "Признаки спецсчёта найдены" if special else "Признаки не найдены")
-    if not fields.get("nationalRegime"):
-        if "1875" in text_lower or "национальный режим" in text_lower:
-            regime = "preference" if "преимущество" in text_lower else "ban" if "запрет" in text_lower else "restriction"
-        else:
-            regime = "none"
-        _set(fields, meta, "nationalRegime", regime, "Fallback validation", "medium", "Проверка национального режима")
+    national_regime = _national_regime_from_text(deterministic_text)
+    if national_regime:
+        regime, evidence = national_regime
+        _set(
+            fields,
+            meta,
+            "nationalRegime",
+            regime,
+            "Документы / приоритет национального режима",
+            "high",
+            evidence,
+        )
+    elif not fields.get("nationalRegime"):
+        _set(fields, meta, "nationalRegime", "none", "Fallback validation", "medium", "Проверка национального режима")
 
-    if not fields.get("paymentDelayDays"):
-        match = re.search(r"оплат[а-я\s]{0,80}в\s+течение\s+(\d+)\s*(?:рабоч|календарн)?\s*д", deterministic_text, re.I)
-        if match:
-            _set(fields, meta, "paymentDelayDays", int(match.group(1)), "Fallback validation", "high", match.group(0))
+    payment_delay = _payment_delay_from_text(deterministic_text)
+    if payment_delay:
+        days, evidence = payment_delay
+        _set(
+            fields,
+            meta,
+            "paymentDelayDays",
+            days,
+            "Документы / максимальная отсрочка оплаты в календарных днях",
+            "high",
+            evidence,
+        )
     delivery_type = _normalize_delivery_type(fields.get("deliveryType"))
     if delivery_type is None:
         if re.search(r"по\s+заявк|партиями|график(?:у|а)?\s+поставки|разнаряд", deterministic_text, re.I):
@@ -433,6 +539,23 @@ def validate_fields(
             "high" if "deliveryType" not in meta else meta["deliveryType"].get("confidence", "medium"),
             str(meta.get("deliveryType", {}).get("evidence") or "Условие поставки"),
         )
+
+    # For deliveries by requests/batches, a term such as "within N days after
+    # a request" belongs to the batch column, not to the general delivery term.
+    if delivery_type == "by_requests":
+        if not fields.get("deliveryBatchDays") and fields.get("deliveryDays"):
+            delivery_days_meta = meta.get("deliveryDays", {})
+            _set(
+                fields,
+                meta,
+                "deliveryBatchDays",
+                fields["deliveryDays"],
+                "Документы / срок поставки партии",
+                delivery_days_meta.get("confidence", "high"),
+                str(delivery_days_meta.get("evidence") or "Срок поставки по заявке"),
+            )
+        fields.pop("deliveryDays", None)
+        meta.pop("deliveryDays", None)
 
     lot_text = f"{fields.get('lotDivisible', '')} {meta.get('lotDivisible', {}).get('evidence', '')}"
     direct_lot = re.search(r"лот\s+неделим|делени[ея]\s+лота\s+не\s+допуска|лот\s+делим|подач[а-я]+\s+на\s+част[ьи]\s+лота", lot_text, re.I)
@@ -458,6 +581,23 @@ def validate_fields(
             f"{key} отброшен: в evidence нет прямой связи со сроком поставки. "
             f"Фрагмент: {evidence_preview}"
         )
+
+    # The business rule for the final export: if the tender does not state a
+    # concrete delivery end date, use the explicit expiry date of the contract.
+    # It is intentionally applied after rejecting LLM guesses above.
+    if not fields.get("deliveryDate"):
+        expiry = _contract_expiry_date(deterministic_text)
+        if expiry:
+            expiry_date, evidence = expiry
+            _set(
+                fields,
+                meta,
+                "deliveryDate",
+                expiry_date,
+                "Документы / дата окончания действия договора как срок поставки",
+                "high",
+                evidence,
+            )
 
     for key in ("dateCreated", "submissionDeadlineDate", "resultDate", "contractDate", "deliveryDate", "tenderSubmittedDate", "tenderWonDate"):
         if fields.get(key):

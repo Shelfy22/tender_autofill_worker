@@ -91,7 +91,7 @@ def test_direct_delivery_and_payment_terms_fill_missing_llm_fields() -> None:
 
     assert fields["deliveryDays"] == 28
     assert fields["deliveryDate"] == "2026-04-30"
-    assert fields["paymentDelayDays"] == 10
+    assert fields["paymentDelayDays"] == 14
     assert all(meta[key]["confidence"] == "high" for key in (
         "deliveryDays", "deliveryDate", "paymentDelayDays",
     ))
@@ -150,7 +150,7 @@ def test_direct_security_and_warranty_terms_fill_missing_llm_fields() -> None:
     ))
 
 
-def test_contract_validity_date_is_not_delivery_date() -> None:
+def test_contract_validity_date_fills_delivery_date_when_no_direct_deadline() -> None:
     extracted = ExtractedFieldsResponse(
         fields={
             "deliveryDate": FieldValue(
@@ -165,10 +165,13 @@ def test_contract_validity_date_is_not_delivery_date() -> None:
         }
     )
 
-    fields, meta, warnings = validate_fields(job_with_lot(""), extracted, "", [])
+    text = "Договор вступает в силу со дня подписания его Сторонами и действует до 30.03.2028."
+    fields, meta, warnings = validate_fields(job_with_lot(""), extracted, text, [])
 
-    assert "deliveryDate" not in fields
-    assert "deliveryDate" not in meta
+    assert fields["deliveryDate"] == "2028-03-30"
+    assert meta["deliveryDate"]["source"] == (
+        "Документы / дата окончания действия договора как срок поставки"
+    )
     assert any("deliveryDate отброшен" in warning for warning in warnings)
 
 
@@ -189,3 +192,70 @@ def test_explicit_delivery_deadline_is_preserved() -> None:
     assert fields["deliveryDate"] == "2028-03-30"
     assert meta["deliveryDate"]["source"] == "Техническое задание.docx"
     assert not any("deliveryDate отброшен" in warning for warning in warnings)
+
+
+def test_payment_delay_uses_largest_variant_and_converts_working_days() -> None:
+    text = """
+    Для субъектов МСП оплата производится в течение 30 рабочих дней.
+    Для остальных поставщиков отсрочка платежа составляет от 30 до 60 календарных дней.
+    """
+
+    fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["paymentDelayDays"] == 60
+    assert meta["paymentDelayDays"]["confidence"] == "high"
+
+
+def test_payment_delay_converts_payment_term_in_working_days() -> None:
+    fields, _, _ = validate_fields(
+        job_with_lot(""),
+        None,
+        "Оплата производится в течение 7 рабочих дней после поставки товара.",
+        [],
+    )
+
+    assert fields["paymentDelayDays"] == 10
+
+
+def test_batch_delivery_moves_term_to_batch_delivery_days() -> None:
+    text = "Поставка товара партиями по заявкам заказчика в течение 7 календарных дней."
+
+    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["deliveryType"] == "by_requests"
+    assert fields["deliveryBatchDays"] == 7
+    assert "deliveryDays" not in fields
+
+
+def test_national_regime_uses_highest_priority_from_mixed_table() -> None:
+    text = """
+    Сведения о национальном режиме в соответствии с постановлением № 1875:
+    по одним позициям преимущество, по другим ограничение, по отдельным позициям запрет.
+    """
+
+    fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["nationalRegime"] == "ban"
+    assert meta["nationalRegime"]["source"] == "Документы / приоритет национального режима"
+
+
+def test_national_regime_restriction_beats_preference() -> None:
+    text = "Национальный режим: преимущество для части товаров и ограничение для другой части."
+
+    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["nationalRegime"] == "restriction"
+
+
+def test_result_date_accepts_unlisted_seldon_date_alias() -> None:
+    job = NormalizedJob(
+        job_record_key="daily:b:1:1",
+        batch_id="b",
+        report_id=1,
+        seldon_id="1",
+        seldon_purchase={"resultDateTime": "2026-08-07T09:00:00"},
+    )
+
+    fields, _, _ = validate_fields(job, None, "", [])
+
+    assert fields["resultDate"] == "2026-08-07"

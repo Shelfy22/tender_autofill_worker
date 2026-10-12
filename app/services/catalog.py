@@ -250,7 +250,7 @@ def _characteristic_label(characteristic: dict[str, str]) -> str:
     return f"{characteristic['name']}: {characteristic['value']}"
 
 
-def _finalize_characteristic_audit(
+def _legacy_strict_characteristic_audit(
     selection: CatalogSelection,
     characteristics: list[dict[str, str]],
     candidates: list[dict[str, Any]] | None = None,
@@ -357,6 +357,40 @@ def _finalize_characteristic_audit(
         update={
             "selected_point_id": selected_point_id,
             "correspondence": correspondence,
+            "rationale": rationale,
+            "matched_characteristic_ids": sorted(matched),
+            "missing_characteristic_ids": sorted(missing),
+        }
+    )
+
+
+def _finalize_characteristic_audit(
+    selection: CatalogSelection,
+    characteristics: list[dict[str, str]],
+    candidates: list[dict[str, Any]] | None = None,
+) -> CatalogSelection:
+    """Add characteristic coverage as diagnostics, never as a status override."""
+    del candidates
+    if not characteristics:
+        return selection
+
+    known_ids = {item["id"].casefold(): item["id"] for item in characteristics}
+    matched = _known_selection_ids(selection.matched_characteristic_ids, known_ids)
+    for conflict in selection.conflicting_characteristics:
+        item_id = known_ids.get(conflict.characteristic_id.strip().casefold())
+        if item_id is None:
+            continue
+        requested = next(item["value"] for item in characteristics if item["id"] == item_id)
+        if _catalog_value_matches(requested, conflict.catalog_value):
+            matched.add(item_id)
+
+    missing = set(known_ids.values()) - matched
+    coverage = f"Подтверждено характеристик: {len(matched)} из {len(characteristics)}."
+    rationale = str(selection.rationale or "").strip()
+    if coverage not in rationale:
+        rationale = "\n".join(filter(None, (rationale, coverage)))
+    return selection.model_copy(
+        update={
             "rationale": rationale,
             "matched_characteristic_ids": sorted(matched),
             "missing_characteristic_ids": sorted(missing),
@@ -1052,9 +1086,7 @@ params кандидата — единственный источник подт
 
 В rationale кратко укажи совпавшие и спорные ключевые параметры; не придумывай
 отсутствующие значения. selectedPointId должен быть pointId из normalizedCandidates.
-Верни evaluatedPointId, selectedPointId, correspondence и rationale. evaluatedPointId
-обязателен: это pointId кандидата, чьи params ты проверял, даже если из-за настоящего
-противоречия selectedPointId обязан быть null. Если значение из документа и значение
+Верни selectedPointId, correspondence и rationale. Если значение из документа и значение
 ETM равны, это matchedCharacteristicIds, а не conflictingCharacteristics. Выбирай не по цене.
 For every item in characteristics return its id exactly once in one of the three
 lists: matchedCharacteristicIds, missingCharacteristicIds, or
@@ -1066,22 +1098,29 @@ Candidate-only params are irrelevant.
 
 missingCharacteristicIds means that the corresponding characteristic cannot be
 confirmed from params; it is not a contradiction. conflictingCharacteristics
-contains objects with characteristicId and catalogValue. Put a characteristic
-there only for a direct semantic contradiction, for example document 8 A and
-ETM params 6 A. If at least one contradiction exists, return
-selectedPointId=null and correspondence "Товар не найден". If all ids match,
-return "Полное соответствие". If some ids are missing and none conflict,
-return "Аналог". Do not select a candidate with a contradiction.
+contains objects with characteristicId and catalogValue only as diagnostic
+information for a direct semantic contradiction, for example document 8 A and
+ETM params 6 A. Do not derive correspondence mechanically from these lists.
 
 selectedPointId must be a pointId from normalizedCandidates. Return only
 selectedPointId, correspondence, rationale, matchedCharacteristicIds,
 missingCharacteristicIds, and conflictingCharacteristics. Do not choose by price.
+
+IMPORTANT OVERRIDE FOR correspondence: decide "Полное соответствие", "Аналог", or
+"Товар не найден" semantically for the product as a whole, as before the diagnostic
+characteristic count was introduced. The characteristic ID lists are diagnostics only
+and must not mechanically change the status or force selectedPointId to null.
+Treat a candidate value inside a document range, tolerance, minimum, or maximum as
+compatible. Interpret parameter labels semantically: formatting or an added label
+suffix is not a direct conflict (for example 40 and 40 БГ may describe the same
+specified value in different notation). Mark "Товар не найден" only when the product
+class or an essential requirement is truly incompatible after this semantic review.
 Позиция: {json.dumps(request, ensure_ascii=False)}
 normalizedCandidates: {candidates_json}
 """.strip()
         selection = self.llm.json_call(
             system=(
-                "Выбери pointId товара из каталога. Верни только evaluatedPointId, selectedPointId, "
+                "Выбери pointId товара из каталога. Верни только selectedPointId, "
                 "correspondence, rationale, matchedCharacteristicIds, "
                 "missingCharacteristicIds и conflictingCharacteristics; "
                 "не копируй catalog fields."

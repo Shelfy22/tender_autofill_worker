@@ -547,18 +547,16 @@ def test_characteristic_audit_marks_unclassified_document_specs_as_missing() -> 
         ],
     )
 
-    assert audited.correspondence == "Аналог"
+    assert audited.correspondence == selection.correspondence
     assert audited.matched_characteristic_ids == ["c1"]
     assert audited.missing_characteristic_ids == ["c2"]
     assert "1 из 2" in audited.rationale
-    assert "Напряжение: 220 В" in audited.rationale
 
 
 def test_characteristic_audit_ignores_false_conflict_with_equal_etm_value() -> None:
     selection = CatalogSelection(
-        evaluatedPointId="123",
-        selectedPointId=None,
-        correspondence="Товар не найден",
+        selectedPointId="123",
+        correspondence="Полное соответствие",
         conflictingCharacteristics=[
             {"characteristicId": "c1", "catalogValue": "500"},
             {"characteristicId": "c2", "catalogValue": "10"},
@@ -571,7 +569,6 @@ def test_characteristic_audit_ignores_false_conflict_with_equal_etm_value() -> N
             {"id": "c1", "name": "DN", "value": "500"},
             {"id": "c2", "name": "PN", "value": "10"},
         ],
-        [{"pointId": "123", "params": {"DN": "500", "PN": "10"}}],
     )
 
     assert audited.selected_point_id == "123"
@@ -597,6 +594,8 @@ def test_characteristic_audit_rejects_selected_candidate_with_direct_conflict() 
         ],
     )
 
-    assert audited.correspondence == "Товар не найден"
-    assert audited.selected_point_id is None
-    assert "Ток: 8 А; ETM: 6 А" in audited.rationale
+    assert audited.correspondence == selection.correspondence
+    assert audited.selected_point_id == "123"
+    assert audited.matched_characteristic_ids == ["c1"]
+    assert audited.missing_characteristic_ids == ["c2"]
+    assert "1 из 2" in audited.rationale
