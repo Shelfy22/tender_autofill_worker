@@ -724,6 +724,9 @@ class CatalogCharacteristicConflict(BaseModel):
 
 class CatalogSelection(BaseModel):
     selected_point_id: str | None = Field(default=None, alias="selectedPointId")
+    # Retain the candidate audited by the LLM even if it believes a conflict
+    # makes that candidate unsuitable.
+    evaluated_point_id: str | None = Field(default=None, alias="evaluatedPointId")
     correspondence: Literal["Полное соответствие", "Аналог", "Товар не найден"] = (
         "Товар не найден"
     )
@@ -759,6 +762,11 @@ class CatalogSelection(BaseModel):
             return None
         text = str(value).strip()
         return text or None
+
+    @field_validator("evaluated_point_id", mode="before")
+    @classmethod
+    def normalize_evaluated_point_id(cls, value: Any) -> str | None:
+        return cls.normalize_point_id(value)
 
 
 class ProductMatchItem(BaseModel):
@@ -892,6 +900,9 @@ class SpreadsheetTable(BaseModel):
     headerRows: list[int] = Field(default_factory=list)
     headerMap: dict[str, str] = Field(default_factory=dict)
     headerLabels: dict[str, str] = Field(default_factory=dict)
+    # Kept separately from headerMap: these columns describe a product but do
+    # not define the row identity, quantity, or document price.
+    characteristicColumns: list[str] = Field(default_factory=list)
     rows: list[SpreadsheetRow] = Field(default_factory=list)
     parserWarnings: list[str] = Field(default_factory=list)
     tableRole: str = ""

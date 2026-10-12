@@ -90,6 +90,21 @@ def test_table_schema_rejects_price_as_quantity() -> None:
     assert reason == "price column cannot be quantity column"
 
 
+def test_table_schema_drops_price_like_quantity_mapping() -> None:
+    table = _price_table()
+    schema = SpreadsheetTableSchemaResponse(
+        tableRole="price_list",
+        productColumn="C",
+        quantityColumn="H",
+        confidence=0.92,
+    )
+
+    updated, reason = apply_table_schema(table, schema, min_confidence=0.75)
+
+    assert reason is None
+    assert updated.headerMap == {"product": "C"}
+
+
 def test_table_schema_uses_product_audit_reasoning_llm_method() -> None:
     class StubLlm:
         def classify_spreadsheet_table_schema(self, profile):

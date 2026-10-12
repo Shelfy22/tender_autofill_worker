@@ -37,10 +37,20 @@ _ITEM_TABLE_MARKERS = (
     "номенклатур",
     "техническ",
 )
+_PRICE_CALCULATION_HEADER_PATTERN = re.compile(
+    r"(?:\b\u0446\u0435\u043d\u0430\b|\u0441\u0442\u043e\u0438\u043c\u043e\u0441\u0442|\u0441\u0443\u043c\u043c\u0430|\u043d\u043c\u0446|\u043d\u0434\u0441|"
+    r"\u043a\u043e\u044d\u0444\u0444\u0438\u0446\u0438\u0435\u043d\u0442|\u043e\u0434\u043d\u043e\u0440\u043e\u0434\u043d\u043e\u0441\u0442|\u0440\u0430\u0441\u0447\u0435\u0442|"
+    r"\u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u0435\s+\u043f\u043e\u0441\u0442\u0430\u0432\u0449\u0438\u043a|\u0440\u044b\u043d\u043e\u0447\u043d)",
+    re.IGNORECASE,
+)
 
 
 def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _looks_like_price_calculation_header(value: Any) -> bool:
+    return bool(_PRICE_CALCULATION_HEADER_PATTERN.search(_clean(value)))
 
 
 def _column_order(column: str) -> int:
@@ -273,11 +283,32 @@ def apply_table_schema(
     for column in selected.values():
         if column not in labels:
             labels[column] = column
+    quantity_column = selected.get("quantity", "")
+    quantity_labels = [labels.get(quantity_column, "")]
+    if quantity_column:
+        quantity_labels.extend(
+            row.cells.get(quantity_column, "") for row in table.rows[:12]
+        )
+    if any(_looks_like_price_calculation_header(label) for label in quantity_labels):
+        # Preserve the useful product/price mapping, but never fall back to a
+        # parser guess that would expose a market price as procurement quantity.
+        selected.pop("quantity", None)
+
+    characteristic_columns = [
+        column.strip().upper()
+        for column in schema.characteristicColumns
+        if column and column.strip()
+    ]
+    if any(column not in columns for column in characteristic_columns):
+        return table, "schema characteristic column is unknown"
+    if any(column in selected.values() for column in characteristic_columns):
+        return table, "identity, quantity, or price column cannot be a characteristic column"
     return (
         classified.model_copy(
             update={
                 "headerMap": selected,
                 "headerLabels": labels,
+                "characteristicColumns": characteristic_columns,
             }
         ),
         None,

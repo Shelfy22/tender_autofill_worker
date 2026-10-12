@@ -16,6 +16,15 @@ from app.models import (
 )
 
 
+_PRICE_CALCULATION_CHARACTERISTIC = re.compile(
+    r"(?:\bконтрагент\b|\bпоставщик\b|\bнмц\b|\bцена\b|стоимост|\bсумма\b|"
+    r"однородност|коэффициент|стандартн.*отклонен|вариац|метод\s+сопоставления|"
+    r"коммерческ.*предложен|гарантированн.*объем|номенклатурн.*номер|"
+    r"наименовани.*процедур|^колонка\s+[a-z]{1,3}$)",
+    re.IGNORECASE,
+)
+
+
 def _clean(value: Any) -> str:
     return " ".join(str(value or "").replace("\xa0", " ").split())
 
@@ -303,6 +312,12 @@ def _normalized_characteristic_value(value: Any) -> str:
     return text
 
 
+def _is_price_calculation_characteristic(characteristic: ProductCharacteristic) -> bool:
+    """Exclude market-price calculation data accidentally attached as product specs."""
+    name = _clean(characteristic.name)
+    return bool(name and _PRICE_CALCULATION_CHARACTERISTIC.search(name))
+
+
 def finalize_position_characteristics(
     positions: list[TenderPosition],
 ) -> tuple[list[TenderPosition], list[str], dict[str, Any]]:
@@ -310,10 +325,14 @@ def finalize_position_characteristics(
     warnings: list[str] = []
     conflict_count = 0
     low_confidence_count = 0
+    filtered_calculation_count = 0
     for index, raw_position in enumerate(positions, start=1):
         position = ensure_position_identity(raw_position, ordinal=index)
         by_name: dict[str, list[ProductCharacteristic]] = {}
         for characteristic in position.characteristics:
+            if _is_price_calculation_characteristic(characteristic):
+                filtered_calculation_count += 1
+                continue
             normalized_name = characteristic.normalizedName or canonical_characteristic_name(
                 characteristic.name
             )
@@ -371,4 +390,5 @@ def finalize_position_characteristics(
         "positionCount": len(result),
         "conflictCount": conflict_count,
         "lowConfidenceCharacteristicCount": low_confidence_count,
+        "filteredPriceCalculationCharacteristicCount": filtered_calculation_count,
     }

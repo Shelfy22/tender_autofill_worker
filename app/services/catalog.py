@@ -253,6 +253,7 @@ def _characteristic_label(characteristic: dict[str, str]) -> str:
 def _finalize_characteristic_audit(
     selection: CatalogSelection,
     characteristics: list[dict[str, str]],
+    candidates: list[dict[str, Any]] | None = None,
 ) -> CatalogSelection:
     """Make the LLM's characteristic accounting conservative and reportable.
 
@@ -268,11 +269,17 @@ def _finalize_characteristic_audit(
     matched = _known_selection_ids(selection.matched_characteristic_ids, known_ids)
     missing = _known_selection_ids(selection.missing_characteristic_ids, known_ids)
     conflicts: dict[str, str] = {}
+    false_conflict_ids: set[str] = set()
     for conflict in selection.conflicting_characteristics:
         raw_id = conflict.characteristic_id.strip().casefold()
         item_id = known_ids.get(raw_id)
         if item_id:
-            conflicts[item_id] = conflict.catalog_value.strip()
+            catalog_value = conflict.catalog_value.strip()
+            if _catalog_value_matches(by_id[item_id]["value"], catalog_value):
+                false_conflict_ids.add(item_id)
+                matched.add(item_id)
+            else:
+                conflicts[item_id] = catalog_value
 
     # A contradiction has priority over an optimistic or incomplete LLM label.
     matched -= set(conflicts) | missing
@@ -295,7 +302,31 @@ def _finalize_characteristic_audit(
             }
         )
 
-    if not selection.selected_point_id:
+    selected_point_id = selection.selected_point_id
+    candidate_ids = {
+        str(candidate.get("pointId")): candidate
+        for candidate in candidates or []
+        if candidate.get("pointId") is not None
+    }
+    if not selected_point_id and false_conflict_ids:
+        evaluated = selection.evaluated_point_id
+        if evaluated and evaluated in candidate_ids:
+            selected_point_id = evaluated
+        else:
+            specs = [(item["name"], item["value"]) for item in characteristics]
+            ranked = sorted(
+                (
+                    (_selection_affinity_from_specs(candidate, specs), point_id)
+                    for point_id, candidate in candidate_ids.items()
+                ),
+                reverse=True,
+            )
+            if ranked and ranked[0][0] >= 4 and (
+                len(ranked) == 1 or ranked[0][0] > ranked[1][0]
+            ):
+                selected_point_id = ranked[0][1]
+
+    if not selected_point_id:
         return selection.model_copy(
             update={
                 "correspondence": "Товар не найден",
@@ -324,6 +355,7 @@ def _finalize_characteristic_audit(
 
     return selection.model_copy(
         update={
+            "selected_point_id": selected_point_id,
             "correspondence": correspondence,
             "rationale": rationale,
             "matched_characteristic_ids": sorted(matched),
@@ -368,6 +400,24 @@ def _selection_affinity(
     params = candidate.get("params")
     if not isinstance(params, dict):
         return score
+    for name, value in specs:
+        name_terms = {word for word in _catalog_identity(name).split() if len(word) >= 3}
+        for key, actual in params.items():
+            key_terms = {word for word in _catalog_identity(key).split() if len(word) >= 3}
+            if name_terms & key_terms and _catalog_value_matches(value, actual):
+                score += 2
+                break
+    return score
+
+
+def _selection_affinity_from_specs(
+    candidate: dict[str, Any], specs: list[tuple[str, str]]
+) -> int:
+    """Count only explicit ETM params that confirm document requirements."""
+    params = candidate.get("params")
+    if not isinstance(params, dict):
+        return 0
+    score = 0
     for name, value in specs:
         name_terms = {word for word in _catalog_identity(name).split() if len(word) >= 3}
         for key, actual in params.items():
@@ -1002,7 +1052,10 @@ params кандидата — единственный источник подт
 
 В rationale кратко укажи совпавшие и спорные ключевые параметры; не придумывай
 отсутствующие значения. selectedPointId должен быть pointId из normalizedCandidates.
-Верни только selectedPointId, correspondence и rationale. Выбирай не по цене.
+Верни evaluatedPointId, selectedPointId, correspondence и rationale. evaluatedPointId
+обязателен: это pointId кандидата, чьи params ты проверял, даже если из-за настоящего
+противоречия selectedPointId обязан быть null. Если значение из документа и значение
+ETM равны, это matchedCharacteristicIds, а не conflictingCharacteristics. Выбирай не по цене.
 For every item in characteristics return its id exactly once in one of the three
 lists: matchedCharacteristicIds, missingCharacteristicIds, or
 conflictingCharacteristics. Count a characteristic as matched only when its
@@ -1028,7 +1081,7 @@ normalizedCandidates: {candidates_json}
 """.strip()
         selection = self.llm.json_call(
             system=(
-                "Выбери pointId товара из каталога. Верни только selectedPointId, "
+                "Выбери pointId товара из каталога. Верни только evaluatedPointId, selectedPointId, "
                 "correspondence, rationale, matchedCharacteristicIds, "
                 "missingCharacteristicIds и conflictingCharacteristics; "
                 "не копируй catalog fields."
@@ -1039,7 +1092,7 @@ normalizedCandidates: {candidates_json}
             audit_details=self._position_context,
             model_chain=self.settings.models_for_catalog_selection(),
         )
-        selection = _finalize_characteristic_audit(selection, characteristics)
+        selection = _finalize_characteristic_audit(selection, characteristics, shortlisted)
         selected = next(
             (
                 candidate

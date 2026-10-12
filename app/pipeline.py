@@ -280,6 +280,17 @@ class TenderPipeline:
                 ),
             )
 
+            deterministic_positions, canonicalization_warnings = self._run_stage(
+                "Canonicalize Replicated Table Positions",
+                lambda: merge_positions(
+                    deterministic_positions,
+                    None,
+                    None,
+                    self.settings.max_tender_positions,
+                ),
+            )
+            self.warnings.extend(canonicalization_warnings)
+
             document_analysis_debug: dict[str, Any] = {
                 "enabled": self.settings.enable_document_analysis_pipeline,
                 "tableSchemaAudit": table_schema_debug,

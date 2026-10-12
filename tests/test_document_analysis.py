@@ -417,7 +417,7 @@ def test_document_analysis_merges_technical_characteristics_into_price_position(
     assert debug["removedDuplicateCount"] == 1
     products = compact[0]["products"]
     assert len(products) == 1
-    assert products[0]["sourceReference"]["sectionRole"] == "price_justification"
+    assert products[0]["sourceReference"]["sectionRole"] == "technical_specification"
     assert products[0]["characteristics"][0]["value"] == "40 Вт"
 
 

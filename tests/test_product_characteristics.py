@@ -126,6 +126,25 @@ def test_conflicting_values_from_different_documents_are_marked() -> None:
     assert debug["conflictCount"] == 1
 
 
+def test_finalize_drops_nmc_calculation_fields_but_keeps_gost() -> None:
+    position = TenderPosition(
+        product="Клапан",
+        characteristics=[
+            ProductCharacteristic(name="Контрагент №1", value="12.06"),
+            ProductCharacteristic(name="Метод сопоставления рыночных цен", value="12.55"),
+            ProductCharacteristic(name="Кол-во гарантированный объем", value="100"),
+            ProductCharacteristic(name="Стандарт", value="ГОСТ 19034-82"),
+        ],
+    )
+
+    finalized, _, debug = finalize_position_characteristics([position])
+
+    assert [(item.name, item.value) for item in finalized[0].characteristics] == [
+        ("Стандарт", "ГОСТ 19034-82")
+    ]
+    assert debug["filteredPriceCalculationCharacteristicCount"] == 3
+
+
 def test_category_normalization_covers_distant_assortment_groups() -> None:
     assert normalize_product_category("", "Болт М10") == "fasteners"
     assert normalize_product_category("", "Антифриз красный") == "lubricants_fluids"

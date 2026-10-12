@@ -71,6 +71,16 @@ _CONDITION_POSITION_PATTERN = re.compile(
     r")\s*[.!;:]*\s*$",
     re.IGNORECASE,
 )
+_APPLICATION_REFERENCE_POSITION_PATTERN = re.compile(
+    r"^\s*\*?\s*в\s+соответствии\s+с\s+поданной\s+заявкой(?:\s+участника)?"
+    r"(?:\s*(?:и|,)?\s*приложени[ея].*)?\s*\*?\s*$",
+    re.IGNORECASE,
+)
+_PRODUCT_COPY_TAIL_PATTERN = re.compile(
+    r"(?:\s*[;,.]*\s*\(?\s*(?:или\s+)?(?:эквивалент|аналог)\s*\)?|"
+    r"\s*[;,.]*\s*\(?\s*\*?\s*допустимо\s+изменение\s+наименования\s+товара.*?\)?)\s*$",
+    re.IGNORECASE,
+)
 _PRODUCT_DESCRIPTION_SEPARATOR_PATTERN = re.compile(
     r"^(.{3,300}?):\s*((?:назначение|технические\s+характеристики|"
     r"характеристики|описание)\s*:?.*)$",
@@ -170,6 +180,7 @@ def _is_noise_position(position: TenderPosition) -> bool:
         or _EXAMPLE_POSITION_PATTERN.fullmatch(product)
         or _SERVICE_POSITION_PATTERN.search(product)
         or _CONDITION_POSITION_PATTERN.fullmatch(product)
+        or _APPLICATION_REFERENCE_POSITION_PATTERN.fullmatch(product)
         or _ADDRESS_OR_RECIPIENT_PATTERN.search(product)
         or _is_tender_subject_or_survey_title(position)
     )
@@ -1052,6 +1063,12 @@ def extract_deterministic_positions(
         association_method: str,
         association_confidence: float,
     ) -> list[ProductCharacteristic]:
+        allowed_columns = set(table.characteristicColumns)
+        # A price justification may supply a product title and price, but its
+        # remaining statistical/calculation fields are not product specs. Only
+        # an explicitly classified technical column may be carried forward.
+        if table.tableRole == "price_list" and not allowed_columns:
+            return []
         items: list[ProductCharacteristic] = []
         for column, value in cells.items():
             label = _clean(column_labels.get(column))
@@ -1059,6 +1076,7 @@ def extract_deterministic_positions(
             characteristic_value = _clean(value)
             if (
                 column in ignored_columns
+                or (allowed_columns and column not in allowed_columns)
                 or not characteristic_value
                 or normalized_label in {"№", "no", "n", "номер", "п п", "пп"}
                 or re.search(
@@ -1877,6 +1895,29 @@ def _same_replicated_product(left: TenderPosition, right: TenderPosition) -> boo
     )
 
 
+def _cross_table_product_identity(position: TenderPosition) -> str:
+    """Normalize equivalent table labels without weakening same-table rows."""
+    value = _clean(position.product).casefold().replace("ё", "е")
+    while True:
+        trimmed = _PRODUCT_COPY_TAIL_PATTERN.sub("", value)
+        if trimmed == value:
+            break
+        value = trimmed
+    value = re.sub(r"(\d)\s+([a-zа-я])", r"\1\2", value)
+    value = re.sub(r"\s*([/-])\s*", r"\1", value)
+    return re.sub(r"[^a-zа-я0-9,./-]+", " ", value).strip()
+
+
+def _source_table_scope(position: TenderPosition) -> tuple[str, str]:
+    reference = position.sourceReference
+    if reference is None:
+        return ("", "")
+    return (
+        _word_table_key(reference.fileName),
+        _word_table_key(reference.sheet or reference.table) or "__document_text__",
+    )
+
+
 _GENERIC_NAME_WORDS = {
     "или", "эквивалент", "поставка", "товар", "товары", "для", "с",
     "и", "в", "на", "по", "из", "со",
@@ -2017,6 +2058,11 @@ def _preferred_product_identity(
     # must not replace the table's product identity merely because it is longer.
     if duplicate.source == "llm" and canonical.source != "llm":
         return canonical
+    if (
+        _position_source_role(canonical) == TECHNICAL_ROLE
+        and _position_source_role(duplicate) == "price_justification"
+    ):
+        return canonical
     # A price-list row is already a valid canonical name unless the other
     # structured table explicitly supplies a model or article.
     if (
@@ -2046,6 +2092,10 @@ def _merge_replicated_position_details(
         for item in characteristics
     }
     for characteristic in duplicate.characteristics:
+        # NMC rows can add authoritative document prices, but must never
+        # contaminate a technical product with market-price calculation fields.
+        if _position_source_role(duplicate) == "price_justification":
+            continue
         key = (
             _word_table_key(characteristic.name),
             _word_table_key(characteristic.value),
@@ -2153,7 +2203,7 @@ def _aligned_section_duplicate_pairs(
         used_price_scopes.add(price_scope)
         used_technical_scopes.add(technical_scope)
         pairs.extend(
-            (price_entry[0], technical_entry[0])
+            (technical_entry[0], price_entry[0])
             for price_entry, technical_entry in zip(
                 by_scope[price_scope],
                 by_scope[technical_scope],
@@ -2253,6 +2303,55 @@ def _aligned_replicated_table_pairs(
     return pairs
 
 
+def _merge_partial_cross_table_copies(
+    positions: list[TenderPosition],
+    skipped_indexes: set[int],
+) -> int:
+    """Merge exact product copies split across TЗ, NMC and contract tables.
+
+    Full-table alignment is intentionally not required here: a contract can
+    repeat only part of a price list. Rows from one source table are never
+    merged with each other, preserving repeated purchase positions.
+    """
+    groups: dict[tuple[str, float | None, str], dict[tuple[str, str], list[tuple[int, TenderPosition]]]] = {}
+    for index, position in enumerate(positions):
+        if index in skipped_indexes or position.sourceReference is None:
+            continue
+        identity = _cross_table_product_identity(position)
+        scope = _source_table_scope(position)
+        if not identity or not scope[0]:
+            continue
+        groups.setdefault(
+            (identity, position.quantity, _position_unit_key(position.unit)), {}
+        ).setdefault(scope, []).append((index, position))
+
+    merged_count = 0
+    for scopes in groups.values():
+        if len(scopes) < 2:
+            continue
+        ordered_scopes = sorted(
+            scopes,
+            key=lambda scope: (
+                min(source_role_priority(_position_source_role(position)) for _, position in scopes[scope]),
+                min(index for index, _ in scopes[scope]),
+            ),
+        )
+        canonical_entries = list(scopes[ordered_scopes[0]])
+        for duplicate_scope in ordered_scopes[1:]:
+            for offset, (duplicate_index, duplicate) in enumerate(scopes[duplicate_scope]):
+                if offset >= len(canonical_entries):
+                    # Keep an unmatched occurrence: it may be a real repeated
+                    # row in the other table.
+                    continue
+                canonical_index, canonical = canonical_entries[offset]
+                canonical = _merge_replicated_position_details(canonical, duplicate)
+                positions[canonical_index] = canonical
+                canonical_entries[offset] = (canonical_index, canonical)
+                skipped_indexes.add(duplicate_index)
+                merged_count += 1
+    return merged_count
+
+
 def _deduplicate_cross_document_positions(
     positions: list[TenderPosition],
 ) -> tuple[list[TenderPosition], list[str]]:
@@ -2269,8 +2368,8 @@ def _deduplicate_cross_document_positions(
     if aligned_pairs:
         warnings.append(
             "Paired replicated price-justification and technical-specification "
-            "rows by aligned position order; retained the price list and merged "
-            "technical characteristics."
+            "rows by aligned position order; retained the technical row and "
+            "merged NMC price data."
         )
 
     table_pairs = _aligned_replicated_table_pairs(positions, skipped_indexes)
@@ -2284,6 +2383,13 @@ def _deduplicate_cross_document_positions(
         warnings.append(
             "Merged replicated table copies after aligned row order, quantity, "
             "unit, and stable product identities were confirmed."
+        )
+
+    partial_copy_count = _merge_partial_cross_table_copies(positions, skipped_indexes)
+    if partial_copy_count:
+        warnings.append(
+            "Merged partial copies across technical specification, price justification, "
+            "and contract tables by normalized product identity, quantity, and unit."
         )
 
     # Some tenders repeat only two or three technical positions. The generic

@@ -110,6 +110,14 @@ def run_product_matching_from_files(
                 text_document_tables,
             )
 
+            deterministic_positions, canonicalization_warnings = merge_positions(
+                deterministic_positions,
+                None,
+                None,
+                settings.max_tender_positions,
+            )
+            warnings.extend(canonicalization_warnings)
+
             units, unit_warnings = build_document_analysis_units(
                 "",
                 parsed_documents,

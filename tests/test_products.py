@@ -429,7 +429,7 @@ def test_merge_keeps_same_file_rows_and_prefers_nmck_copy_across_files() -> None
         and "\u041d\u041c\u0426" in position.sourceReference.fileName
         for position in merged
     )
-    assert any("replicated product rows" in warning for warning in warnings)
+    assert any("partial copies" in warning for warning in warnings)
 
 
 def test_merge_uses_price_list_and_adds_characteristics_from_technical_section() -> None:
@@ -468,9 +468,71 @@ def test_merge_uses_price_list_and_adds_characteristics_from_technical_section()
 
     assert len(merged) == 1
     assert merged[0].sourceReference is not None
-    assert merged[0].sourceReference.sectionRole == "price_justification"
+    assert merged[0].sourceReference.sectionRole == "technical_specification"
     assert [item.value for item in merged[0].characteristics] == ["40 Вт"]
     assert any("replicated product rows" in warning for warning in warnings)
+
+
+def test_partial_copies_keep_technical_position_and_price_details() -> None:
+    technical = TenderPosition(
+        product="Fuse link PN2-100 / 31.5 A copper blades",
+        quantity=30,
+        unit="pcs",
+        characteristics=[ProductCharacteristic(name="Current", value="31.5 A")],
+        sourceReference={
+            "fileName": "technical.docx",
+            "table": "Table 1",
+            "row": 16,
+            "sectionRole": "technical_specification",
+        },
+    )
+    price = TenderPosition(
+        product="Fuse link; PN2-100/31.5A; copper blades",
+        quantity=30,
+        unit="pcs",
+        documentUnitPriceRub=123.45,
+        sourceReference={
+            "fileName": "nmcd.xlsx",
+            "sheet": "Prices",
+            "row": 24,
+            "sectionRole": "price_justification",
+        },
+    )
+    contract = TenderPosition(
+        product=(
+            "Fuse link PN2-100/31.5 A copper blades; "
+            "(\u0438\u043b\u0438 \u044d\u043a\u0432\u0438\u0432\u0430\u043b\u0435\u043d\u0442); "
+            "(*\u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u043e \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 "
+            "\u043d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u044f \u0442\u043e\u0432\u0430\u0440\u0430)"
+        ),
+        quantity=30,
+        unit="pcs",
+        sourceReference={
+            "fileName": "contract.docx",
+            "table": "Table 1",
+            "row": 16,
+            "sectionRole": "contract",
+        },
+    )
+    note = TenderPosition(
+        product=(
+            "\u0412 \u0441\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0438 \u0441 \u043f\u043e\u0434\u0430\u043d\u043d\u043e\u0439 "
+            "\u0437\u0430\u044f\u0432\u043a\u043e\u0439 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430 \u0438 \u041f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435\u043c \u21161"
+        ),
+        quantity=30,
+        unit="pcs",
+        sourceReference={"fileName": "contract.docx", "table": "Table 4", "row": 16},
+    )
+
+    merged, warnings = merge_positions([technical, price, contract, note], None)
+
+    assert len(merged) == 1
+    assert merged[0].product == technical.product
+    assert merged[0].documentUnitPriceRub == 123.45
+    assert [item.value for item in merged[0].characteristics] == ["31.5 A"]
+    assert len(merged[0].sourceReferences) == 3
+    assert any("partial copies" in warning for warning in warnings)
+    assert any("служебная строка" in warning for warning in warnings)
 
 
 def test_repeated_names_are_paired_between_price_and_technical_sections() -> None:
@@ -568,7 +630,7 @@ def test_aligned_sections_merge_a_small_number_of_different_product_labels() -> 
 
     merged, warnings = merge_positions(technical_positions + price_positions, None)
 
-    assert [position.product for position in merged] == price_names
+    assert [position.product for position in merged] == technical_names
     assert [
         position.characteristics[0].value for position in merged
     ] == ["10 Вт", "20 Вт", "30 Вт", "40 Вт", "50 Вт"]
@@ -709,7 +771,7 @@ def test_aligned_table_copies_across_documents_merge_into_one_canonical_position
     merged, warnings = merge_positions(positions, None)
 
     assert len(merged) == 2
-    assert [position.product for position in merged] == [row[0] for row in price_rows]
+    assert [position.product for position in merged] == [row[0] for row in technical_rows]
     assert [position.documentUnitPriceRub for position in merged] == [123_000, 55_000]
     assert [position.characteristics[0].value for position in merged] == ["sealed", "oil"]
     assert all(len(position.sourceReferences) == 2 for position in merged)
@@ -803,10 +865,10 @@ def test_short_replicated_power_transformer_tables_are_merged_by_series_and_capa
 
     assert len(merged) == 2
     assert {position.product for position in merged} == {
-        "Трансформатор ТМГФ-1000/10-11 УХЛ1 D/Yн-11",
-        "Трансформатор ТМГ-250/10-11 УХЛ1 Y/Yн-0",
+        positions[2].product,
+        positions[3].product,
     }
-    assert any("power-transformer" in warning for warning in warnings)
+    assert any("replicated table" in warning for warning in warnings)
 
 
 def test_variants_from_same_source_row_are_merged_when_product_stems_match() -> None:
@@ -1661,6 +1723,36 @@ def test_price_list_uses_brief_material_text_and_keeps_price_out_of_quantity() -
     assert positions[0].sourceReference is not None
     assert positions[0].sourceReference.productColumn == "C"
     assert positions[0].sourceReference.quantityColumn == ""
+
+
+def test_price_list_does_not_turn_calculation_columns_into_characteristics() -> None:
+    positions = extract_deterministic_positions(
+        "",
+        [
+            {
+                "fileName": "nmc.xlsx",
+                "sheet": "Расчет НМЦ",
+                "tableRole": "price_list",
+                "headerRows": [1],
+                "headerMap": {"product": "B", "unit": "C", "quantity": "D"},
+                "headerLabels": {
+                    "product": "Наименование товара",
+                    "unit": "Ед. изм.",
+                    "quantity": "Количество",
+                    "E": "Цена предложения поставщика",
+                    "F": "Однородность совокупности цен",
+                },
+                "rows": [
+                    {"row": 1, "cells": {"B": "Наименование товара", "C": "Ед. изм.", "D": "Количество", "E": "Цена", "F": "Однородность"}},
+                    {"row": 2, "cells": {"B": "Реле", "C": "шт", "D": "2", "E": "76265.81", "F": "13.36"}},
+                ],
+            }
+        ],
+    )
+
+    assert len(positions) == 1
+    assert positions[0].characteristics == []
+    assert positions[0].quantity == 2
 
 
 def test_excel_continuation_row_enriches_previous_position() -> None:

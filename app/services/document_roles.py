@@ -66,12 +66,15 @@ def classify_document_role(*values: Any) -> str:
 def source_role_priority(role: Any) -> int:
     normalized = _normalized(role)
     return {
-        PRICE_ROLE: 0,
-        "price justification": 0,
-        TECHNICAL_ROLE: 1,
-        "technical specification": 1,
-        "technical": 1,
-        "specification": 1,
+        # The technical specification is the source of truth for the product
+        # identity and requirements. Price justification supplements price and
+        # positions absent from the technical specification.
+        TECHNICAL_ROLE: 0,
+        "technical specification": 0,
+        "technical": 0,
+        "specification": 0,
+        PRICE_ROLE: 1,
+        "price justification": 1,
         COMPOSITE_ROLE: 2,
         OTHER_ROLE: 3,
         "document": 3,
