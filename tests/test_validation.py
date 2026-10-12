@@ -202,19 +202,48 @@ def test_payment_delay_uses_largest_variant_and_converts_working_days() -> None:
 
     fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
 
-    assert fields["paymentDelayDays"] == 60
+    assert fields["paymentDelayDays"] == 84
     assert meta["paymentDelayDays"]["confidence"] == "high"
 
 
-def test_payment_delay_converts_payment_term_in_working_days() -> None:
+def test_payment_delay_converts_payment_term_days() -> None:
     fields, _, _ = validate_fields(
         job_with_lot(""),
         None,
-        "Оплата производится в течение 7 рабочих дней после поставки товара.",
+        "Оплата производится в течение 7 дней после поставки товара.",
         [],
     )
 
     assert fields["paymentDelayDays"] == 10
+
+
+def test_payment_delay_recognizes_settlement_wording() -> None:
+    fields, _, _ = validate_fields(
+        job_with_lot(""),
+        None,
+        "Расчёты производятся в течение 30 рабочих дней после приемки товара.",
+        [],
+    )
+
+    assert fields["paymentDelayDays"] == 42
+
+
+def test_payment_delay_converts_llm_value_when_text_is_fragmented() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "paymentDelayDays": FieldValue(
+                value=7,
+                confidence="high",
+                source="Договор.docx",
+                evidence="Оплата производится в течение 7 дней после поставки.",
+            )
+        }
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert fields["paymentDelayDays"] == 10
+    assert meta["paymentDelayDays"]["source"] == "LLM evidence / отсрочка переведена по правилу 1.4"
 
 
 def test_batch_delivery_moves_term_to_batch_delivery_days() -> None:

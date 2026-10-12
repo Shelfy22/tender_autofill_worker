@@ -73,7 +73,7 @@ _PAYMENT_DELAY_PATTERN = re.compile(
 )
 _PAYMENT_TERM_CONTEXT_PATTERN = re.compile(
     r"(?:\u043e\u0442\u0441\u0440\u043e\u0447\w*\s+(?:\u043f\u043b\u0430\u0442\u0435\u0436\w*|\u043e\u043f\u043b\u0430\u0442\w*)|"
-    r"\u043e\u043f\u043b\u0430\u0442\w*(?:(?![.;\n]).){0,80}?"
+    r"(?:\u043e\u043f\u043b\u0430\u0442\w*|\u043f\u043b\u0430\u0442\u0451\u0436\w*|\u0440\u0430\u0441\u0447\u0451\u0442\w*)(?:(?![.;\n]).){0,80}?"
     r"(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435|\u043d\u0435\s+\u043f\u043e\u0437\u0434\u043d\u0435\u0435|\u043f\u043e\u0441\u043b\u0435))"
     r"[^.\n]{0,180}",
     re.IGNORECASE,
@@ -152,20 +152,32 @@ def _payment_delay_from_text(text: str) -> tuple[int, str] | None:
 
     Tender documents commonly contain separate terms for SMEs and other
     suppliers, or a range such as ``30-60 days``. The card needs the longest
-    permissible delay. Working days are converted using the business rule
-    ``ceil(days * 1.4)``; explicitly calendar days are left as-is.
+    permissible delay. The business rule converts every stated number of days
+    using ``ceil(days * 1.4)`` because the source documents do not reliably
+    distinguish working and calendar days.
     """
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     candidates: list[tuple[int, str]] = []
     for context_match in _PAYMENT_TERM_CONTEXT_PATTERN.finditer(normalized):
         evidence = context_match.group(0).strip()
         for value_match in _PAYMENT_DELAY_VALUE_PATTERN.finditer(evidence):
-            lower, upper, unit = value_match.groups()
-            days = max(int(lower), int(upper or lower))
-            if unit and unit.casefold().startswith("\u0440\u0430\u0431\u043e\u0447"):
-                days = ceil(days * 1.4)
+            lower, upper, _unit = value_match.groups()
+            days = ceil(max(int(lower), int(upper or lower)) * 1.4)
             candidates.append((days, evidence[:500]))
     return max(candidates, key=lambda candidate: candidate[0]) if candidates else None
+
+
+def _payment_delay_from_field(value: Any, evidence: Any) -> tuple[int, str] | None:
+    """Convert a numeric LLM value when the document text was fragmented.
+
+    It is a safety net for documents where an OCR/parser breaks a payment
+    sentence into fragments and the full-text expression is unavailable.
+    """
+    text = re.sub(r"\s+", " ", str(evidence or "")).strip()
+    match = re.search(r"\d{1,4}", str(value or ""))
+    if match is None:
+        return None
+    return ceil(int(match.group(0)) * 1.4), text[:500]
 
 
 def _contract_expiry_date(text: str) -> tuple[str, str] | None:
@@ -510,6 +522,13 @@ def validate_fields(
         _set(fields, meta, "nationalRegime", "none", "Fallback validation", "medium", "Проверка национального режима")
 
     payment_delay = _payment_delay_from_text(deterministic_text)
+    payment_delay_source = "Документы / максимальная отсрочка оплаты в календарных днях"
+    if not payment_delay:
+        payment_delay = _payment_delay_from_field(
+            fields.get("paymentDelayDays"),
+            meta.get("paymentDelayDays", {}).get("evidence"),
+        )
+        payment_delay_source = "LLM evidence / отсрочка переведена по правилу 1.4"
     if payment_delay:
         days, evidence = payment_delay
         _set(
@@ -517,7 +536,7 @@ def validate_fields(
             meta,
             "paymentDelayDays",
             days,
-            "Документы / максимальная отсрочка оплаты в календарных днях",
+            payment_delay_source,
             "high",
             evidence,
         )
