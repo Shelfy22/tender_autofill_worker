@@ -57,3 +57,27 @@ def test_result_syncs_normalized_lot_divisibility_to_daily_column() -> None:
     assert result["fields"]["lotDivisible"] == "yes"
     assert result["reportFields"]["Лот делимый"] == "Да"
     assert result["reportFields"]["lotDivisible"] == "yes"
+
+
+def test_indivisible_lot_uses_business_label_in_daily_column() -> None:
+    job = NormalizedJob(
+        job_record_key="daily:b:1:42",
+        batch_id="b",
+        report_id=1,
+        seldon_id="42",
+        report_fields={"Лот делимый": ""},
+    )
+
+    result = build_result_json(
+        job,
+        fields={"lotDivisible": "no"},
+        meta={},
+        product_check=None,
+        decision=None,
+        warnings=[],
+        logs=[],
+        debug=None,
+    )
+
+    assert result["reportFields"]["Лот делимый"] == "Неделимый"
+    assert result["fields"]["lotDivisible"] == "Неделимый"

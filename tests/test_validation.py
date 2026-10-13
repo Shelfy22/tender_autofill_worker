@@ -69,9 +69,19 @@ def test_submission_deadline_is_taken_from_seldon_not_document_llm() -> None:
 
 
 def test_batch_delivery_does_not_invent_generic_delivery_note() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="by_requests",
+                confidence="high",
+                source="ТЗ.docx",
+                evidence="Поставка товара осуществляется по заявкам заказчика.",
+            )
+        }
+    )
     fields, _, _ = validate_fields(
         job_with_lot(""),
-        None,
+        extracted,
         "Поставка товара осуществляется по заявкам заказчика.",
         [],
     )
@@ -80,7 +90,7 @@ def test_batch_delivery_does_not_invent_generic_delivery_note() -> None:
     assert "deliveryNote" not in fields
 
 
-def test_direct_delivery_and_payment_terms_fill_missing_llm_fields() -> None:
+def test_direct_payment_term_fills_missing_llm_field() -> None:
     text = """
     Срок поставки товара составляет 28 календарных дней.
     Поставка товара осуществляется не позднее 30.04.2026.
@@ -89,12 +99,8 @@ def test_direct_delivery_and_payment_terms_fill_missing_llm_fields() -> None:
 
     fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
 
-    assert fields["deliveryDays"] == 28
-    assert fields["deliveryDate"] == "2026-04-30"
     assert fields["paymentDelayDays"] == 14
-    assert all(meta[key]["confidence"] == "high" for key in (
-        "deliveryDays", "deliveryDate", "paymentDelayDays",
-    ))
+    assert meta["paymentDelayDays"]["confidence"] == "high"
 
 
 def test_document_result_date_calculates_contract_date() -> None:
@@ -118,23 +124,15 @@ def test_document_result_date_calculates_contract_date() -> None:
     )
 
 
-def test_delivery_type_uses_all_three_business_values() -> None:
-    period, _, _ = validate_fields(
-        job_with_lot(""), None, "Срок поставки товара составляет 15 дней.", []
-    )
-    by_requests, _, _ = validate_fields(
+def test_delivery_type_is_not_invented_from_document_regex() -> None:
+    fields, _, _ = validate_fields(
         job_with_lot(""), None, "Поставка товара осуществляется по разнарядкам.", []
     )
-    by_date, _, _ = validate_fields(
-        job_with_lot(""), None, "Поставка товара осуществляется не позднее 30.04.2026.", []
-    )
 
-    assert period["deliveryType"] == "during_period"
-    assert by_requests["deliveryType"] == "by_requests"
-    assert by_date["deliveryType"] == "single_date"
+    assert "deliveryType" not in fields
 
 
-def test_direct_security_and_warranty_terms_fill_missing_llm_fields() -> None:
+def test_direct_security_fallback_does_not_fill_warranty_columns() -> None:
     text = """
     Обеспечение заявки: не требуется.
     Размер обеспечения исполнения договора составляет 5% цены договора.
@@ -146,39 +144,19 @@ def test_direct_security_and_warranty_terms_fill_missing_llm_fields() -> None:
 
     assert "applicationSecurity" not in fields
     assert fields["contractSecurity"] == "5% цены договора"
-    assert fields["warrantySecurity"] == "1%"
-    assert fields["warrantyMonths"] == "24"
-    assert all(meta[key]["confidence"] == "high" for key in (
-        "contractSecurity", "warrantySecurity", "warrantyMonths",
-    ))
+    assert "warrantySecurity" not in fields
+    assert "warrantyMonths" not in fields
+    assert meta["contractSecurity"]["confidence"] == "high"
 
 
-def test_contract_validity_date_fills_delivery_date_when_no_direct_deadline() -> None:
-    extracted = ExtractedFieldsResponse(
-        fields={
-            "deliveryDate": FieldValue(
-                value="2028-03-30",
-                confidence="medium",
-                source="Прил.№4 ПД.docx",
-                evidence=(
-                    "Договор вступает в силу со дня подписания его Сторонами "
-                    "и действует по 30.03.2028."
-                ),
-            )
-        }
-    )
-
+def test_contract_validity_date_does_not_fill_delivery_date() -> None:
     text = "Договор вступает в силу со дня подписания его Сторонами и действует до 30.03.2028."
-    fields, meta, warnings = validate_fields(job_with_lot(""), extracted, text, [])
+    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
 
-    assert fields["deliveryDate"] == "2028-03-30"
-    assert meta["deliveryDate"]["source"] == (
-        "Документы / дата окончания действия договора как срок поставки"
-    )
-    assert any("deliveryDate отброшен" in warning for warning in warnings)
+    assert "deliveryDate" not in fields
 
 
-def test_explicit_delivery_deadline_is_preserved() -> None:
+def test_llm_delivery_deadline_is_preserved_without_regex_override() -> None:
     extracted = ExtractedFieldsResponse(
         fields={
             "deliveryDate": FieldValue(
@@ -194,7 +172,7 @@ def test_explicit_delivery_deadline_is_preserved() -> None:
 
     assert fields["deliveryDate"] == "2028-03-30"
     assert meta["deliveryDate"]["source"] == "Техническое задание.docx"
-    assert not any("deliveryDate отброшен" in warning for warning in warnings)
+    assert not warnings
 
 
 def test_payment_delay_uses_largest_variant_and_converts_working_days() -> None:
@@ -249,34 +227,64 @@ def test_payment_delay_converts_llm_value_when_text_is_fragmented() -> None:
     assert meta["paymentDelayDays"]["source"] == "LLM evidence / отсрочка переведена по правилу 1.4"
 
 
-def test_batch_delivery_moves_term_to_batch_delivery_days() -> None:
-    text = "Поставка товара партиями по заявкам заказчика в течение 7 календарных дней."
+def test_batch_delivery_moves_llm_term_to_batch_delivery_days() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(value="by_requests", confidence="high", source="ТЗ.docx", evidence="Поставка по заявкам"),
+            "deliveryDays": FieldValue(value=7, confidence="high", source="ТЗ.docx", evidence="В течение 7 дней после заявки"),
+        }
+    )
 
-    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
+    fields, _, _ = validate_fields(job_with_lot(""), extracted, "", [])
 
     assert fields["deliveryType"] == "by_requests"
     assert fields["deliveryBatchDays"] == 7
     assert "deliveryDays" not in fields
 
 
-def test_national_regime_uses_highest_priority_from_mixed_table() -> None:
+def test_national_regime_is_not_overridden_by_global_document_regex() -> None:
     text = """
     Сведения о национальном режиме в соответствии с постановлением № 1875:
     по одним позициям преимущество, по другим ограничение, по отдельным позициям запрет.
     """
 
-    fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
-
-    assert fields["nationalRegime"] == "ban"
-    assert meta["nationalRegime"]["source"] == "Документы / приоритет национального режима"
-
-
-def test_national_regime_restriction_beats_preference() -> None:
-    text = "Национальный режим: преимущество для части товаров и ограничение для другой части."
-
-    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "nationalRegime": FieldValue(
+                value="restriction", confidence="high", source="Приложение 2", evidence="Ограничение. Приложение 2"
+            )
+        }
+    )
+    fields, meta, _ = validate_fields(job_with_lot(""), extracted, text, [])
 
     assert fields["nationalRegime"] == "restriction"
+    assert meta["nationalRegime"]["source"] == "Приложение 2"
+
+
+def test_missing_national_regime_remains_blank() -> None:
+    fields, _, _ = validate_fields(job_with_lot(""), None, "Национальный режим: не найден.", [])
+
+    assert "nationalRegime" not in fields
+
+
+def test_batch_delivery_without_stated_term_defaults_to_one_day() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(value="by_requests", confidence="high", source="ТЗ.docx", evidence="Поставка партиями по заявкам заказчика"),
+        }
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert fields["deliveryBatchDays"] == 1
+    assert meta["deliveryBatchDays"]["source"] == "Правило автозаполнения / срок партии не указан"
+
+
+def test_unknown_lot_divisibility_defaults_to_indivisible() -> None:
+    fields, meta, _ = validate_fields(job_with_lot(""), None, "", [])
+
+    assert fields["lotDivisible"] == "no"
+    assert meta["lotDivisible"]["source"] == "Правило автозаполнения / делимость не установлена"
 
 
 def test_result_date_is_extracted_from_russian_document_date() -> None:

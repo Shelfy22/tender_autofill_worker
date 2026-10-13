@@ -416,7 +416,12 @@ def validate_fields(
             fields.pop(key, None)
             meta.pop(key, None)
 
+    # Warranty fields are semantically scoped in procurement documents. They
+    # must remain the document LLM's decision; regex fallback is only for the
+    # application and contract security columns.
     for key, (value, evidence) in _explicit_security_fields(deterministic_text).items():
+        if key in {"warrantySecurity", "warrantyMonths"}:
+            continue
         if not fields.get(key):
             _set(
                 fields,
@@ -424,18 +429,6 @@ def validate_fields(
                 key,
                 value,
                 "Документы / прямое условие обеспечения или гарантии",
-                "high",
-                evidence,
-            )
-
-    for key, (value, evidence) in _explicit_commercial_fields(deterministic_text).items():
-        if not fields.get(key):
-            _set(
-                fields,
-                meta,
-                key,
-                value,
-                "Документы / прямое условие поставки или оплаты",
                 "high",
                 evidence,
             )
@@ -551,21 +544,6 @@ def validate_fields(
     if not fields.get("specialAccount"):
         special = goz or "спецсчет" in text_lower
         _set(fields, meta, "specialAccount", "yes" if special else "no", "Проверка спецсчёта", "high" if special else "medium", "Признаки спецсчёта найдены" if special else "Признаки не найдены")
-    national_regime = _national_regime_from_text(deterministic_text)
-    if national_regime:
-        regime, evidence = national_regime
-        _set(
-            fields,
-            meta,
-            "nationalRegime",
-            regime,
-            "Документы / приоритет национального режима",
-            "high",
-            evidence,
-        )
-    elif not fields.get("nationalRegime"):
-        _set(fields, meta, "nationalRegime", "none", "Fallback validation", "medium", "Проверка национального режима")
-
     payment_delay = _payment_delay_from_text(deterministic_text)
     payment_delay_source = "Документы / максимальная отсрочка оплаты в календарных днях"
     if not payment_delay:
@@ -586,21 +564,14 @@ def validate_fields(
             evidence,
         )
     delivery_type = _normalize_delivery_type(fields.get("deliveryType"))
-    if delivery_type is None:
-        if re.search(r"по\s+заявк|партиями|график(?:у|а)?\s+поставки|разнаряд", deterministic_text, re.I):
-            delivery_type = "by_requests"
-        elif fields.get("deliveryDate"):
-            delivery_type = "single_date"
-        elif fields.get("deliveryDays"):
-            delivery_type = "during_period"
     if delivery_type:
         _set(
             fields,
             meta,
             "deliveryType",
             delivery_type,
-            "Документы / условия отгрузки",
-            "high" if "deliveryType" not in meta else meta["deliveryType"].get("confidence", "medium"),
+            str(meta.get("deliveryType", {}).get("source") or "AI Agent"),
+            str(meta.get("deliveryType", {}).get("confidence") or "medium"),
             str(meta.get("deliveryType", {}).get("evidence") or "Условие поставки"),
         )
 
@@ -618,6 +589,16 @@ def validate_fields(
                 delivery_days_meta.get("confidence", "high"),
                 str(delivery_days_meta.get("evidence") or "Срок поставки по заявке"),
             )
+        if not fields.get("deliveryBatchDays"):
+            _set(
+                fields,
+                meta,
+                "deliveryBatchDays",
+                1,
+                "Правило автозаполнения / срок партии не указан",
+                "medium",
+                "Поставка партиями или по заявкам; конкретный срок одной партии не указан",
+            )
         fields.pop("deliveryDays", None)
         meta.pop("deliveryDays", None)
 
@@ -632,36 +613,16 @@ def validate_fields(
         meta.pop("lotDivisible", None)
         warnings.append("Лот делимый не заполнен: нет прямого evidence.")
 
-    for key in ("deliveryDate", "deliveryDays"):
-        if not fields.get(key):
-            continue
-        evidence = str(meta.get(key, {}).get("evidence") or "").strip()
-        if _has_explicit_delivery_deadline_evidence(evidence):
-            continue
-        fields.pop(key, None)
-        meta.pop(key, None)
-        evidence_preview = re.sub(r"\s+", " ", evidence)[:300]
-        warnings.append(
-            f"{key} отброшен: в evidence нет прямой связи со сроком поставки. "
-            f"Фрагмент: {evidence_preview}"
+    if not fields.get("lotDivisible"):
+        _set(
+            fields,
+            meta,
+            "lotDivisible",
+            "no",
+            "Правило автозаполнения / делимость не установлена",
+            "medium",
+            "В документах нет подтверждения делимости лота",
         )
-
-    # The business rule for the final export: if the tender does not state a
-    # concrete delivery end date, use the explicit expiry date of the contract.
-    # It is intentionally applied after rejecting LLM guesses above.
-    if not fields.get("deliveryDate"):
-        expiry = _contract_expiry_date(deterministic_text)
-        if expiry:
-            expiry_date, evidence = expiry
-            _set(
-                fields,
-                meta,
-                "deliveryDate",
-                expiry_date,
-                "Документы / дата окончания действия договора как срок поставки",
-                "high",
-                evidence,
-            )
 
     for key in ("dateCreated", "submissionDeadlineDate", "resultDate", "contractDate", "deliveryDate", "tenderSubmittedDate", "tenderWonDate"):
         if fields.get(key):

@@ -11,7 +11,7 @@ def _lot_divisible_report_value(value: Any) -> str:
     if normalized in {"yes", "true", "1", "да"}:
         return "Да"
     if normalized in {"no", "false", "0", "нет"}:
-        return "Нет"
+        return "Неделимый"
     return ""
 
 
@@ -27,6 +27,11 @@ def build_result_json(
     debug: dict[str, Any] | None,
 ) -> dict[str, Any]:
     result_fields = {**fields, "legalEntity": None, "toCode": job.to_code}
+    # The Daily finalizer reads ``fields`` rather than ``reportFields`` for
+    # this column. Preserve the machine value while building the result, then
+    # expose the requested business label in the outward payload.
+    if fields.get("lotDivisible") == "no":
+        result_fields["lotDivisible"] = "Неделимый"
     report_fields = dict(job.report_fields)
     lot_divisible = _lot_divisible_report_value(fields.get("lotDivisible"))
     if lot_divisible:
