@@ -101,6 +101,34 @@ _NATIONAL_REGIME_PATTERNS = (
     ("restriction", re.compile(r"\u043e\u0433\u0440\u0430\u043d\u0438\u0447\w*", re.IGNORECASE)),
     ("preference", re.compile(r"\u043f\u0440\u0435\u0438\u043c\u0443\u0449\u0435\u0441\u0442\u0432\w*", re.IGNORECASE)),
 )
+_RUSSIAN_MONTHS = {
+    "января": 1,
+    "февраля": 2,
+    "марта": 3,
+    "апреля": 4,
+    "мая": 5,
+    "июня": 6,
+    "июля": 7,
+    "августа": 8,
+    "сентября": 9,
+    "октября": 10,
+    "ноября": 11,
+    "декабря": 12,
+}
+_RUSSIAN_DATE_PATTERN = re.compile(
+    r"[«\"]?\s*(\d{1,2})\s*[»\"]?\s+"
+    r"(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+"
+    r"(\d{4})\s*(?:г\.?|года)?",
+    re.IGNORECASE,
+)
+_RESULT_DATE_PATTERN = re.compile(
+    r"(?:дата\s+подведения\s+итогов(?:\s+закупки)?|"
+    r"подведение\s+итогов(?:\s+закупки)?)"
+    r"[\s:|,;–—-]{0,100}?"
+    r"(\d{1,2}\.\d{1,2}\.\d{4}|[«\"]?\s*\d{1,2}\s*[»\"]?\s+"
+    r"(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+\d{4}(?:\s*года)?)",
+    re.IGNORECASE,
+)
 _SECURITY_VALUE_PATTERN = re.compile(r"\d")
 _NON_NUMERIC_SECURITY_VALUE_PATTERN = re.compile(
     r"^(?:не\s+(?:требуется|установлен[ао]?|предусмотрен[ао]?)|отсутствует|без\s+обеспечения)\b",
@@ -201,6 +229,15 @@ def _national_regime_from_text(text: str) -> tuple[str, str] | None:
     return None
 
 
+def _explicit_result_date(text: str) -> tuple[str, str] | None:
+    """Find the published tender-result date in attached documents."""
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    match = _RESULT_DATE_PATTERN.search(normalized)
+    if match is None:
+        return None
+    return _normalize_date(match.group(1)), match.group(0)[:500]
+
+
 def _has_explicit_delivery_deadline_evidence(evidence: Any) -> bool:
     text = re.sub(r"\s+", " ", str(evidence or "")).strip()
     return bool(text and _DELIVERY_DEADLINE_EVIDENCE_PATTERN.search(text))
@@ -215,6 +252,12 @@ def _normalize_date(value: Any) -> Any:
     match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
     if match:
         return f"{match.group(3)}-{match.group(2).zfill(2)}-{match.group(1).zfill(2)}"
+    match = _RUSSIAN_DATE_PATTERN.search(text)
+    if match:
+        day, month_name, year = match.groups()
+        month = _RUSSIAN_MONTHS.get(month_name.casefold())
+        if month:
+            return f"{year}-{month:02d}-{int(day):02d}"
     return text
 
 
@@ -410,10 +453,8 @@ def validate_fields(
     _set(fields, meta, "finalPrice", fields.get("finalPrice") or "0", "Default", "low", "Конечная цена не найдена")
 
     purchase = job.seldon_purchase
-    # These dates have a deterministic Seldon/Daily source and must not be
-    # guessed by an LLM from a contract or a document template.
-    fields.pop("resultDate", None)
-    meta.pop("resultDate", None)
+    # The result date is a document fact. The contract date is derived only
+    # after a result date has been found, never accepted from an LLM directly.
     fields.pop("contractDate", None)
     meta.pop("contractDate", None)
     deadline_date, deadline_time, deadline_evidence = _structured_submission_deadline(job)
@@ -427,26 +468,30 @@ def validate_fields(
             "high",
             deadline_evidence,
         )
-    result_date, result_evidence = _structured_result_date(job)
-    if result_date:
+    explicit_result_date = _explicit_result_date(deterministic_text)
+    if explicit_result_date:
+        result_date, result_evidence = explicit_result_date
         _set(
             fields,
             meta,
             "resultDate",
             result_date,
-            "Seldon/Daily / дата подведения итогов",
+            "Документы / дата подведения итогов",
             "high",
             result_evidence,
         )
-        contract_date = date.fromisoformat(result_date) + timedelta(days=14)
+    result_date = _normalize_date(fields.get("resultDate")) if fields.get("resultDate") else None
+    if isinstance(result_date, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", result_date):
+        fields["resultDate"] = result_date
+        contract_date = date.fromisoformat(result_date) + timedelta(days=20)
         _set(
             fields,
             meta,
             "contractDate",
             contract_date.isoformat(),
-            "Расчёт / дата подведения итогов + 14 календарных дней",
+            "Расчёт / дата подведения итогов + 20 календарных дней",
             "high",
-            f"{result_date} + 14 календарных дней",
+            f"{result_date} + 20 календарных дней",
         )
     if deadline_time:
         _set(

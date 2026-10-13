@@ -97,21 +97,24 @@ def test_direct_delivery_and_payment_terms_fill_missing_llm_fields() -> None:
     ))
 
 
-def test_structured_result_date_calculates_contract_date() -> None:
-    job = NormalizedJob(
-        job_record_key="daily:b:1:1",
-        batch_id="b",
-        report_id=1,
-        seldon_id="1",
-        seldon_purchase={"summarizingDate": "2026-08-07T09:00:00"},
+def test_document_result_date_calculates_contract_date() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "resultDate": FieldValue(
+                value="2026-08-07",
+                confidence="high",
+                source="Извещение.docx",
+                evidence="Дата подведения итогов закупки: 07.08.2026.",
+            )
+        }
     )
 
-    fields, meta, _ = validate_fields(job, None, "", [])
+    fields, meta, _ = validate_fields(job_with_lot(""), extracted, "", [])
 
     assert fields["resultDate"] == "2026-08-07"
-    assert fields["contractDate"] == "2026-08-21"
+    assert fields["contractDate"] == "2026-08-27"
     assert meta["contractDate"]["source"] == (
-        "Расчёт / дата подведения итогов + 14 календарных дней"
+        "Расчёт / дата подведения итогов + 20 календарных дней"
     )
 
 
@@ -276,15 +279,10 @@ def test_national_regime_restriction_beats_preference() -> None:
     assert fields["nationalRegime"] == "restriction"
 
 
-def test_result_date_accepts_unlisted_seldon_date_alias() -> None:
-    job = NormalizedJob(
-        job_record_key="daily:b:1:1",
-        batch_id="b",
-        report_id=1,
-        seldon_id="1",
-        seldon_purchase={"resultDateTime": "2026-08-07T09:00:00"},
-    )
+def test_result_date_is_extracted_from_russian_document_date() -> None:
+    text = "Дата подведения итогов закупки: «23» октября 2026 года (время московское)."
 
-    fields, _, _ = validate_fields(job, None, "", [])
+    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
 
-    assert fields["resultDate"] == "2026-08-07"
+    assert fields["resultDate"] == "2026-10-23"
+    assert fields["contractDate"] == "2026-11-12"
