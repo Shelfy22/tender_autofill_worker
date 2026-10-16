@@ -16,6 +16,7 @@ from app.models import (
 from app.services.document_roles import (
     COMPOSITE_ROLE,
     OTHER_ROLE,
+    PRICE_ROLE,
     TECHNICAL_ROLE,
     classify_document_role,
     detect_section_role,
@@ -858,7 +859,30 @@ def _plain_number(value: Any) -> float | None:
 
 
 def _quantity_from_structured_evidence(position: TenderPosition) -> float | None:
-    """Recover quantity from the spreadsheet cell immediately after the unit cell."""
+    """Recover quantity from the declared spreadsheet quantity column when available."""
+    reference = position.sourceReference
+    quantity_column = _clean(reference.quantityColumn if reference else "").upper()
+
+    # A price column can be immediately to the right of the unit column.  Do not
+    # infer quantity from adjacency when the parser has already identified the
+    # real quantity column (for example, G=unit, H=unit price, J=quantity).
+    if quantity_column:
+        direct_value = _plain_number(position.sourceCells.get(quantity_column, ""))
+        if direct_value is not None:
+            return direct_value
+        for evidence in (position.evidence, position.documentPriceEvidence):
+            for row in str(evidence or "").splitlines():
+                row_match = re.search(r"(?:^|\b)РЎС‚СЂРѕРєР°\s+\d+\s*:\s*(.+)$", row, re.IGNORECASE)
+                if not row_match:
+                    continue
+                direct_value = _plain_number(
+                    _parse_structured_cells(row_match.group(1)).get(quantity_column, "")
+                )
+                if direct_value is not None:
+                    return direct_value
+        return None
+
+    # Fallback for legacy evidence that has no column metadata.
     expected_unit = _clean(position.unit).casefold().replace("ё", "е")
     for evidence in (position.evidence, position.documentPriceEvidence):
         for row in str(evidence or "").splitlines():
@@ -1064,6 +1088,18 @@ def extract_deterministic_positions(
         association_confidence: float,
     ) -> list[ProductCharacteristic]:
         allowed_columns = set(table.characteristicColumns)
+        source_role = classify_document_role(table.fileName, table.sheet)
+        # A calculation table from an NMC/NMCk price justification contains
+        # procurement identity, quantity, and money only.  It must not turn
+        # row numbers, formulas, averages, or calculated prices into product
+        # requirements merely because its schema was classified as
+        # ``purchase_items`` instead of ``price_list``.
+        if (
+            source_role == PRICE_ROLE
+            and table.tableRole != "technical_specification"
+            and not allowed_columns
+        ):
+            return []
         # A price justification may supply a product title and price, but its
         # remaining statistical/calculation fields are not product specs. Only
         # an explicitly classified technical column may be carried forward.
@@ -2148,6 +2184,136 @@ def _merge_replicated_position_details(
     return canonical.model_copy(update=updates) if updates else canonical
 
 
+def _merge_technical_subset_into_price_position(
+    price_position: TenderPosition,
+    technical_position: TenderPosition,
+) -> TenderPosition:
+    """Attach only technical evidence while keeping the NMC row canonical.
+
+    A technical-specification table can list just part of a larger NMC table.
+    In that case the NMC row remains the purchase position (and retains its
+    name, quantity, price, and primary sourceReference); the technical row
+    contributes only product characteristics and its source reference.
+    """
+    characteristics = list(price_position.characteristics)
+    seen_characteristics = {
+        (_word_table_key(item.name), _word_table_key(item.value))
+        for item in characteristics
+    }
+    for characteristic in technical_position.characteristics:
+        key = (
+            _word_table_key(characteristic.name),
+            _word_table_key(characteristic.value),
+        )
+        if key not in seen_characteristics:
+            characteristics.append(characteristic)
+            seen_characteristics.add(key)
+
+    source_references = (
+        _all_source_references(price_position)
+        + _all_source_references(technical_position)
+    )
+    deduplicated_references: list[ProductSourceReference] = []
+    seen_references: set[tuple[str, str, int | None, str]] = set()
+    for reference in source_references:
+        key = _source_reference_key(reference)
+        if key in seen_references:
+            continue
+        seen_references.add(key)
+        deduplicated_references.append(reference)
+
+    updates: dict[str, Any] = {}
+    if characteristics != price_position.characteristics:
+        updates["characteristics"] = characteristics
+    if deduplicated_references != price_position.sourceReferences:
+        updates["sourceReferences"] = deduplicated_references
+    return price_position.model_copy(update=updates) if updates else price_position
+
+
+def _technical_subset_pairs_in_price_table(
+    positions: list[TenderPosition],
+    skipped_indexes: set[int],
+) -> list[tuple[int, int]]:
+    """Return (NMC, TЗ) pairs when the whole TЗ table is a NMC subset.
+
+    A match must preserve quantity/unit when both are present and have a
+    strong product identity.  Requiring every TЗ row to match prevents a
+    partial false-positive from silently deleting an independent position.
+    """
+    by_scope: dict[tuple[str, str], list[tuple[int, TenderPosition]]] = {}
+    for index, position in enumerate(positions):
+        if index in skipped_indexes or position.sourceReference is None:
+            continue
+        role = _position_source_role(position)
+        if role not in {PRICE_ROLE, TECHNICAL_ROLE}:
+            continue
+        scope = _source_table_scope(position)
+        if scope[0]:
+            by_scope.setdefault(scope, []).append((index, position))
+
+    price_scopes = [
+        scope for scope, rows in by_scope.items()
+        if rows and _position_source_role(rows[0][1]) == PRICE_ROLE
+    ]
+    technical_scopes = [
+        scope for scope, rows in by_scope.items()
+        if rows and _position_source_role(rows[0][1]) == TECHNICAL_ROLE
+    ]
+    pairs: list[tuple[int, int]] = []
+    consumed_scopes: set[tuple[str, str]] = set()
+
+    for price_scope in price_scopes:
+        price_rows = by_scope[price_scope]
+        for technical_scope in technical_scopes:
+            if technical_scope in consumed_scopes:
+                continue
+            technical_rows = by_scope[technical_scope]
+            if not technical_rows or len(technical_rows) >= len(price_rows):
+                continue
+
+            available = list(price_rows)
+            table_pairs: list[tuple[int, int]] = []
+            for technical_index, technical in technical_rows:
+                matches: list[tuple[int, TenderPosition]] = []
+                for price_index, price in available:
+                    if (
+                        price.quantity is not None
+                        and technical.quantity is not None
+                        and price.quantity != technical.quantity
+                    ):
+                        continue
+                    if (
+                        _clean(price.unit)
+                        and _clean(technical.unit)
+                        and _position_unit_key(price.unit)
+                        != _position_unit_key(technical.unit)
+                    ):
+                        continue
+                    same_identity = (
+                        _cross_table_product_identity(price)
+                        == _cross_table_product_identity(technical)
+                        or _same_replicated_product(price, technical)
+                        or (
+                            _power_transformer_identity(price) is not None
+                            and _power_transformer_identity(price)
+                            == _power_transformer_identity(technical)
+                        )
+                    )
+                    if same_identity:
+                        matches.append((price_index, price))
+                if len(matches) != 1:
+                    table_pairs = []
+                    break
+                price_match = matches[0]
+                table_pairs.append((price_match[0], technical_index))
+                available.remove(price_match)
+
+            if len(table_pairs) == len(technical_rows):
+                pairs.extend(table_pairs)
+                consumed_scopes.add(technical_scope)
+    return pairs
+
+
 def _aligned_section_duplicate_pairs(
     positions: list[TenderPosition],
 ) -> list[tuple[int, int]]:
@@ -2370,6 +2536,21 @@ def _deduplicate_cross_document_positions(
             "Paired replicated price-justification and technical-specification "
             "rows by aligned position order; retained the technical row and "
             "merged NMC price data."
+        )
+
+    technical_subset_pairs = _technical_subset_pairs_in_price_table(
+        positions, skipped_indexes
+    )
+    for price_index, technical_index in technical_subset_pairs:
+        positions[price_index] = _merge_technical_subset_into_price_position(
+            positions[price_index], positions[technical_index]
+        )
+        skipped_indexes.add(technical_index)
+    if technical_subset_pairs:
+        warnings.append(
+            "Recognized the technical-specification table as a subset of the "
+            "NMC table; retained all NMC rows and attached only technical "
+            "characteristics and source references to matching rows."
         )
 
     table_pairs = _aligned_replicated_table_pairs(positions, skipped_indexes)

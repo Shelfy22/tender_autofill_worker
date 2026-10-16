@@ -227,6 +227,40 @@ def test_payment_delay_converts_llm_value_when_text_is_fragmented() -> None:
     assert meta["paymentDelayDays"]["source"] == "LLM evidence / отсрочка переведена по правилу 1.4"
 
 
+def test_llm_payment_evidence_wins_over_regex_fallback() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "paymentDelayDays": FieldValue(
+                value=30,
+                confidence="high",
+                source="Договор.docx",
+                evidence="Оплата производится в течение 30 дней после приемки.",
+            )
+        }
+    )
+
+    fields, meta, _ = validate_fields(
+        job_with_lot(""),
+        extracted,
+        "Оплата услуг перевозчика производится в течение 7 дней.",
+        [],
+    )
+
+    assert fields["paymentDelayDays"] == 42
+    assert meta["paymentDelayDays"]["source"] == "LLM evidence / отсрочка переведена по правилу 1.4"
+
+
+def test_payment_delay_recognizes_payment_deadline_wording() -> None:
+    fields, _, _ = validate_fields(
+        job_with_lot(""),
+        None,
+        "Оплата товара производится в срок не более 90 рабочих дней со дня приемки.",
+        [],
+    )
+
+    assert fields["paymentDelayDays"] == 126
+
+
 def test_batch_delivery_moves_llm_term_to_batch_delivery_days() -> None:
     extracted = ExtractedFieldsResponse(
         fields={
@@ -267,17 +301,16 @@ def test_missing_national_regime_remains_blank() -> None:
     assert "nationalRegime" not in fields
 
 
-def test_batch_delivery_without_stated_term_defaults_to_one_day() -> None:
+def test_batch_delivery_without_stated_term_remains_blank() -> None:
     extracted = ExtractedFieldsResponse(
         fields={
             "deliveryType": FieldValue(value="by_requests", confidence="high", source="ТЗ.docx", evidence="Поставка партиями по заявкам заказчика"),
         }
     )
 
-    fields, meta, _ = validate_fields(job_with_lot(""), extracted, "", [])
+    fields, _, _ = validate_fields(job_with_lot(""), extracted, "", [])
 
-    assert fields["deliveryBatchDays"] == 1
-    assert meta["deliveryBatchDays"]["source"] == "Правило автозаполнения / срок партии не указан"
+    assert "deliveryBatchDays" not in fields
 
 
 def test_unknown_lot_divisibility_defaults_to_indivisible() -> None:
@@ -294,3 +327,14 @@ def test_result_date_is_extracted_from_russian_document_date() -> None:
 
     assert fields["resultDate"] == "2026-10-23"
     assert fields["contractDate"] == "2026-11-12"
+
+
+def test_result_date_is_extracted_from_consideration_and_evaluation_wording() -> None:
+    text = (
+        "Дата рассмотрения вторых частей заявок, оценки и сопоставления заявок "
+        "(подведения итогов): не позднее «13» ноября 2026 г."
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["resultDate"] == "2026-11-13"

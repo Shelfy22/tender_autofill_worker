@@ -454,6 +454,13 @@ class DocumentFieldCandidate(BaseModel):
         return str(value or "").strip()[:500]
 
 
+class CommercialConditionsResponse(BaseModel):
+    """Verified tender-card conditions found in shortlisted document fragments."""
+
+    fieldCandidates: list[DocumentFieldCandidate] = Field(default_factory=list, max_length=40)
+    warnings: list[str] = Field(default_factory=list, max_length=20)
+
+
 class DocumentReasonHit(BaseModel):
     reason: str
     evidence: str = ""

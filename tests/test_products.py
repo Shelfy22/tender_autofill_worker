@@ -20,6 +20,31 @@ def test_quantity_parsing() -> None:
     assert parse_quantity(None) is None
 
 
+def test_declared_quantity_column_beats_adjacent_unit_price() -> None:
+    position = TenderPosition(
+        product="Кабель силовой",
+        quantity=1,
+        unit="шт",
+        evidence="Строка 27: C: Кабель силовой | G: шт | H: 6871.41 | J: 1",
+        source="excel_table_deterministic",
+        sourceCells={"C": "Кабель силовой", "G": "шт", "H": "6871.41", "J": "1"},
+        sourceReference=ProductSourceReference(
+            fileName="Ценовое предложение.xlsx",
+            sheet="Лист1",
+            row=27,
+            productColumn="C",
+            unitColumn="G",
+            quantityColumn="J",
+            extractionMethod="excel_deterministic",
+        ),
+    )
+
+    merged, warnings = merge_positions([position], None)
+
+    assert [item.quantity for item in merged] == [1]
+    assert not any("Количество позиции исправлено" in warning for warning in warnings)
+
+
 def test_numeric_decimal_row_is_not_a_product() -> None:
     response = TenderPositionsResponse(
         products=[
@@ -776,6 +801,64 @@ def test_aligned_table_copies_across_documents_merge_into_one_canonical_position
     assert [position.characteristics[0].value for position in merged] == ["sealed", "oil"]
     assert all(len(position.sourceReferences) == 2 for position in merged)
     assert any("replicated table copies" in warning for warning in warnings)
+
+
+def test_technical_table_subset_keeps_all_nmcd_rows_canonical() -> None:
+    nmcd_positions = [
+        TenderPosition(
+            product=f"Catalog item {index:03d}",
+            quantity=1,
+            unit="pcs",
+            requirements="NMC requirement",
+            evidence="NMC evidence",
+            sourceReference={
+                "fileName": "nmcd.xlsx",
+                "sheet": "NMC",
+                "row": index + 1,
+                "sectionRole": "price_justification",
+            },
+        )
+        for index in range(1, 96)
+    ]
+    technical_indexes = (3, 48, 95)
+    technical_positions = [
+        TenderPosition(
+            product=f"Catalog item {index:03d}",
+            quantity=1,
+            unit="pcs",
+            requirements="Technical requirement that must not replace NMC",
+            evidence="Technical evidence that must not replace NMC",
+            characteristics=[
+                ProductCharacteristic(name="Power", value=f"{index} W")
+            ],
+            sourceReference={
+                "fileName": "technical-specification.docx",
+                "table": "Technical requirements",
+                "row": index + 10,
+                "sectionRole": "technical_specification",
+            },
+        )
+        for index in technical_indexes
+    ]
+
+    merged, warnings = merge_positions(nmcd_positions + technical_positions, None)
+
+    assert len(merged) == 95
+    assert [position.product for position in merged] == [
+        f"Catalog item {index:03d}" for index in range(1, 96)
+    ]
+    for index in technical_indexes:
+        position = merged[index - 1]
+        assert position.sourceReference is not None
+        assert position.sourceReference.fileName == "nmcd.xlsx"
+        assert [item.value for item in position.characteristics] == [f"{index} W"]
+        assert position.requirements == "NMC requirement"
+        assert position.evidence == "NMC evidence"
+        assert {reference.fileName for reference in position.sourceReferences} == {
+            "nmcd.xlsx",
+            "technical-specification.docx",
+        }
+    assert any("subset of the NMC table" in warning for warning in warnings)
 
 
 def test_repeated_names_in_one_table_remain_separate_positions() -> None:
@@ -1753,6 +1836,95 @@ def test_price_list_does_not_turn_calculation_columns_into_characteristics() -> 
     assert len(positions) == 1
     assert positions[0].characteristics == []
     assert positions[0].quantity == 2
+
+
+def test_nmc_calculation_table_does_not_supply_characteristics_when_misclassified() -> None:
+    positions = extract_deterministic_positions(
+        "",
+        [
+            {
+                "fileName": "НМЦД.xlsx",
+                "sheet": "Расчет НМЦД",
+                "tableRole": "purchase_items",
+                "headerRows": [1],
+                "headerMap": {"product": "C", "unit": "D", "quantity": "E"},
+                "headerLabels": {
+                    "product": "Наименование предмета закупки",
+                    "unit": "Ед. изм.",
+                    "quantity": "Кол-во",
+                    "A": "Объект закупки",
+                    "F": "Коммерческое предложение №1",
+                    "J": "Средняя цена",
+                    "N": "Н(М)ЦД",
+                },
+                "rows": [
+                    {
+                        "row": 1,
+                        "cells": {
+                            "A": "Объект закупки",
+                            "C": "Наименование предмета закупки",
+                            "D": "Ед. изм.",
+                            "E": "Кол-во",
+                            "F": "Коммерческое предложение №1",
+                            "J": "Средняя цена",
+                            "N": "Н(М)ЦД",
+                        },
+                    },
+                    {
+                        "row": 2,
+                        "cells": {
+                            "A": "1",
+                            "C": "Насос дренажный",
+                            "D": "шт",
+                            "E": "1",
+                            "F": "26635.04",
+                            "J": "28002.35",
+                            "N": "28002.35",
+                        },
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert len(positions) == 1
+    assert positions[0].characteristics == []
+    assert positions[0].quantity == 1
+
+
+def test_nmc_and_technical_name_variant_merge_into_one_position() -> None:
+    nmc_position = TenderPosition(
+        product="Агрегат насосный Гном 10-10 Д",
+        quantity=1,
+        unit="шт",
+        source="excel_table_deterministic",
+        sourceReference=ProductSourceReference(
+            fileName="НМЦД.xlsx",
+            sheet="Расчет НМЦД",
+            row=10,
+            sectionRole="price_justification",
+        ),
+    )
+    technical_position = TenderPosition(
+        product="Агрегат насосный; Гном 10-10Д или эквивалент;",
+        quantity=1,
+        unit="шт",
+        source="excel_table_deterministic",
+        sourceReference=ProductSourceReference(
+            fileName="Техническое задание.docx",
+            sheet="Таблица Word 1",
+            row=3,
+            sectionRole="technical_specification",
+        ),
+        characteristics=[ProductCharacteristic(name="Напряжение", value="220 В")],
+    )
+
+    merged, _ = merge_positions([nmc_position, technical_position], None)
+
+    assert len(merged) == 1
+    assert [(item.name, item.value) for item in merged[0].characteristics] == [
+        ("Напряжение", "220 В")
+    ]
 
 
 def test_excel_continuation_row_enriches_previous_position() -> None:

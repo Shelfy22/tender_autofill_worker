@@ -74,7 +74,7 @@ _PAYMENT_DELAY_PATTERN = re.compile(
 _PAYMENT_TERM_CONTEXT_PATTERN = re.compile(
     r"(?:\u043e\u0442\u0441\u0440\u043e\u0447\w*\s+(?:\u043f\u043b\u0430\u0442\u0435\u0436\w*|\u043e\u043f\u043b\u0430\u0442\w*)|"
     r"(?:\u043e\u043f\u043b\u0430\u0442\w*|\u043f\u043b\u0430\u0442\u0451\u0436\w*|\u0440\u0430\u0441\u0447\u0451\u0442\w*)(?:(?![.;\n]).){0,80}?"
-    r"(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435|\u043d\u0435\s+\u043f\u043e\u0437\u0434\u043d\u0435\u0435|\u043f\u043e\u0441\u043b\u0435))"
+    r"(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435|\u0432\s+\u0441\u0440\u043e\u043a\s+\u043d\u0435\s+\u0431\u043e\u043b\u0435\u0435|\u043d\u0435\s+\u043f\u043e\u0437\u0434\u043d\u0435\u0435|\u043f\u043e\u0441\u043b\u0435))"
     r"[^.\n]{0,180}",
     re.IGNORECASE,
 )
@@ -123,8 +123,9 @@ _RUSSIAN_DATE_PATTERN = re.compile(
 )
 _RESULT_DATE_PATTERN = re.compile(
     r"(?:дата\s+подведения\s+итогов(?:\s+закупки)?|"
-    r"подведение\s+итогов(?:\s+закупки)?)"
-    r"[\s:|,;–—-]{0,100}?"
+    r"подведение\s+итогов(?:\s+закупки)?|"
+    r"дата\s+рассмотрения[^.\n]{0,100}?подведения\s+итогов)"
+    r"[\s\S]{0,100}?"
     r"(\d{1,2}\.\d{1,2}\.\d{4}|[«\"]?\s*\d{1,2}\s*[»\"]?\s+"
     r"(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+\d{4}(?:\s*года)?)",
     re.IGNORECASE,
@@ -462,7 +463,7 @@ def validate_fields(
             deadline_evidence,
         )
     explicit_result_date = _explicit_result_date(deterministic_text)
-    if explicit_result_date:
+    if explicit_result_date and not fields.get("resultDate"):
         result_date, result_evidence = explicit_result_date
         _set(
             fields,
@@ -544,14 +545,16 @@ def validate_fields(
     if not fields.get("specialAccount"):
         special = goz or "спецсчет" in text_lower
         _set(fields, meta, "specialAccount", "yes" if special else "no", "Проверка спецсчёта", "high" if special else "medium", "Признаки спецсчёта найдены" if special else "Признаки не найдены")
-    payment_delay = _payment_delay_from_text(deterministic_text)
-    payment_delay_source = "Документы / максимальная отсрочка оплаты в календарных днях"
+    # A verified LLM candidate is primary. Regex is retrieval/fallback only:
+    # payment-related documents also contain delivery and warranty terms.
+    payment_delay = _payment_delay_from_field(
+        fields.get("paymentDelayDays"),
+        meta.get("paymentDelayDays", {}).get("evidence"),
+    )
+    payment_delay_source = "LLM evidence / отсрочка переведена по правилу 1.4"
     if not payment_delay:
-        payment_delay = _payment_delay_from_field(
-            fields.get("paymentDelayDays"),
-            meta.get("paymentDelayDays", {}).get("evidence"),
-        )
-        payment_delay_source = "LLM evidence / отсрочка переведена по правилу 1.4"
+        payment_delay = _payment_delay_from_text(deterministic_text)
+        payment_delay_source = "Документы / максимальная отсрочка оплаты в календарных днях"
     if payment_delay:
         days, evidence = payment_delay
         _set(
@@ -588,16 +591,6 @@ def validate_fields(
                 "Документы / срок поставки партии",
                 delivery_days_meta.get("confidence", "high"),
                 str(delivery_days_meta.get("evidence") or "Срок поставки по заявке"),
-            )
-        if not fields.get("deliveryBatchDays"):
-            _set(
-                fields,
-                meta,
-                "deliveryBatchDays",
-                1,
-                "Правило автозаполнения / срок партии не указан",
-                "medium",
-                "Поставка партиями или по заявкам; конкретный срок одной партии не указан",
             )
         fields.pop("deliveryDays", None)
         meta.pop("deliveryDays", None)

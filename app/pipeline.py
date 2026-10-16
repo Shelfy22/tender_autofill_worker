@@ -28,6 +28,7 @@ from app.services.document_analysis import (
     fields_from_consolidation,
     result_from_unit,
 )
+from app.services.commercial_conditions import build_commercial_conditions_context
 from app.services.documents import (
     DocumentProcessor,
     build_combined_text as build_deterministic_text,
@@ -378,6 +379,43 @@ class TenderPipeline:
                             lambda unit=unit: analyze_unit_safely(unit),
                         )
                     )
+                commercial_context = build_commercial_conditions_context(
+                    page_text,
+                    parsed_documents,
+                )
+                commercial_analyzer = getattr(llm, "analyze_commercial_conditions", None)
+                if commercial_context and callable(commercial_analyzer):
+                    try:
+                        commercial_response = self._run_stage(
+                            "Analyze Commercial Conditions",
+                            lambda: commercial_analyzer(commercial_context),
+                        )
+                        commercial_candidates = [
+                            candidate.model_copy(
+                                update={
+                                    "sourceReference": {
+                                        **candidate.sourceReference,
+                                        "review": "commercial_conditions",
+                                    }
+                                }
+                            )
+                            for candidate in commercial_response.fieldCandidates
+                        ]
+                        document_analysis_results.append(
+                            DocumentAnalysisResult(
+                                unitId="commercial-conditions-review",
+                                sourceType="document",
+                                fileName="commercial-conditions-review",
+                                documentKind="commercial_conditions_review",
+                                fieldCandidates=commercial_candidates,
+                                warnings=commercial_response.warnings,
+                            )
+                        )
+                    except (ValidationError, LlmResponseTruncatedError, LlmWallTimeoutError) as exc:
+                        self.warnings.append(
+                            "Commercial conditions review failed; document field candidates "
+                            f"remain available: {type(exc).__name__}: {exc}"
+                        )
                 consolidation_payload, consolidation_dedup_debug = self._run_stage(
                     "Deduplicate Document Analysis Products",
                     lambda: compact_document_analysis_results(document_analysis_results),
