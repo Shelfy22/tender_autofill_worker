@@ -301,6 +301,44 @@ def test_missing_national_regime_remains_blank() -> None:
     assert "nationalRegime" not in fields
 
 
+def test_minimum_mandatory_share_is_normalized_to_no() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "nationalRegime": FieldValue(
+                value="minimum_share",
+                confidence="high",
+                source="Документация.docx, п. 2.7",
+                evidence=(
+                    "Установлена минимальная обязательная доля закупок товаров "
+                    "российского происхождения по ПП РФ № 1875."
+                ),
+            )
+        }
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert fields["nationalRegime"] == "no"
+    assert "минимальная обязательная доля" in meta["nationalRegime"]["evidence"]
+
+
+def test_minimum_share_evidence_overrides_misclassified_preference() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "nationalRegime": FieldValue(
+                value="preference",
+                confidence="high",
+                source="Документация.docx, п. 2.7",
+                evidence="Установлена минимальная обязательная доля закупок товаров российского происхождения.",
+            )
+        }
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert fields["nationalRegime"] == "no"
+
+
 def test_batch_delivery_without_stated_term_remains_blank() -> None:
     extracted = ExtractedFieldsResponse(
         fields={

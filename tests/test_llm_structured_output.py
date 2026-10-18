@@ -5,6 +5,7 @@ import pytest
 
 from app.config import Settings
 from app.models import (
+    CommercialConditionsResponse,
     DocumentAnalysisResponse,
     DocumentAnalysisUnit,
     ExtractedFieldsResponse,
@@ -365,9 +366,31 @@ def test_document_analyzer_prompt_distinguishes_documents_from_works_and_zip() -
     assert "stateDefenseOrder" in prompt
     assert "specialAccount" in prompt
     assert "nationalRegime" in prompt
+    assert "minimum_share" in prompt
     assert "lotDivisible" in prompt
     assert "deliveryNote — это примечание именно к deliveryType" in prompt
     assert "Не возвращай coverage" in prompt
+
+
+def test_commercial_conditions_prompt_handles_minimum_share_as_no() -> None:
+    client = object.__new__(LlmClient)
+    captured: dict[str, object] = {}
+
+    def fake_json_call(**values: object) -> CommercialConditionsResponse:
+        captured.update(values)
+        return CommercialConditionsResponse()
+
+    client.json_call = fake_json_call  # type: ignore[method-assign]
+
+    response = client.analyze_commercial_conditions(
+        "[source: Документация.docx; targets: nationalRegime]\n"
+        "Установлена минимальная обязательная доля закупок товаров российского происхождения."
+    )
+
+    assert response.fieldCandidates == []
+    assert captured["schema"] is CommercialConditionsResponse
+    assert "minimum_share" in str(captured["prompt"])
+    assert "означает «не найдено»" in str(captured["prompt"])
 
 
 def test_product_hierarchy_uses_structured_response() -> None:

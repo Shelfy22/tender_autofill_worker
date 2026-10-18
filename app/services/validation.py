@@ -101,6 +101,11 @@ _NATIONAL_REGIME_PATTERNS = (
     ("restriction", re.compile(r"\u043e\u0433\u0440\u0430\u043d\u0438\u0447\w*", re.IGNORECASE)),
     ("preference", re.compile(r"\u043f\u0440\u0435\u0438\u043c\u0443\u0449\u0435\u0441\u0442\u0432\w*", re.IGNORECASE)),
 )
+_NATIONAL_MINIMUM_SHARE_PATTERN = re.compile(
+    r"(?:минимальн\w*\s+обязательн\w*\s+дол\w*|"
+    r"minimum\s+(?:mandatory\s+)?share)",
+    re.IGNORECASE,
+)
 _RUSSIAN_MONTHS = {
     "января": 1,
     "февраля": 2,
@@ -228,6 +233,26 @@ def _national_regime_from_text(text: str) -> tuple[str, str] | None:
         if match is not None:
             return regime, match.group(0)[:500]
     return None
+
+
+def _normalize_national_regime(value: Any, evidence: Any) -> str | None:
+    """Keep an absent regime absent; map minimum-share regime to ``no``.
+
+    The tender card treats the minimum mandatory share under PP 1875 as
+    "Нет", unlike prohibition/restriction/preference.  This is intentionally
+    evidence-bound so a generic mention of PP 1875 cannot overwrite an
+    established measure for another position.
+    """
+    raw = str(value or "").strip()
+    normalized = raw.casefold().replace("ё", "е").replace("-", "_").replace(" ", "_")
+    source_text = f"{raw} {evidence or ''}"
+    if _NATIONAL_MINIMUM_SHARE_PATTERN.search(source_text):
+        return "no"
+    if normalized in {"no", "нет", "minimum_share", "minimum_mandatory_share"}:
+        return "no"
+    if normalized in {"", "none", "null", "not_found", "не_найдено"}:
+        return None
+    return raw
 
 
 def _explicit_result_date(text: str) -> tuple[str, str] | None:
@@ -405,6 +430,17 @@ def validate_fields(
                 meta[key] = {"source": source, "confidence": confidence, "evidence": evidence}
     else:
         warnings.append("LLM extraction не выполнен; применены deterministic fallbacks.")
+
+    if "nationalRegime" in fields:
+        national_regime = _normalize_national_regime(
+            fields.get("nationalRegime"),
+            meta.get("nationalRegime", {}).get("evidence"),
+        )
+        if national_regime is None:
+            fields.pop("nationalRegime", None)
+            meta.pop("nationalRegime", None)
+        else:
+            fields["nationalRegime"] = national_regime
 
     # The autofill columns must contain only an explicitly stated amount or
     # percentage. Do not turn an absent requirement into "not required".
