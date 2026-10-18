@@ -341,9 +341,23 @@ _NON_ELECTRICAL_SITE_PRODUCT_PATTERN = re.compile(
     r"контейнерн[а-яё]*\s+(?:здани[а-яё]*|помещени[а-яё]*))\b",
     re.IGNORECASE,
 )
+_NON_HIGH_VOLTAGE_EQUIPMENT_PRODUCT_PATTERN = re.compile(
+    r"\b(?:\u0438\u0437\u043e\u043b\u044f\u0442\u043e\u0440[\u0430-\u044f\u0451]*|"
+    r"\u0438\u0437\u043e\u043b\u0438\u0440\u0443\u044e\u0449[\u0430-\u044f\u0451]*|"
+    r"\u0430\u0440\u043c\u0430\u0442\u0443\u0440[\u0430-\u044f\u0451]*|\u043a\u0440\u0435\u043f[\u0435\u0451]\u0436[\u0430-\u044f\u0451]*|"
+    r"\u043c\u0435\u0442\u0438\u0437[\u0430-\u044f\u0451]*|\u0437\u0430\u0436\u0438\u043c[\u0430-\u044f\u0451]*|"
+    r"\u043a\u043e\u043c\u043f\u043b\u0435\u043a\u0442\u0443\u044e\u0449[\u0430-\u044f\u0451]*|"
+    r"\u0440\u0430\u0441\u0445\u043e\u0434\u043d[\u0430-\u044f\u0451]*)\b",
+    re.IGNORECASE,
+)
 _SUBSTATION_DESTINATION_PATTERN = re.compile(
     r"\b(?:для|на|в)\s+(?:пс\b|подстанци[а-яё]*)[\s\S]{0,80}?"
     r"\d{2,4}(?:[.,]\d+)?(?:\s*/\s*\d{1,4}(?:[.,]\d+)?)*\s*(?:кв|kv)\b",
+    re.IGNORECASE,
+)
+_SITE_OBJECT_LABEL_PATTERN = re.compile(
+    r"\b(?:\u043f\u0441|\u043f\u043e\u0434\u0441\u0442\u0430\u043d\u0446\u0438[\u044f\u0438\u0435\u044e\u0439]|"
+    r"\u043b\u044d\u043f|\u0432\u043b|\u043b\u0438\u043d\u0438\u044f\s+\u044d\u043b\u0435\u043a\u0442\u0440\u043e\u043f\u0435\u0440\u0435\u0434\u0430\u0447[\u0438\u0435])\b",
     re.IGNORECASE,
 )
 
@@ -451,6 +465,11 @@ def _find_supply_work_evidence(text: str) -> str | None:
             explicit_execution = _SUPPLY_WORK_EXPLICIT_EXECUTION_PATTERN.search(
                 context
             )
+            # A template can say that mounting is included in a subject or a
+            # price without assigning the work to this supplier.  This refusal
+            # reason needs a direct supplier/contractor execution statement.
+            if not explicit_execution:
+                continue
             if (
                 _SUPPLY_WORK_DOCUMENT_TRANSFER_PATTERN.search(context)
                 and not explicit_execution
@@ -608,6 +627,20 @@ def _voltage_text_snippet(text: str, start: int, end: int, radius: int = 120) ->
     return re.sub(r"\s+", " ", text[max(0, start - radius): end + radius]).strip()
 
 
+def _is_site_object_voltage_reference(text: str, start: int) -> bool:
+    """Return whether a voltage belongs to a PS/line object, not the product.
+
+    Product rows often retain the object name, e.g. ``IP-camera for PS 220
+    kV``.  Its voltage class describes the installation site and must not
+    trigger the high-voltage-equipment refusal reason.
+    """
+    prefix = text[max(0, start - 100):start]
+    # Do not reach across a sentence/cell boundary: a new sentence can start
+    # describing the actual purchased equipment and its own voltage class.
+    prefix = re.split(r"[.;\n]", prefix)[-1]
+    return bool(_SITE_OBJECT_LABEL_PATTERN.search(prefix))
+
+
 def _extract_voltage_mentions(text: str) -> list[dict[str, Any]]:
     mentions: list[dict[str, Any]] = []
     compound_spans: list[tuple[int, int]] = []
@@ -662,6 +695,12 @@ def _collect_product_voltage_mentions(product_check: dict[str, Any]) -> list[dic
             continue
         position_index = detail.get("positionIndex") or fallback_index
         source_product = str(detail.get("sourceProduct") or "").strip()
+        # The rule is about high-voltage equipment, not every material used
+        # in a 35 kV circuit.  In particular, insulators and line fittings
+        # retain their voltage rating but do not make the tender a purchase of
+        # equipment 35 kV and above.
+        if _NON_HIGH_VOLTAGE_EQUIPMENT_PRODUCT_PATTERN.search(source_product):
+            continue
         seen_texts: set[str] = set()
         for source_field in (
             "sourceProduct",
@@ -675,6 +714,10 @@ def _collect_product_voltage_mentions(product_check: dict[str, Any]) -> list[dic
                 continue
             seen_texts.add(normalized_text)
             for mention in _extract_voltage_mentions(source_text):
+                if _is_site_object_voltage_reference(
+                    source_text, int(mention["start"])
+                ):
+                    continue
                 if (
                     _NON_ELECTRICAL_SITE_PRODUCT_PATTERN.search(source_text)
                     and _SUBSTATION_DESTINATION_PATTERN.search(source_text)
@@ -1630,6 +1673,10 @@ def build_decision_prompt(
   к рабочим, календарным и дням без уточнения типа.
 - Причина «{COVERAGE_REASON}» полностью детерминирована; LLM запрещено выбирать её.
 - Причина «{HIGH_VOLTAGE_REASON}» полностью детерминирована по товарным позициям; LLM запрещено выбирать её.
+  Само значение «35 кВ» недостаточно: изоляторы, изоляционные изделия, арматура, крепёж,
+  зажимы, комплектующие и расходные материалы не являются высоковольтным оборудованием.
+  Напряжение в названии ПС/подстанции/ЛЭП/ВЛ описывает объект установки, а не товар; для
+  причины нужен класс напряжения именно закупаемого электротехнического оборудования.
 - Для неделимого лота проверка проходит при coverage не менее 80% (`>= 80`).
 - Для делимого лота проверка проходит, если найдена хотя бы одна поставляемая позиция.
 - Если делимость лота не подтверждена, применяется безопасное правило неделимого лота: coverage >= 80%.

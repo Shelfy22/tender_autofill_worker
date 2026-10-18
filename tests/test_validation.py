@@ -1,4 +1,11 @@
-from app.models import ExtractedFieldsResponse, FieldValue, NormalizedJob
+from app.models import (
+    ExtractedFieldsResponse,
+    FieldValue,
+    NormalizedJob,
+    ParsedDocument,
+    SpreadsheetRow,
+    SpreadsheetTable,
+)
 from app.services.validation import validate_fields
 
 
@@ -103,6 +110,69 @@ def test_direct_payment_term_fills_missing_llm_field() -> None:
     assert meta["paymentDelayDays"]["confidence"] == "high"
 
 
+def test_payment_delay_uses_largest_document_option_over_smaller_llm_value() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "paymentDelayDays": FieldValue(
+                value=7,
+                confidence="high",
+                source="contract.docx",
+                evidence="\u041e\u043f\u043b\u0430\u0442\u0430 \u0432 \u0442\u0435\u0447\u0435\u043d\u0438\u0435 7 \u0440\u0430\u0431\u043e\u0447\u0438\u0445 \u0434\u043d\u0435\u0439.",
+            )
+        }
+    )
+    text = (
+        "\u0412\u0430\u0440\u0438\u0430\u043d\u0442 1. \u041e\u043f\u043b\u0430\u0442\u0430 \u043f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0438\u0442\u0441\u044f \u043d\u0435 \u043f\u043e\u0437\u0434\u043d\u0435\u0435 7 \u0440\u0430\u0431\u043e\u0447\u0438\u0445 \u0434\u043d\u0435\u0439. "
+        "\u0412\u0430\u0440\u0438\u0430\u043d\u0442 2. \u041e\u043f\u043b\u0430\u0442\u0430 \u043f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0438\u0442\u0441\u044f \u043d\u0435 \u043f\u043e\u0437\u0434\u043d\u0435\u0435 30 \u0440\u0430\u0431\u043e\u0447\u0438\u0445 \u0434\u043d\u0435\u0439."
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), extracted, text, [])
+
+    assert fields["paymentDelayDays"] == 42
+    assert "30" in meta["paymentDelayDays"]["evidence"]
+
+
+def test_batch_word_without_requests_does_not_confirm_by_requests_delivery() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="by_requests",
+                confidence="high",
+                source="contract.docx",
+                evidence="\u041f\u043e\u0441\u0442\u0430\u0432\u0449\u0438\u043a \u0441\u043e\u0433\u043b\u0430\u0441\u043e\u0432\u044b\u0432\u0430\u0435\u0442 \u0434\u0430\u0442\u0443 \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438 \u043a\u0430\u0436\u0434\u043e\u0439 \u043f\u0430\u0440\u0442\u0438\u0438.",
+            )
+        }
+    )
+
+    fields, _, warnings = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert "deliveryType" not in fields
+    assert any("\u043f\u0430\u0440\u0442\u0438\u0438" in warning for warning in warnings)
+
+
+def test_unconfirmed_requests_with_direct_deadline_becomes_single_date() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="by_requests",
+                confidence="high",
+                source="contract.docx",
+                evidence="\u0414\u0430\u0442\u0430 \u043a\u0430\u0436\u0434\u043e\u0439 \u043f\u0430\u0440\u0442\u0438\u0438 \u0441\u043e\u0433\u043b\u0430\u0441\u043e\u0432\u044b\u0432\u0430\u0435\u0442\u0441\u044f \u0441 \u043f\u043e\u043a\u0443\u043f\u0430\u0442\u0435\u043b\u0435\u043c.",
+            ),
+            "deliveryDate": FieldValue(
+                value="2026-12-15",
+                confidence="high",
+                source="\u0422\u0417.docx",
+                evidence="\u0421\u0440\u043e\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438: \u043d\u0435 \u043f\u043e\u0437\u0434\u043d\u0435\u0435 15.12.2026.",
+            ),
+        }
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert fields["deliveryType"] == "single_date"
+
+
 def test_document_result_date_calculates_contract_date() -> None:
     extracted = ExtractedFieldsResponse(
         fields={
@@ -122,6 +192,17 @@ def test_document_result_date_calculates_contract_date() -> None:
     assert meta["contractDate"]["source"] == (
         "Расчёт / дата подведения итогов + 20 календарных дней"
     )
+
+
+def test_result_stage_uses_stage_end_date_from_long_notice_row() -> None:
+    text = (
+        "\u042d\u0442\u0430\u043f \u00ab\u041f\u043e\u0434\u0432\u0435\u0434\u0435\u043d\u0438\u0435 \u0438\u0442\u043e\u0433\u043e\u0432 \u0437\u0430\u043a\u0443\u043f\u043a\u0438, \u0432 \u0440\u0430\u043c\u043a\u0430\u0445 \u043a\u043e\u0442\u043e\u0440\u043e\u0433\u043e \u043e\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043e\u0446\u0435\u043d\u043a\u0430 \u0438 \u0441\u043e\u043f\u043e\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0437\u0430\u044f\u0432\u043e\u043a\u00bb: "
+        "\u0434\u0430\u0442\u0430 \u043d\u0430\u0447\u0430\u043b\u0430 \u044d\u0442\u0430\u043f\u0430 - 26.10.2026 \u0433. \u0434\u0430\u0442\u0430 \u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u044f \u044d\u0442\u0430\u043f\u0430 - 29.10.2026 \u0433."
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["resultDate"] == "2026-10-29"
 
 
 def test_delivery_type_is_not_invented_from_document_regex() -> None:
@@ -337,6 +418,117 @@ def test_minimum_share_evidence_overrides_misclassified_preference() -> None:
     fields, _, _ = validate_fields(job_with_lot(""), extracted, "", [])
 
     assert fields["nationalRegime"] == "no"
+
+
+def test_product_protection_table_overrides_generic_national_regime_candidate() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "nationalRegime": FieldValue(
+                value="ban",
+                confidence="high",
+                source="Документация.docx, п. 4.14",
+                evidence=(
+                    "а) запрет закупок; б) ограничение закупок; "
+                    "в) преимущество в отношении товаров российского происхождения"
+                ),
+            )
+        }
+    )
+    product_table = SpreadsheetTable(
+        fileName="Сведения о стране происхождения.xlsx",
+        sheet="Лист1",
+        rows=[
+            SpreadsheetRow(
+                row=8,
+                cells={
+                    "A": "№ позиции",
+                    "E": "Вид защитной меры (запрет/ограничение)",
+                },
+            ),
+            SpreadsheetRow(row=10, cells={"A": "1", "E": "ограничение"}),
+            SpreadsheetRow(row=28, cells={"A": "19", "E": "ограничение"}),
+        ],
+    )
+    documents = [
+        ParsedDocument(
+            documentIndex=1,
+            fileName="Сведения о стране происхождения.xlsx",
+            spreadsheetTables=[product_table],
+        )
+    ]
+
+    fields, meta, warnings = validate_fields(job_with_lot(""), extracted, "", documents)
+
+    assert fields["nationalRegime"] == "restriction"
+    assert meta["nationalRegime"]["confidence"] == "high"
+    assert "Вид защитной меры" in meta["nationalRegime"]["evidence"]
+    assert any("товарной таблицы заменил" in warning for warning in warnings)
+
+
+def test_generic_national_regime_enumeration_does_not_fill_card() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "nationalRegime": FieldValue(
+                value="ban",
+                confidence="high",
+                source="Документация.docx, п. 4.14",
+                evidence=(
+                    "а) запрет закупок; б) ограничение закупок; "
+                    "в) преимущество в отношении товаров российского происхождения"
+                ),
+            )
+        }
+    )
+
+    fields, _, warnings = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert "nationalRegime" not in fields
+    assert any("перечисляет общие меры" in warning for warning in warnings)
+
+
+def test_treasury_support_does_not_create_goz_or_special_account() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "stateDefenseOrder": FieldValue(
+                value="yes",
+                confidence="high",
+                source="Проект договора.docx",
+                evidence="Казначейское сопровождение целевых средств",
+            ),
+            "specialAccount": FieldValue(
+                value="yes",
+                confidence="high",
+                source="Проект договора.docx",
+                evidence="Открыть счёт для операций с целевыми средствами",
+            ),
+        }
+    )
+    text = (
+        "Закупка по 223-ФЗ. Предусмотрено казначейское сопровождение субсидии и "
+        "идентификатор государственного контракта (соглашения). Поставщик открывает "
+        "счёт для операций с целевыми средствами. Обеспечение заявки не установлено."
+    )
+
+    fields, _, warnings = validate_fields(job_with_lot(""), extracted, text, [])
+
+    assert fields["stateDefenseOrder"] == "no"
+    assert fields["specialAccount"] == "no"
+    assert any("не доказывают ГОЗ" in warning for warning in warnings)
+    assert any("не найдено прямого требования спецсчёта" in warning for warning in warnings)
+
+
+def test_direct_goz_and_bid_security_special_account_are_preserved() -> None:
+    text = (
+        "Поставка выполняется в рамках государственного оборонного заказа в соответствии "
+        "с 275-ФЗ. Участник обязан внести обеспечение заявки на специальный банковский счёт."
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["stateDefenseOrder"] == "yes"
+    assert fields["specialAccount"] == "yes"
+    assert meta["stateDefenseOrder"]["confidence"] == "high"
+    assert meta["specialAccount"]["confidence"] == "high"
 
 
 def test_batch_delivery_without_stated_term_remains_blank() -> None:

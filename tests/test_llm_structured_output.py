@@ -365,8 +365,10 @@ def test_document_analyzer_prompt_distinguishes_documents_from_works_and_zip() -
     assert "ЗИП/ремкомплект/запасные части" in prompt
     assert "stateDefenseOrder" in prompt
     assert "specialAccount" in prompt
+    assert "ГОЗ/275-ФЗ" in prompt
     assert "nationalRegime" in prompt
     assert "minimum_share" in prompt
+    assert "Вид защитной меры" in prompt
     assert "lotDivisible" in prompt
     assert "deliveryNote — это примечание именно к deliveryType" in prompt
     assert "Не возвращай coverage" in prompt
@@ -391,6 +393,7 @@ def test_commercial_conditions_prompt_handles_minimum_share_as_no() -> None:
     assert captured["schema"] is CommercialConditionsResponse
     assert "minimum_share" in str(captured["prompt"])
     assert "означает «не найдено»" in str(captured["prompt"])
+    assert "Вид защитной меры" in str(captured["prompt"])
 
 
 def test_product_hierarchy_uses_structured_response() -> None:

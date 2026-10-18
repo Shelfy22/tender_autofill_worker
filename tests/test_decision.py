@@ -273,6 +273,22 @@ def test_mounting_cost_or_documentation_is_not_supply_with_work() -> None:
         assert SUPPLY_WORK_REASON not in [reason.reason for reason in reasons]
 
 
+def test_generic_subject_phrase_without_supplier_duty_is_not_supply_with_work() -> None:
+    text = (
+        "\u0412 \u0442\u0438\u043f\u043e\u0432\u044b\u0445 \u0443\u0441\u043b\u043e\u0432\u0438\u044f\u0445 \u043f\u0440\u0435\u0434\u043c\u0435\u0442 \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438 \u043c\u043e\u0436\u0435\u0442 \u0432\u043a\u043b\u044e\u0447\u0430\u0442\u044c \u043c\u043e\u043d\u0442\u0430\u0436 \u0438 \u043f\u0443\u0441\u043a\u043e\u043d\u0430\u043b\u0430\u0434\u043a\u0443. "
+        "\u041f\u0440\u0435\u0434\u043c\u0435\u0442 \u043d\u0430\u0441\u0442\u043e\u044f\u0449\u0435\u0439 \u0437\u0430\u043a\u0443\u043f\u043a\u0438 — \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0430 \u043a\u043e\u043c\u043c\u0443\u0442\u0430\u0442\u043e\u0440\u043e\u0432."
+    )
+
+    reasons, _ = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(total=1),
+        text,
+    )
+
+    assert SUPPLY_WORK_REASON not in [reason.reason for reason in reasons]
+
+
 def test_documentation_does_not_hide_separate_direct_work_obligation() -> None:
     text = (
         "Поставщик обязан выполнить шефмонтаж и пусконаладочные работы на объекте. "
@@ -1688,6 +1704,52 @@ def test_compound_35_10_kv_in_product_position_triggers_reason() -> None:
     assert [
         item["voltageKv"] for item in checks["highVoltageCheck"]["parsedVoltages"]
     ] == [35.0, 10.0]
+
+
+def test_35_kv_insulator_is_not_high_voltage_equipment() -> None:
+    product = (
+        "\u0418\u0437\u043e\u043b\u044f\u0442\u043e\u0440 \u043e\u043f\u043e\u0440\u043d\u044b\u0439 \u043f\u043e\u043b\u0438\u043c\u0435\u0440\u043d\u044b\u0439 \u041e\u0421\u041a 10-35-\u041101-2 \u0423\u0425\u041b1 \u043d\u0430\u0440\u0443\u0436\u043d\u043e\u0439 "
+        "\u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u0438 \u043d\u0430 \u043d\u0430\u043f\u0440\u044f\u0436\u0435\u043d\u0438\u0435 35 \u043a\u0412"
+    )
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {},
+        _voltage_product_check(product),
+        product,
+    )
+
+    assert HIGH_VOLTAGE_REASON not in [item.reason for item in reasons]
+    assert checks["highVoltageCheck"]["triggered"] is False
+    assert checks["highVoltageCheck"]["parsedVoltages"] == []
+
+
+def test_35_kv_transformer_remains_high_voltage_equipment() -> None:
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {},
+        _voltage_product_check("\u0422\u0440\u0430\u043d\u0441\u0444\u043e\u0440\u043c\u0430\u0442\u043e\u0440 \u0422\u041c\u0413-1000/35/10 \u043a\u0412"),
+        "",
+    )
+
+    assert HIGH_VOLTAGE_REASON in [item.reason for item in reasons]
+    assert checks["highVoltageCheck"]["triggered"] is True
+
+
+def test_substation_voltage_in_camera_position_is_not_product_voltage() -> None:
+    product = (
+        "IP-\u043a\u0430\u043c\u0435\u0440\u0430 \u0434\u043b\u044f \u041f\u0421 220 \u043a\u0412 \u041a\u0421-3, \u041f\u0421 110 \u043a\u0412 \u041a\u0421-4; "
+        "\u0432\u0438\u0434\u0435\u043e\u043d\u0430\u0431\u043b\u044e\u0434\u0435\u043d\u0438\u0435 \u0438 \u0441\u0432\u044f\u0437\u044c."
+    )
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {},
+        _voltage_product_check(product),
+        product,
+    )
+
+    assert HIGH_VOLTAGE_REASON not in [item.reason for item in reasons]
+    assert checks["highVoltageCheck"]["triggered"] is False
+    assert checks["highVoltageCheck"]["parsedVoltages"] == []
 
 
 def test_voltage_in_contextual_position_evidence_triggers_reason() -> None:

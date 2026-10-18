@@ -101,9 +101,37 @@ _NATIONAL_REGIME_PATTERNS = (
     ("restriction", re.compile(r"\u043e\u0433\u0440\u0430\u043d\u0438\u0447\w*", re.IGNORECASE)),
     ("preference", re.compile(r"\u043f\u0440\u0435\u0438\u043c\u0443\u0449\u0435\u0441\u0442\u0432\w*", re.IGNORECASE)),
 )
+_NATIONAL_REGIME_TABLE_HEADER_PATTERN = re.compile(
+    r"\u0432\u0438\u0434\s+\u0437\u0430\u0449\u0438\u0442\u043d\w*\s+\u043c\u0435\u0440\w*",
+    re.IGNORECASE,
+)
 _NATIONAL_MINIMUM_SHARE_PATTERN = re.compile(
     r"(?:минимальн\w*\s+обязательн\w*\s+дол\w*|"
     r"minimum\s+(?:mandatory\s+)?share)",
+    re.IGNORECASE,
+)
+_GOZ_DIRECT_PATTERN = re.compile(
+    r"(?:\b\u0433\u043e\u0437\b|\u0433\u043e\u0441\u043e\u0431\u043e\u0440\u043e\u043d\u0437\u0430\u043a\u0430\u0437|"
+    r"\u0433\u043e\u0441\u0443\u0434\u0430\u0440\u0441\u0442\u0432\u0435\u043d\u043d\w*\s+\u043e\u0431\u043e\u0440\u043e\u043d\u043d\w*\s+\u0437\u0430\u043a\u0430\u0437|"
+    r"\b275\s*[-\u2011\u2013\u2014]?\s*\u0444\u0437\b)",
+    re.IGNORECASE,
+)
+_SPECIAL_ACCOUNT_TERM_PATTERN = re.compile(
+    r"(?:\u0441\u043f\u0435\u0446\s*\u0441\u0447[её]т|"
+    r"\u0441\u043f\u0435\u0446\u0438\u0430\u043b\u044c\u043d\w*\s+\u0431\u0430\u043d\u043a\u043e\u0432\u0441\u043a\w*\s+\u0441\u0447[её]т)",
+    re.IGNORECASE,
+)
+_APPLICATION_SECURITY_CONTEXT_PATTERN = re.compile(
+    r"\u043e\u0431\u0435\u0441\u043f\u0435\u0447\u0435\u043d\u0438\w*\s+\u0437\u0430\u044f\u0432\u043a\w*",
+    re.IGNORECASE,
+)
+_APPLICATION_SECURITY_ABSENT_PATTERN = re.compile(
+    r"\u043e\u0431\u0435\u0441\u043f\u0435\u0447\u0435\u043d\u0438\w*\s+\u0437\u0430\u044f\u0432\u043a\w*[^.\n]{0,160}?"
+    r"(?:\u043d\u0435\s+(?:\u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\w*|\u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f|\u043f\u0440\u0435\u0434\u0443\u0441\u043c\u043e\u0442\u0440\u0435\u043d\w*)|\u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442|0\s*(?:\u0440\u0443\u0431|\u0440\u0443\u0431\u043b))",
+    re.IGNORECASE,
+)
+_SPECIAL_ACCOUNT_REQUIREMENT_PATTERN = re.compile(
+    r"(?:\u043e\u0431\u044f\u0437\u0430\u043d\w*|\u0434\u043e\u043b\u0436\u0435\u043d\w*|\u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f|\u0432\u043d\u043e\u0441\u0438\u0442\w*|\u043f\u0435\u0440\u0435\u0447\u0438\u0441\u043b\u044f\u0435\u0442\w*)",
     re.IGNORECASE,
 )
 _RUSSIAN_MONTHS = {
@@ -133,6 +161,12 @@ _RESULT_DATE_PATTERN = re.compile(
     r"[\s\S]{0,100}?"
     r"(\d{1,2}\.\d{1,2}\.\d{4}|[«\"]?\s*\d{1,2}\s*[»\"]?\s+"
     r"(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+\d{4}(?:\s*года)?)",
+    re.IGNORECASE,
+)
+_RESULT_STAGE_END_DATE_PATTERN = re.compile(
+    r"(?:\u044d\u0442\u0430\u043f\s*[\u00ab\"]?\s*\u043f\u043e\u0434\u0432\u0435\u0434\u0435\u043d\w*\s+\u0438\u0442\u043e\u0433\u043e\u0432[\s\S]{0,1200}?"
+    r"\u0434\u0430\u0442\u0430\s+\u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u044f\s+\u044d\u0442\u0430\u043f\u0430\s*[-:\u2013\u2014]?\s*)"
+    r"(\d{1,2}\.\d{1,2}\.\d{4})",
     re.IGNORECASE,
 )
 _SECURITY_VALUE_PATTERN = re.compile(r"\d")
@@ -235,6 +269,105 @@ def _national_regime_from_text(text: str) -> tuple[str, str] | None:
     return None
 
 
+def _table_regime_value(value: Any) -> str | None:
+    normalized = re.sub(r"\s+", " ", str(value or "").casefold().replace("ё", "е")).strip()
+    if not normalized:
+        return None
+    if _NATIONAL_MINIMUM_SHARE_PATTERN.search(normalized):
+        return "no"
+    for regime, pattern in _NATIONAL_REGIME_PATTERNS:
+        if pattern.fullmatch(normalized):
+            return regime
+    return None
+
+
+def _national_regime_from_product_tables(
+    documents: list[ParsedDocument],
+) -> tuple[str, str, str] | None:
+    """Return a measure explicitly set in a product-level protection table.
+
+    A procurement template often lists every possible PP 1875 measure in
+    prose.  A table whose column is explicitly named ``Вид защитной меры`` is
+    tender-specific evidence: its row values take priority over that prose.
+    """
+    measures: set[str] = set()
+    samples: list[str] = []
+    sources: list[str] = []
+    for document in documents:
+        for table in document.spreadsheetTables:
+            measure_column = ""
+            header = ""
+            for row in table.rows:
+                found_header = next(
+                    (
+                        (column, value)
+                        for column, value in row.cells.items()
+                        if _NATIONAL_REGIME_TABLE_HEADER_PATTERN.search(str(value))
+                    ),
+                    None,
+                )
+                if found_header is not None:
+                    measure_column, header = found_header
+                    continue
+                if not measure_column:
+                    continue
+                regime = _table_regime_value(row.cells.get(measure_column))
+                if regime is None:
+                    continue
+                measures.add(regime)
+                source = document.fileName or table.fileName or "Таблица закупки"
+                source_label = f"{source}, лист {table.sheet}"
+                if source_label not in sources:
+                    sources.append(source_label)
+                if len(samples) < 3:
+                    position = row.cells.get("A") or row.cells.get("B") or f"строка {row.row}"
+                    samples.append(
+                        f"{header}: позиция {position} — {row.cells.get(measure_column)}"
+                    )
+
+    if not measures:
+        return None
+    ordered = [regime for regime in ("ban", "restriction", "preference") if regime in measures]
+    value = "; ".join(ordered) if ordered else "no"
+    return value, "; ".join(sources), "; ".join(samples)
+
+
+def _is_generic_national_regime_list(evidence: Any) -> bool:
+    """True for a boilerplate enumeration of all PP 1875 measures."""
+    text = re.sub(r"\s+", " ", str(evidence or "").casefold().replace("ё", "е"))
+    has_all_measures = all(
+        marker in text for marker in ("запрет", "ограничен", "преимуществ")
+    )
+    return has_all_measures and bool(
+        re.search(r"(?:\bа\)|\bб\)|\bв\)|далее\s*[-–—])", text)
+    )
+
+
+def _direct_goz_evidence(text: str) -> str:
+    match = _GOZ_DIRECT_PATTERN.search(text or "")
+    return match.group(0) if match is not None else ""
+
+
+def _has_required_special_account(text: str) -> bool:
+    """Recognize a bid-security special account, not a treasury target account."""
+    normalized = str(text or "")
+    if _APPLICATION_SECURITY_ABSENT_PATTERN.search(normalized):
+        return False
+    for match in _SPECIAL_ACCOUNT_TERM_PATTERN.finditer(normalized):
+        start = max(0, match.start() - 260)
+        end = min(len(normalized), match.end() + 260)
+        fragment = normalized[start:end]
+        if not _APPLICATION_SECURITY_CONTEXT_PATTERN.search(fragment):
+            continue
+        # A conditional boilerplate clause "если предусмотрено требование" is
+        # not proof that this tender actually requires a special account.
+        if re.search(r"\bесли\b|в\s+случае", fragment, re.IGNORECASE):
+            continue
+        if _SPECIAL_ACCOUNT_REQUIREMENT_PATTERN.search(fragment):
+            return True
+    return False
+
+
 def _normalize_national_regime(value: Any, evidence: Any) -> str | None:
     """Keep an absent regime absent; map minimum-share regime to ``no``.
 
@@ -258,10 +391,29 @@ def _normalize_national_regime(value: Any, evidence: Any) -> str | None:
 def _explicit_result_date(text: str) -> tuple[str, str] | None:
     """Find the published tender-result date in attached documents."""
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-    match = _RESULT_DATE_PATTERN.search(normalized)
+    # Procurement notices often encode the result as a long table row: the
+    # stage title is followed by both a start and an end date.  In that form
+    # the end of the stage is the result date, not the first date in the row.
+    match = _RESULT_STAGE_END_DATE_PATTERN.search(normalized)
+    if match is None:
+        match = _RESULT_DATE_PATTERN.search(normalized)
     if match is None:
         return None
     return _normalize_date(match.group(1)), match.group(0)[:500]
+
+
+def _delivery_type_has_request_evidence(evidence: Any) -> bool:
+    """`by_requests` needs an actual request/order mechanism, not a batch noun."""
+    text = re.sub(r"\s+", " ", str(evidence or "")).casefold()
+    return bool(
+        re.search(
+            r"\u043f\u043e\s+\u0437\u0430\u044f\u0432\u043a|"
+            r"\u0437\u0430\u044f\u0432\u043a\u0430\s+\u0437\u0430\u043a\u0430\u0437\u0447\u0438\u043a|"
+            r"\u043f\u043e\s+\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434",
+            text,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _has_explicit_delivery_deadline_evidence(evidence: Any) -> bool:
@@ -431,6 +583,32 @@ def validate_fields(
     else:
         warnings.append("LLM extraction не выполнен; применены deterministic fallbacks.")
 
+    table_national_regime = _national_regime_from_product_tables(documents)
+    if table_national_regime is not None:
+        table_value, table_source, table_evidence = table_national_regime
+        previous_value = fields.get("nationalRegime")
+        if previous_value and str(previous_value).strip() != table_value:
+            warnings.append(
+                "nationalRegime из товарной таблицы заменил конфликтующий кандидат из общего текста."
+            )
+        _set(
+            fields,
+            meta,
+            "nationalRegime",
+            table_value,
+            table_source,
+            "high",
+            table_evidence,
+        )
+    elif "nationalRegime" in fields and _is_generic_national_regime_list(
+        meta.get("nationalRegime", {}).get("evidence")
+    ):
+        fields.pop("nationalRegime", None)
+        meta.pop("nationalRegime", None)
+        warnings.append(
+            "nationalRegime не заполнен: evidence перечисляет общие меры ПП №1875 без связи с товарной позицией."
+        )
+
     if "nationalRegime" in fields:
         national_regime = _normalize_national_regime(
             fields.get("nationalRegime"),
@@ -575,22 +753,65 @@ def validate_fields(
     if not fields.get("federalLaw"):
         law = "223" if "223-фз" in text_lower or job.report_id == 1 else "44" if "44-фз" in text_lower or job.report_id == 2 else "commercial" if job.report_id == 3 else None
         _set(fields, meta, "federalLaw", law, "Seldon/документы", "high", f"reportId={job.report_id}")
-    goz = any(token in text_lower for token in ("гособоронзаказ", "275-фз", "отдельный банковский счет", "казначейское сопровождение"))
-    if not fields.get("stateDefenseOrder"):
-        _set(fields, meta, "stateDefenseOrder", "yes" if goz else "no", "Проверка признаков ГОЗ", "high" if goz else "medium", "Признаки ГОЗ найдены" if goz else "Признаки ГОЗ не найдены")
-    if not fields.get("specialAccount"):
-        special = goz or "спецсчет" in text_lower
-        _set(fields, meta, "specialAccount", "yes" if special else "no", "Проверка спецсчёта", "high" if special else "medium", "Признаки спецсчёта найдены" if special else "Признаки не найдены")
-    # A verified LLM candidate is primary. Regex is retrieval/fallback only:
-    # payment-related documents also contain delivery and warranty terms.
-    payment_delay = _payment_delay_from_field(
+    goz_evidence = _direct_goz_evidence(deterministic_text)
+    previous_goz = fields.get("stateDefenseOrder")
+    if str(previous_goz or "").casefold() in {"yes", "да", "true", "1"} and not goz_evidence:
+        warnings.append(
+            "stateDefenseOrder=да отклонён: казначейское сопровождение, субсидия, "
+            "идентификатор госконтракта или счёт целевых средств не доказывают ГОЗ."
+        )
+    _set(
+        fields,
+        meta,
+        "stateDefenseOrder",
+        "yes" if goz_evidence else "no",
+        "Документы / прямой признак ГОЗ",
+        "high" if goz_evidence else "medium",
+        goz_evidence or "Нет прямого упоминания ГОЗ или 275-ФЗ",
+    )
+
+    special_account_required = _has_required_special_account(deterministic_text)
+    previous_special_account = fields.get("specialAccount")
+    if (
+        str(previous_special_account or "").casefold() in {"yes", "да", "true", "1"}
+        and not special_account_required
+    ):
+        warnings.append(
+            "specialAccount=да отклонён: не найдено прямого требования спецсчёта "
+            "для обеспечения заявки."
+        )
+    _set(
+        fields,
+        meta,
+        "specialAccount",
+        "yes" if special_account_required else "no",
+        "Документы / спецсчёт для обеспечения заявки",
+        "high" if special_account_required else "medium",
+        (
+            "Прямое требование спецсчёта для обеспечения заявки"
+            if special_account_required
+            else "Нет прямого требования спецсчёта для обеспечения заявки"
+        ),
+    )
+    # A tender can specify several payment alternatives (for example, SME and
+    # non-SME suppliers).  The card rule is the largest confirmed term.  Do
+    # not let a partial LLM extraction of the smaller alternative override a
+    # larger direct term from the source document.
+    llm_payment_delay = _payment_delay_from_field(
         fields.get("paymentDelayDays"),
         meta.get("paymentDelayDays", {}).get("evidence"),
     )
-    payment_delay_source = "LLM evidence / отсрочка переведена по правилу 1.4"
-    if not payment_delay:
-        payment_delay = _payment_delay_from_text(deterministic_text)
-        payment_delay_source = "Документы / максимальная отсрочка оплаты в календарных днях"
+    document_payment_delay = _payment_delay_from_text(deterministic_text)
+    payment_delay = max(
+        (candidate for candidate in (llm_payment_delay, document_payment_delay) if candidate),
+        key=lambda candidate: candidate[0],
+        default=None,
+    )
+    payment_delay_source = (
+        "Документы / максимальная отсрочка оплаты в календарных днях"
+        if payment_delay == document_payment_delay
+        else "LLM evidence / отсрочка переведена по правилу 1.4"
+    )
     if payment_delay:
         days, evidence = payment_delay
         _set(
@@ -603,6 +824,30 @@ def validate_fields(
             evidence,
         )
     delivery_type = _normalize_delivery_type(fields.get("deliveryType"))
+    delivery_evidence = meta.get("deliveryType", {}).get("evidence")
+    if delivery_type == "by_requests" and not _delivery_type_has_request_evidence(
+        delivery_evidence
+    ):
+        # A phrase such as "отдельные партии" or an agreed date for each
+        # party describes logistics, but is not delivery on customer requests.
+        # Leave the type blank rather than converting it into a false request
+        # delivery; the factual text remains available in deliveryNote.
+        delivery_date_evidence = meta.get("deliveryDate", {}).get("evidence")
+        if fields.get("deliveryDate") and _has_explicit_delivery_deadline_evidence(
+            delivery_date_evidence
+        ):
+            delivery_type = "single_date"
+            delivery_evidence = delivery_date_evidence
+            warnings.append(
+                "Тип поставки исправлен с «по заявкам» на «к дате»: заявка/разнарядка не подтверждена, но есть прямая дата поставки."
+            )
+        else:
+            delivery_type = None
+            fields.pop("deliveryType", None)
+            meta.pop("deliveryType", None)
+            warnings.append(
+                "Тип поставки «по заявкам» не подтверждён: упоминание партии без заявки/разнарядки не является основанием."
+            )
     if delivery_type:
         _set(
             fields,
