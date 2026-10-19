@@ -827,7 +827,7 @@ class DecisionReason(BaseModel):
 
 class HardReasonReview(BaseModel):
     reason: str
-    verdict: Literal["confirm", "dismiss"]
+    verdict: Literal["confirm", "dismiss", "manual_review"]
     rationale: str
     confidence: Literal["low", "medium", "high"] = "medium"
 

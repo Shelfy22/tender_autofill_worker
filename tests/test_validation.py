@@ -256,7 +256,7 @@ def test_llm_delivery_deadline_is_preserved_without_regex_override() -> None:
     assert not warnings
 
 
-def test_payment_delay_uses_largest_variant_and_converts_working_days() -> None:
+def test_payment_delay_prefers_sme_variant_without_conversion() -> None:
     text = """
     Для субъектов МСП оплата производится в течение 30 рабочих дней.
     Для остальных поставщиков отсрочка платежа составляет от 30 до 60 календарных дней.
@@ -264,8 +264,23 @@ def test_payment_delay_uses_largest_variant_and_converts_working_days() -> None:
 
     fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
 
-    assert fields["paymentDelayDays"] == 84
+    assert fields["paymentDelayDays"] == 30
     assert meta["paymentDelayDays"]["confidence"] == "high"
+    assert meta["paymentDelayDays"]["source"] == "Документы / срок оплаты для МСП или самозанятого"
+
+
+def test_payment_delay_prefers_sme_term_over_ninety_day_general_term() -> None:
+    text = """
+    Если поставщик является субъектом МСП или самозанятым, оплата производится
+    в течение 7 рабочих дней после подписания УПД.
+    Для остальных поставщиков оплата производится не более 90 календарных дней.
+    """
+
+    fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["paymentDelayDays"] == 7
+    assert "МСП" in meta["paymentDelayDays"]["evidence"]
+    assert meta["paymentDelayDays"]["source"] == "Документы / срок оплаты для МСП или самозанятого"
 
 
 def test_payment_delay_converts_payment_term_days() -> None:

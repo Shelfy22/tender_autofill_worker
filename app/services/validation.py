@@ -84,6 +84,11 @@ _PAYMENT_DELAY_VALUE_PATTERN = re.compile(
     r"\u0434\u043d(?:\u0435\u0439|\u044f)?\b",
     re.IGNORECASE,
 )
+_SME_PAYMENT_PATTERN = re.compile(
+    r"\b(?:мсп|субъект\w*\s+малого\s+и\s+среднего\s+предпринимательств\w*|"
+    r"самозанят\w*)\b",
+    re.IGNORECASE,
+)
 _CONTRACT_EXPIRY_DATE_PATTERN = re.compile(
     r"(?:\u0441\u0440\u043e\u043a\s+\u0434\u0435\u0439\u0441\u0442\u0432\w*\s+\u0434\u043e\u0433\u043e\u0432\u043e\u0440\w*|"
     r"\u0434\u043e\u0433\u043e\u0432\u043e\u0440\w*[^.\n]{0,120}?\u0434\u0435\u0439\u0441\u0442\u0432\w*)"
@@ -216,22 +221,32 @@ def _explicit_commercial_fields(text: str) -> dict[str, tuple[Any, str]]:
 
 
 def _payment_delay_from_text(text: str) -> tuple[int, str] | None:
-    """Return the largest stated payment delay as calendar days.
+    """Return the applicable payment delay in calendar days.
 
-    Tender documents commonly contain separate terms for SMEs and other
-    suppliers, or a range such as ``30-60 days``. The card needs the longest
-    permissible delay. The business rule converts every stated number of days
-    using ``ceil(days * 1.4)`` because the source documents do not reliably
-    distinguish working and calendar days.
+    Where a procurement explicitly gives an SME/self-employed supplier a
+    separate term, the group has an eligible legal entity and that term wins.
+    It is stored as written. Otherwise retain the established conservative
+    rule: choose the longest term and convert it using ``ceil(days * 1.4)``.
     """
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     candidates: list[tuple[int, str]] = []
+    sme_candidates: list[tuple[int, str]] = []
     for context_match in _PAYMENT_TERM_CONTEXT_PATTERN.finditer(normalized):
-        evidence = context_match.group(0).strip()
+        clause_start = max(
+            normalized.rfind(".", 0, context_match.start()),
+            normalized.rfind(";", 0, context_match.start()),
+            normalized.rfind("\n", 0, context_match.start()),
+        ) + 1
+        evidence = normalized[clause_start:context_match.end()].strip()
         for value_match in _PAYMENT_DELAY_VALUE_PATTERN.finditer(evidence):
             lower, upper, _unit = value_match.groups()
-            days = ceil(max(int(lower), int(upper or lower)) * 1.4)
-            candidates.append((days, evidence[:500]))
+            source_days = max(int(lower), int(upper or lower))
+            if _SME_PAYMENT_PATTERN.search(evidence):
+                sme_candidates.append((source_days, evidence[:500]))
+            else:
+                candidates.append((ceil(source_days * 1.4), evidence[:500]))
+    if sme_candidates:
+        return min(sme_candidates, key=lambda candidate: candidate[0])
     return max(candidates, key=lambda candidate: candidate[0]) if candidates else None
 
 
@@ -245,6 +260,8 @@ def _payment_delay_from_field(value: Any, evidence: Any) -> tuple[int, str] | No
     match = re.search(r"\d{1,4}", str(value or ""))
     if match is None:
         return None
+    if _SME_PAYMENT_PATTERN.search(text):
+        return int(match.group(0)), text[:500]
     return ceil(int(match.group(0)) * 1.4), text[:500]
 
 
@@ -793,22 +810,31 @@ def validate_fields(
             else "Нет прямого требования спецсчёта для обеспечения заявки"
         ),
     )
-    # A tender can specify several payment alternatives (for example, SME and
-    # non-SME suppliers).  The card rule is the largest confirmed term.  Do
-    # not let a partial LLM extraction of the smaller alternative override a
-    # larger direct term from the source document.
+    # A separate term for an SME/self-employed supplier is selected because
+    # the group can participate through the eligible legal entity. In every
+    # other case retain the conservative largest-confirmed-term rule.
     llm_payment_delay = _payment_delay_from_field(
         fields.get("paymentDelayDays"),
         meta.get("paymentDelayDays", {}).get("evidence"),
     )
     document_payment_delay = _payment_delay_from_text(deterministic_text)
-    payment_delay = max(
-        (candidate for candidate in (llm_payment_delay, document_payment_delay) if candidate),
-        key=lambda candidate: candidate[0],
-        default=None,
+    document_has_sme_term = bool(
+        document_payment_delay
+        and _SME_PAYMENT_PATTERN.search(document_payment_delay[1])
+    )
+    payment_delay = (
+        document_payment_delay
+        if document_has_sme_term
+        else max(
+            (candidate for candidate in (llm_payment_delay, document_payment_delay) if candidate),
+            key=lambda candidate: candidate[0],
+            default=None,
+        )
     )
     payment_delay_source = (
-        "Документы / максимальная отсрочка оплаты в календарных днях"
+        "Документы / срок оплаты для МСП или самозанятого"
+        if document_has_sme_term
+        else "Документы / максимальная отсрочка оплаты в календарных днях"
         if payment_delay == document_payment_delay
         else "LLM evidence / отсрочка переведена по правилу 1.4"
     )

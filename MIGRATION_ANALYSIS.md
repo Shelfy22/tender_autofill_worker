@@ -297,9 +297,9 @@ Finalizer читает следующие ключи особенно явно:
 - правило неделимого лота по порогу 80% отключено;
 - менее 3 рабочих дней определяется только колонкой `Осталось дней`; условие строго `<3`, значение 3 проходит;
 - если IPro lookup не `matched`, итоговый статус имеет приоритет `Проработка контрагента`, причина `Прочее`;
-- затем по приоритету hard reasons -> `Отказано КУ ЦП`;
-- затем подтверждённый LLM reject -> `Отказано КУ ЦП`;
-- LLM approve без hard reasons -> `Согласовано КУ ЦП`;
+- затем по приоритету hard reasons -> `Отказано КСОТП`;
+- затем подтверждённый LLM reject -> `Отказано КСОТП`;
+- LLM approve без hard reasons -> `Согласовано КСОТП`;
 - невалидный/пустой LLM decision без hard reasons -> `Загружен Seldon` / `Прочее`.
 
 Детерминированные hard reasons включают: duplicate, сроки, payment-after-contractor, чрезмерную отсрочку, удалённые территории (Якутия/Саха, Калининград), consignment/storage, 35+ kV, frequency drive 6–10 kV, spare kit/ZIP/drawing-made goods, military acceptance, atomic acceptance, supply with works, remaining days, self-submission by MOPP и другие оргкритерии из справочника ноды.

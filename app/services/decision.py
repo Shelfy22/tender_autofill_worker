@@ -44,9 +44,18 @@ INDIVISIBLE_REASON = (
     "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры"
 )
 COVERAGE_REASON = INDIVISIBLE_REASON
+# Временно отключено по решению заказчика: подбор номенклатуры для тендеров
+# специфичен и не должен сам по себе вести к автоматическому отказу. Константа
+# и расчёт покрытия сохранены, чтобы правило можно было вернуть без переписывания.
+INDIVISIBLE_LOT_REJECTION_ENABLED = False
+if not INDIVISIBLE_LOT_REJECTION_ENABLED:
+    REASONS = [reason for reason in REASONS if reason != INDIVISIBLE_REASON]
 PRICE_REASON = "Коммерческие условия. НМЦК менее 1 млн руб."
 ACTUAL_COST_REASON = "Коммерческие условия. НМЦК менее фактической стоимости"
 REMOTE_TERRITORY_REASON = "Коммерческие условия. Поставка в удаленные территории"
+REMOTE_TERRITORY_REVIEW_REASON = (
+    "Ручная проверка. Удаленная территория среди нескольких филиалов"
+)
 CONSIGNMENT_REASON = "Коммерческие условия. Консигнация / Хранение у Покупателя за счет Поставщика"
 PAYMENT_DELAY_REASON = "Коммерческие условия. Отсрочка платежа 90 дней и более"
 DOCUMENTATION_REASON = "Оргвопросы. Отсутствует ТЗ / Нет документации / Некорректная ссылка"
@@ -57,6 +66,18 @@ PAYMENT_DEPENDENCY_REASON = (
     "Коммерческие условия. Оплата Покупателем после оплаты Генподрядчиком / Госзаказчиком"
 )
 ORGANIZER_CANCELLATION_REASON = "Оргвопросы. Отказ организатора от проведения тендера"
+
+# These rules start with narrow keyword/context retrieval.  Their evidence is
+# supplied to the existing decision LLM for a semantic confirmation; numeric
+# thresholds, dates and other calculation-based hard rules are never reviewable.
+SEMANTIC_REVIEWABLE_HARD_REASONS = frozenset(
+    {
+        REPAIR_KIT_REASON,
+        CONSIGNMENT_REASON,
+        PAYMENT_DEPENDENCY_REASON,
+        ORGANIZER_CANCELLATION_REASON,
+    }
+)
 
 _MARKET_RESEARCH_FILENAME_PATTERN = re.compile(
     r"(?:^|[\s_.-])маркетингов(?:ое|ые)\s+исследовани(?:е|я)(?:[\s_.-]|$)",
@@ -164,6 +185,19 @@ _DELIVERY_FIELD_NAMES = (
     "deliveryRegion",
     "placeOfDelivery",
     "shippingAddress",
+)
+_MULTIPLE_BRANCHES_PATTERN = re.compile(
+    r"\b(?:филиалы|филиалов|нескольк\w*\s+филиал\w*)\b",
+    re.IGNORECASE,
+)
+_SME_PAYMENT_PATTERN = re.compile(
+    r"\b(?:мсп|субъект\w*\s+малого\s+и\s+среднего\s+предпринимательств\w*|"
+    r"самозанят\w*)\b",
+    re.IGNORECASE,
+)
+_PAYMENT_TERM_DAYS_PATTERN = re.compile(
+    r"(\d{1,4})\s*(?:рабоч(?:их|ие)?|календарн(?:ых|ые)?)?\s*д(?:ней|ня|ень)?\b",
+    re.IGNORECASE,
 )
 
 _CONSIGNMENT_DIRECT_PATTERN = re.compile(
@@ -549,6 +583,29 @@ def _find_remote_delivery_evidence(
     return None
 
 
+def _has_multiple_delivery_branches(fields: dict[str, Any], all_text: str) -> bool:
+    """Return true only where a delivery-related remote location is part of branches."""
+    delivery_values = "\n".join(
+        str(_field(fields, field_name) or "")
+        for field_name in _DELIVERY_FIELD_NAMES
+    )
+    return bool(
+        _MULTIPLE_BRANCHES_PATTERN.search(delivery_values.strip() or all_text or "")
+    )
+
+
+def _find_sme_payment_term(text: str) -> tuple[int, str] | None:
+    """Find a payment term explicitly available to an SME or self-employed supplier."""
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    candidates: list[tuple[int, str]] = []
+    for clause in re.split(r"(?<=[.;])|\n", normalized):
+        if not _SME_PAYMENT_PATTERN.search(clause):
+            continue
+        for match in _PAYMENT_TERM_DAYS_PATTERN.finditer(clause):
+            candidates.append((int(match.group(1)), clause[:500]))
+    return min(candidates, key=lambda candidate: candidate[0]) if candidates else None
+
+
 def _find_required_zip_supply_evidence(text: str) -> str | None:
     """Return mandatory physical ZIP included in the supply, not optional/document-only mentions."""
     source = text or ""
@@ -787,7 +844,7 @@ def calculate_hard_reasons(
 
     coverage = product_check.get("coveragePercent")
     coverage_number = float(coverage) if isinstance(coverage, (int, float)) else None
-    if product_check.get("hardReject") is True:
+    if INDIVISIBLE_LOT_REJECTION_ENABLED and product_check.get("hardReject") is True:
         _add(
             reasons,
             COVERAGE_REASON,
@@ -887,7 +944,18 @@ def calculate_hard_reasons(
         )
 
     remote_delivery_evidence = _find_remote_delivery_evidence(fields, all_text)
-    if remote_delivery_evidence:
+    remote_territory_requires_review = bool(
+        remote_delivery_evidence
+        and _has_multiple_delivery_branches(fields, all_text)
+    )
+    if remote_territory_requires_review:
+        _add(
+            reasons,
+            REMOTE_TERRITORY_REVIEW_REASON,
+            remote_delivery_evidence,
+            40,
+        )
+    elif remote_delivery_evidence:
         _add(
             reasons,
             REMOTE_TERRITORY_REASON,
@@ -949,15 +1017,17 @@ def calculate_hard_reasons(
         )
         _add(reasons, HIGH_VOLTAGE_REASON, evidence, 55)
 
-    for match in re.finditer(
-        r"(?:отсрочк[а-я]*|оплат[а-яё\s]{0,120}?в\s+течение)"
-        r"[^\d]{0,80}(\d+)\s*(?:(рабоч|календарн)[а-я]*)?\s*д",
-        all_text,
-        re.I,
-    ):
-        number_of_days = int(match.group(1))
-        if number_of_days >= 90:
-            _add(reasons, PAYMENT_DELAY_REASON, match.group(0), 35)
+    sme_payment_term = _find_sme_payment_term(all_text)
+    if not (sme_payment_term and sme_payment_term[0] < 90):
+        for match in re.finditer(
+            r"(?:отсрочк[а-я]*|оплат[а-яё\s]{0,120}?в\s+течение)"
+            r"[^\d]{0,80}(\d+)\s*(?:(рабоч|календарн)[а-я]*)?\s*д",
+            all_text,
+            re.I,
+        ):
+            number_of_days = int(match.group(1))
+            if number_of_days >= 90:
+                _add(reasons, PAYMENT_DELAY_REASON, match.group(0), 35)
 
     created = parse_date(_field(fields, "dateCreated")) or date.today()
     delivery = parse_date(_field(fields, "deliveryDate"))
@@ -1002,13 +1072,18 @@ def calculate_hard_reasons(
             "triggered": job.remaining_days is not None and job.remaining_days < 3,
         },
         "productCoverageCheck": {
+            "enabled": INDIVISIBLE_LOT_REJECTION_ENABLED,
             "coveragePercent": coverage_number,
             "coverageRule": product_check.get("coverageRule"),
             "lotDivisible": product_check.get("lotDivisible"),
             "approvalThresholdInclusive": product_check.get("approvalThresholdInclusive"),
             "minimumSuppliedPositions": product_check.get("minimumSuppliedPositions"),
             "approved": product_check.get("coverageApproved") is True,
-            "triggered": product_check.get("hardReject") is True,
+            "wouldTrigger": product_check.get("hardReject") is True,
+            "triggered": (
+                INDIVISIBLE_LOT_REJECTION_ENABLED
+                and product_check.get("hardReject") is True
+            ),
             "quantityAdjustedTotalComplete": product_check.get("priceEvaluationComplete") is True,
             "decisionEligible": product_check.get("coverageDecisionEligible") is not False,
         },
@@ -1058,7 +1133,10 @@ def calculate_hard_reasons(
             "source": "structured delivery fields / explicit delivery-location context",
             "customerOrOrganizerRegionAccepted": False,
             "evidence": remote_delivery_evidence,
-            "triggered": remote_delivery_evidence is not None,
+            "triggered": bool(
+                remote_delivery_evidence and not remote_territory_requires_review
+            ),
+            "requiresManualReview": remote_territory_requires_review,
         },
         "consignmentCheck": {
             "source": "strict deterministic evidence validator",
@@ -1117,42 +1195,61 @@ def apply_final_decision(
         isinstance(product_validation, dict)
         and product_validation.get("requiresManualReview") is True
     )
+    remote_territory_manual_reasons = [
+        item
+        for item in hard_reasons
+        if item.reason == REMOTE_TERRITORY_REVIEW_REASON
+    ]
     hard = sorted(
         (
             item
             for item in hard_reasons
+            if item.reason != REMOTE_TERRITORY_REVIEW_REASON
             if not (
                 market_research_suppressed
                 and item.reason == MARKET_RESEARCH_REASON
             )
+            and not (
+                not INDIVISIBLE_LOT_REJECTION_ENABLED
+                and item.reason == INDIVISIBLE_REASON
+            )
         ),
         key=lambda item: item.priority,
     )
-    zip_review = next(
-        (
-            review
-            for review in (llm_decision.hardReasonReviews if llm_decision else [])
-            if review.reason == REPAIR_KIT_REASON
-        ),
-        None,
+    semantic_reviews = {
+        review.reason: review
+        for review in (llm_decision.hardReasonReviews if llm_decision else [])
+        if review.reason in SEMANTIC_REVIEWABLE_HARD_REASONS
+        and review.rationale.strip()
+    }
+    dismissed_hard_reasons = [
+        item
+        for item in hard
+        if (
+            (review := semantic_reviews.get(item.reason)) is not None
+            and review.verdict == "dismiss"
+            and review.confidence == "high"
+        )
+    ]
+    semantic_manual_review_reasons = [
+        item
+        for item in hard
+        if (
+            (review := semantic_reviews.get(item.reason)) is not None
+            and review.verdict == "manual_review"
+            and review.confidence in {"medium", "high"}
+        )
+    ]
+    reviewed_reason_names = {
+        item.reason
+        for item in (*dismissed_hard_reasons, *semantic_manual_review_reasons)
+    }
+    if reviewed_reason_names:
+        hard = [item for item in hard if item.reason not in reviewed_reason_names]
+
+    zip_hard_reason_dismissed = any(
+        item.reason == REPAIR_KIT_REASON for item in dismissed_hard_reasons
     )
-    has_deterministic_zip_reason = any(
-        item.reason == REPAIR_KIT_REASON for item in hard
-    )
-    zip_hard_reason_dismissed = bool(
-        has_deterministic_zip_reason
-        and zip_review
-        and zip_review.verdict == "dismiss"
-        and zip_review.confidence == "high"
-        and zip_review.rationale.strip()
-    )
-    dismissed_hard_reasons = (
-        [item for item in hard if item.reason == REPAIR_KIT_REASON]
-        if zip_hard_reason_dismissed
-        else []
-    )
-    if dismissed_hard_reasons:
-        hard = [item for item in hard if item.reason != REPAIR_KIT_REASON]
 
     confirmed_repair_kit_evidence = (
         None
@@ -1369,10 +1466,17 @@ def apply_final_decision(
 
     preferred_llm_alternative = llm_reason_candidates[0] if llm_reason_candidates else None
     note_parts: list[str] = []
-    if dismissed_hard_reasons and zip_review:
+    for item in dismissed_hard_reasons:
+        review = semantic_reviews[item.reason]
         note_parts.append(
-            "LLM отклонила детерминированную причину ЗИП после проверки evidence: "
-            + zip_review.rationale.strip()
+            "LLM сняла кандидата причины после проверки evidence "
+            f"«{item.reason}»: {review.rationale.strip()}"
+        )
+    for item in semantic_manual_review_reasons:
+        review = semantic_reviews[item.reason]
+        note_parts.append(
+            "Требуется ручная оценка кандидата причины "
+            f"«{item.reason}»: {review.rationale.strip()} Фрагмент: {item.evidence}"
         )
     summary = re.sub(r"\s+", " ", str(product_check.get("summary") or "")).strip()
     if summary:
@@ -1392,7 +1496,7 @@ def apply_final_decision(
                 unresolved_labels.append(product_label or review_reason)
 
     if hard:
-        status = "Отказано КУ ЦП"
+        status = "Отказано КСОТП"
         if hard_non_coverage:
             # Existing priority order is preserved among all deterministic reasons
             # except coverage, which is only the fallback primary reason.
@@ -1413,23 +1517,28 @@ def apply_final_decision(
         if documentation_reason and documentation_reason.evidence:
             note_parts.append(documentation_reason.evidence)
     elif llm_decision and llm_decision.decision == "reject" and llm_primary:
-        status, reason, confidence = "Отказано КУ ЦП", llm_primary, llm_decision.confidence
+        status, reason, confidence = "Отказано КСОТП", llm_primary, llm_decision.confidence
         reason_origin = "llm"
         note_parts.append(llm_decision.note or f"Подтверждён критерий отказа: {llm_primary}.")
-    elif counterparty_requires_work:
-        status, reason, confidence = "Загружен Seldon", "Прочее", "medium"
-        reason_origin = "counterparty"
+    elif remote_territory_manual_reasons:
+        status, reason, confidence = "Загружен Seldon", None, "medium"
+        reason_origin = "remote_territory_manual_review"
+        remote_evidence = remote_territory_manual_reasons[0].evidence
         note_parts.append(
-            counterparty_lookup.get("reason")
-            or "Контрагент с указанным ИНН не найден в IPro; требуется ручная проверка."
+            "Требуется ручная оценка: среди мест поставки указан филиал в удалённой "
+            "территории. Решение о согласовании зависит от фактической логистики. "
+            f"Фрагмент: {remote_evidence}"
         )
+    elif semantic_manual_review_reasons:
+        status, reason, confidence = "Загружен Seldon", None, "medium"
+        reason_origin = "semantic_hard_reason_manual_review"
     elif llm_decision and llm_decision.decision == "reject":
-        status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
+        status, reason, confidence = "Согласовано КСОТП", None, llm_decision.confidence
         note_parts.append(
             "LLM reject содержал только запрещённую/неподтверждённую controlled-причину."
         )
     elif llm_decision and llm_decision.decision == "approve":
-        status, reason, confidence = "Согласовано КУ ЦП", None, llm_decision.confidence
+        status, reason, confidence = "Согласовано КСОТП", None, llm_decision.confidence
         note_parts.append(llm_decision.note or "Критерии отказа не подтверждены.")
     else:
         status, reason, confidence = "Загружен Seldon", "Прочее", "low"
@@ -1445,18 +1554,16 @@ def apply_final_decision(
         if unresolved_labels:
             note_parts.append("Проверить: " + "; ".join(unresolved_labels[:10]) + ".")
 
-    counterparty_advisory_only = (
-        status == "Отказано КУ ЦП" and counterparty_requires_work
-    )
-    if counterparty_advisory_only:
+    counterparty_advisory_only = counterparty_requires_work
+    if counterparty_requires_work:
         counterparty_evidence = (
             counterparty_lookup.get("reason")
             or "Контрагент с указанным ИНН не найден в IPro."
         )
         note_parts.append(
             "Дополнительная информация по контрагенту: "
-            f"{counterparty_evidence} Ручная проверка контрагента не меняет статус, "
-            "поскольку тендер уже имеет подтверждённую причину отказа."
+            f"{counterparty_evidence} Проверка IPro носит справочный характер и не "
+            "меняет статус тендера."
         )
 
     additional_reasons: list[dict[str, str]] = []
@@ -1482,7 +1589,7 @@ def apply_final_decision(
             }
         )
 
-    if status == "Отказано КУ ЦП":
+    if status == "Отказано КСОТП":
         for item in hard:
             add_additional_reason(item.reason, item.evidence, "Детерминированное правило", "high")
         for item in llm_reason_candidates:
@@ -1512,13 +1619,15 @@ def apply_final_decision(
     else:
         fields.pop("tenderStatusReason", None)
     status_source = (
-        "Проверка контрагента/МОПП"
-        if reason_origin == "counterparty"
+        "Ручная проверка условий поставки"
+        if reason_origin == "remote_territory_manual_review"
+        else "Ручная проверка смыслового условия"
+        if reason_origin == "semantic_hard_reason_manual_review"
         else "Аудит товарных позиций"
         if reason_origin == "product_validation"
         else "Детерминированные правила согласования"
         if reason_origin == "deterministic"
-        else "LLM: решение КУ ЦП"
+        else "LLM: решение КСОТП"
     )
     meta["tenderStatus"] = {
         "source": status_source,
@@ -1558,6 +1667,15 @@ def apply_final_decision(
         "counterpartyRequiresWork": counterparty_requires_work,
         "counterpartyAdvisoryOnly": counterparty_advisory_only,
         "hardReasons": [item.as_dict() for item in hard],
+        "manualReviewReasons": [
+            item.as_dict() for item in remote_territory_manual_reasons
+        ],
+        "semanticHardReasonReviews": [
+            review.model_dump() for review in semantic_reviews.values()
+        ],
+        "semanticManualReviewReasons": [
+            item.as_dict() for item in semantic_manual_review_reasons
+        ],
         "dismissedHardReasons": [item.as_dict() for item in dismissed_hard_reasons],
         "hardReasonReviews": (
             [review.model_dump() for review in llm_decision.hardReasonReviews]
@@ -1571,7 +1689,11 @@ def apply_final_decision(
         "additionalReasons": additional_reasons,
         "llmDecision": llm_decision.model_dump() if llm_decision else None,
         "marketResearchReasonSuppressed": market_research_suppressed,
-        "manualReviewRequired": validation_requires_review,
+        "manualReviewRequired": (
+            validation_requires_review
+            or bool(remote_territory_manual_reasons)
+            or bool(semantic_manual_review_reasons)
+        ),
     }
     return fields, meta, decision
 
@@ -1620,6 +1742,21 @@ def build_decision_prompt(
         and not (market_research_suppressed and reason == MARKET_RESEARCH_REASON)
     ]
     prompt_product_check = dict(product_check)
+    if not INDIVISIBLE_LOT_REJECTION_ENABLED:
+        # Покрытие лота остаётся диагностикой в сервисе, но не передаётся LLM:
+        # эта причина временно исключена из принятия решения.
+        for key in (
+            "coveragePercent",
+            "coverageApproved",
+            "coverageRule",
+            "lotDivisible",
+            "approvalThresholdInclusive",
+            "minimumSuppliedPositions",
+            "coverageDecisionEligible",
+            "hardReject",
+            "summary",
+        ):
+            prompt_product_check.pop(key, None)
     product_details = product_check.get("details")
     if isinstance(product_details, list) and len(product_details) > 40:
         prompt_product_check["details"] = product_details[:40]
@@ -1629,7 +1766,16 @@ def build_decision_prompt(
         "rulesVersion": "2026-06 / пользовательский справочник причин",
         "reasonOptions": available_reasons,
         "productCheck": prompt_product_check,
-        "hardReasons": [reason.as_dict() for reason in hard_reasons],
+        "hardReasons": [
+            reason.as_dict()
+            for reason in hard_reasons
+            if INDIVISIBLE_LOT_REJECTION_ENABLED or reason.reason != INDIVISIBLE_REASON
+        ],
+        "reviewableHardReasons": [
+            reason.as_dict()
+            for reason in hard_reasons
+            if reason.reason in SEMANTIC_REVIEWABLE_HARD_REASONS
+        ],
         **checks,
     }
     return f"""
@@ -1639,24 +1785,21 @@ def build_decision_prompt(
 Правила:
 - Проверь каждый пункт справочника по тексту документации и извлечённым фактам.
 - Не придумывай основание; каждое основание требует evidence.
-- hardReasons рассчитаны кодом. Все причины, кроме «{REPAIR_KIT_REASON}», не могут быть
-  отменены; их можно только дополнить.
-- Если hardReasons содержит «{REPAIR_KIT_REASON}», обязательно проверь переданное evidence
-  по смыслу и верни ровно одно ревью этой причины в hardReasonReviews.
-- Для hardReasonReviews используй verdict=confirm, только если evidence подтверждает обязанность
-  поставить физический ЗИП/ремкомплект/запасные части или сама закупаемая позиция является ими.
-- Используй verdict=dismiss с confidence=high, если слова о ЗИП/запасных частях относятся к запрету,
-  отсутствию, исключению, опциональной поставке, документации или иной фразе без обязанности поставки.
-  В rationale кратко объясни смысл всей фразы, а не совпадение отдельных слов.
-- Только ZIP hard reason с явным verdict=dismiss и confidence=high может быть снят кодом.
-  Остальные hardReasons неизменяемы. При снятии единственной причины ЗИП верни decision=approve.
-- Наличие hardReasons не означает, что анализ можно закончить. Даже если уже есть обязательный отказ
-  по комплектованию лота, обязательно проверь все остальные причины справочника.
+- `reviewableHardReasons` — кандидаты причин, найденные ключевыми словами и контекстными
+  правилами. Для КАЖДОГО такого кандидата обязательно верни ровно одно ревью в
+  hardReasonReviews: `confirm`, если evidence однозначно подтверждает причину; `dismiss` с
+  confidence=high, если весь смысл фрагмента её опровергает; либо `manual_review` с
+  confidence=medium/high, если контекста недостаточно или формулировка неоднозначна.
+- `dismiss` и `manual_review` допустимы только для причин из reviewableHardReasons. В rationale
+  кратко объясни смысл всей фразы, а не совпадение отдельных слов. Кандидат, по которому ревью
+  отсутствует либо имеет низкую уверенность, остаётся подтверждённой причиной отказа.
+- Для «{REPAIR_KIT_REASON}» confirm допустим только при обязательной поставке физического
+  ЗИП/ремкомплекта/запасных частей либо когда сама закупаемая позиция является ими. Dismiss —
+  если слова относятся к запрету, отсутствию, исключению, опциональной поставке или документации.
+- Все hardReasons, не вошедшие в reviewableHardReasons, неизменяемы и не могут быть отменены LLM.
+- Наличие hardReasons не означает, что анализ можно закончить: обязательно проверь все остальные причины справочника.
 - detectedReasons должен содержать полный список всех подтверждённых недетерминированных причин,
   а не только основную. Если причин несколько, верни их все с evidence.
-- Если вместе с детерминированной причиной «{COVERAGE_REASON}» найдена другая подтверждённая причина,
-  верни её в detectedReasons и используй как primaryReason среди причин, доступных LLM.
-  Код сам сохранит причину комплектования лота как дополнительную.
 - Не останавливай проверку после анализа товарного ассортимента: независимо проверь остальные основания
   отказа по документации.
 - Причина «{PRICE_REASON}» полностью детерминирована; LLM запрещено выбирать её.
@@ -1670,16 +1813,14 @@ def build_decision_prompt(
   или deliveryDays. LLM запрещено выбирать её самостоятельно.
 - Срок действия договора, оплаты, гарантии, приёмки или подачи заявок не является сроком поставки.
 - Отсрочка оплаты является причиной отказа при 90 днях и более (`>= 90`). Правило применяется
-  к рабочим, календарным и дням без уточнения типа.
-- Причина «{COVERAGE_REASON}» полностью детерминирована; LLM запрещено выбирать её.
+  к рабочим, календарным и дням без уточнения типа. Исключение: если прямо указан отдельный
+  срок для МСП или самозанятого, компания может участвовать через такое юрлицо; тогда применим
+  этот срок и причина отказа по общей отсрочке не подтверждается.
 - Причина «{HIGH_VOLTAGE_REASON}» полностью детерминирована по товарным позициям; LLM запрещено выбирать её.
   Само значение «35 кВ» недостаточно: изоляторы, изоляционные изделия, арматура, крепёж,
   зажимы, комплектующие и расходные материалы не являются высоковольтным оборудованием.
   Напряжение в названии ПС/подстанции/ЛЭП/ВЛ описывает объект установки, а не товар; для
   причины нужен класс напряжения именно закупаемого электротехнического оборудования.
-- Для неделимого лота проверка проходит при coverage не менее 80% (`>= 80`).
-- Для делимого лота проверка проходит, если найдена хотя бы одна поставляемая позиция.
-- Если делимость лота не подтверждена, применяется безопасное правило неделимого лота: coverage >= 80%.
 - Причина менее 3 дней полностью детерминирована только по remainingDays < 3; значение 3 проходит.
 - Упоминание Росатома/АЭС не равно атомной приёмке без прямой формулировки.
 - Упоминание 275-ФЗ/Минобороны не равно военной приёмке без прямой формулировки.
@@ -1724,8 +1865,8 @@ def build_decision_prompt(
   Если документы отсутствуют, действует отдельная детерминированная причина отсутствия документации.
 
 - Если context содержит documentReasonHits, используй их как компактные semantic facts.
-  ZIP reasonHit всё равно перепроверь по смыслу evidence через hardReasonReviews; для остальных
-  причин не требуй повторного чтения raw документации.
+  Кандидаты из reviewableHardReasons перепроверь по смыслу переданного evidence через
+  hardReasonReviews; для остальных причин не требуй повторного чтения raw документации.
 - Если ниже в поле «Текст / structured facts» передан JSON documentAnalysis, это компактные факты,
   а не сырой текст тендера. Не проси исходный документ и не делай выводов вне evidence.
 - Если documentAnalysisIncomplete=true, не утверждай, что причина отсутствует; просто не добавляй её

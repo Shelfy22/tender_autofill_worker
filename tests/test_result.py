@@ -18,10 +18,10 @@ def test_result_json_contract_for_finalizer() -> None:
     )
     result = build_result_json(
         job,
-        fields={"tenderStatus": "Согласовано КУ ЦП"},
+        fields={"tenderStatus": "Согласовано КСОТП"},
         meta={},
         product_check={"coveragePercent": 75},
-        decision={"status": "Согласовано КУ ЦП"},
+        decision={"status": "Согласовано КСОТП"},
         warnings=[],
         logs=[],
         debug={},
