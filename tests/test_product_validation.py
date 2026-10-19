@@ -8,6 +8,8 @@ from app.models import (
     ProductCandidateAuditResponse,
     ProductMatch,
     ProductMatchItem,
+    ProductReconciliationDecision,
+    ProductReconciliationFact,
     ProductSourceReference,
     SpreadsheetCandidateDecision,
     SpreadsheetCandidateReviewResponse,
@@ -530,6 +532,92 @@ def test_structured_excel_cells_are_sent_to_llm_audit() -> None:
     assert llm.seen[0].sourceCells["D"] == "10"
     assert validated == [position]
     assert debug["requiresManualReview"] is False
+
+
+def test_size_breakdown_reconciliation_is_saved_and_can_be_confirmed() -> None:
+    position = _position("Костюм рабочий", quantity=523).model_copy(
+        update={
+            "reconciliationFacts": [
+                ProductReconciliationFact(
+                    factId="size-breakdown-1",
+                    type="size_breakdown_equals_total",
+                    fileName="ТЗ.docx",
+                    table="Таблица Word 4",
+                    product="Костюм рабочий",
+                    unit="шт.",
+                    sizeColumn="Размер",
+                    totalQuantity=523,
+                    detailQuantitySum=523,
+                    detailRows=[
+                        {"row": 3, "size": "48-50", "quantity": 120},
+                        {"row": 4, "size": "52-54", "quantity": 403},
+                    ],
+                )
+            ]
+        }
+    )
+    response = ProductCandidateAuditResponse(
+        assignments=[
+            ProductCandidateAssignment(
+                positionIndex=1,
+                role="purchase_item",
+                confidence=0.99,
+            )
+        ],
+        reconciliationDecisions=[
+            ProductReconciliationDecision(
+                factId="size-breakdown-1",
+                action="merge_to_total",
+                confidence=0.99,
+                rationale="Сумма строк по размерам равна итоговой позиции.",
+            )
+        ],
+    )
+
+    validated, _, debug = apply_product_candidate_audit([position], response)
+
+    assert validated == [position]
+    assert debug["reconciliation"]["confirmedFactIds"] == ["size-breakdown-1"]
+    assert debug["reconciliation"]["conflicts"] == []
+    assert debug["requiresManualReview"] is False
+
+
+def test_size_breakdown_reconciliation_conflict_requires_review() -> None:
+    position = _position("Костюм рабочий", quantity=523).model_copy(
+        update={
+            "reconciliationFacts": [
+                ProductReconciliationFact(
+                    factId="size-breakdown-1",
+                    type="size_breakdown_equals_total",
+                    totalQuantity=523,
+                    detailQuantitySum=523,
+                )
+            ]
+        }
+    )
+    response = ProductCandidateAuditResponse(
+        assignments=[
+            ProductCandidateAssignment(
+                positionIndex=1,
+                role="purchase_item",
+                confidence=0.99,
+            )
+        ],
+        reconciliationDecisions=[
+            ProductReconciliationDecision(
+                factId="size-breakdown-1",
+                action="conflict_needs_review",
+                confidence=0.9,
+                rationale="Итоговая строка выглядит самостоятельной позицией.",
+            )
+        ],
+    )
+
+    _, warnings, debug = apply_product_candidate_audit([position], response)
+
+    assert debug["requiresManualReview"] is True
+    assert debug["reconciliation"]["conflicts"][0]["factId"] == "size-breakdown-1"
+    assert any("размерной детализацией" in warning for warning in warnings)
 
 
 def test_only_non_product_cells_do_not_return_to_coverage_denominator() -> None:

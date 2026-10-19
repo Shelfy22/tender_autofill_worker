@@ -205,12 +205,12 @@ def test_result_stage_uses_stage_end_date_from_long_notice_row() -> None:
     assert fields["resultDate"] == "2026-10-29"
 
 
-def test_delivery_type_is_not_invented_from_document_regex() -> None:
+def test_delivery_type_is_detected_from_document_request_rule() -> None:
     fields, _, _ = validate_fields(
         job_with_lot(""), None, "Поставка товара осуществляется по разнарядкам.", []
     )
 
-    assert "deliveryType" not in fields
+    assert fields["deliveryType"] == "by_requests"
 
 
 def test_direct_security_fallback_does_not_fill_warranty_columns() -> None:
@@ -480,6 +480,159 @@ def test_product_protection_table_overrides_generic_national_regime_candidate() 
     assert any("товарной таблицы заменил" in warning for warning in warnings)
 
 
+def test_pp_1875_application_table_uses_only_explicitly_established_measure() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "nationalRegime": FieldValue(
+                value="ban",
+                confidence="high",
+                source="Документация.docx",
+                evidence="ПП РФ № 1875 предусматривает запрет, ограничение и преимущество.",
+            )
+        }
+    )
+    application_table = SpreadsheetTable(
+        fileName="Документация.docx",
+        sheet="Таблица Word 7",
+        rows=[
+            SpreadsheetRow(
+                row=1,
+                cells={
+                    "A": "Применение национального режима: вид требования",
+                    "B": "Установлены Заказчиком ДА / НЕТ",
+                },
+            ),
+            SpreadsheetRow(row=2, cells={"A": "Запрет", "B": "НЕ УСТАНОВЛЕН"}),
+            SpreadsheetRow(row=3, cells={"A": "Ограничение", "B": "НЕ УСТАНОВЛЕНО"}),
+            SpreadsheetRow(row=4, cells={"A": "Преимущество", "B": "УСТАНОВЛЕНО"}),
+        ],
+    )
+    documents = [
+        ParsedDocument(
+            documentIndex=1,
+            fileName="Документация.docx",
+            spreadsheetTables=[application_table],
+        )
+    ]
+
+    fields, meta, warnings = validate_fields(job_with_lot(""), extracted, "", documents)
+
+    assert fields["nationalRegime"] == "preference"
+    assert meta["nationalRegime"]["confidence"] == "high"
+    assert "Преимущество" in meta["nationalRegime"]["evidence"]
+    assert any("специальной таблицы применения" in warning for warning in warnings)
+
+
+def test_pp_1875_application_table_treats_yes_as_direct_ban_evidence() -> None:
+    application_table = SpreadsheetTable(
+        fileName="Документация.docx",
+        sheet="Таблица Word 3",
+        rows=[
+            SpreadsheetRow(
+                row=1,
+                cells={
+                    "A": "Применение национального режима",
+                    "B": "Установлены Заказчиком ДА / НЕТ",
+                    "C": "Нормативно-правовой акт",
+                },
+            ),
+            SpreadsheetRow(
+                row=2,
+                cells={
+                    "A": "Запрет закупок товаров, происходящих из иностранных государств",
+                    "B": "ДА",
+                    "C": "Постановление Правительства РФ от 23.12.2024 № 1875",
+                },
+            ),
+        ],
+    )
+    documents = [
+        ParsedDocument(
+            documentIndex=1,
+            fileName="Документация.docx",
+            spreadsheetTables=[application_table],
+        )
+    ]
+
+    fields, meta, _ = validate_fields(job_with_lot(""), None, "", documents)
+
+    assert fields["nationalRegime"] == "ban"
+    assert "Запрет закупок" in meta["nationalRegime"]["evidence"]
+
+
+def test_product_protection_table_has_priority_over_pp_1875_application_table() -> None:
+    product_table = SpreadsheetTable(
+        fileName="ТЗ.xlsx",
+        sheet="Товары",
+        rows=[
+            SpreadsheetRow(
+                row=1,
+                cells={"A": "Позиция", "E": "Вид защитной меры"},
+            ),
+            SpreadsheetRow(row=2, cells={"A": "1", "E": "ограничение"}),
+        ],
+    )
+    application_table = SpreadsheetTable(
+        fileName="Документация.docx",
+        sheet="Таблица Word 3",
+        rows=[
+            SpreadsheetRow(
+                row=1,
+                cells={
+                    "A": "Применение национального режима",
+                    "B": "Установлены Заказчиком ДА / НЕТ",
+                },
+            ),
+            SpreadsheetRow(row=2, cells={"A": "Запрет закупок", "B": "ДА"}),
+        ],
+    )
+    documents = [
+        ParsedDocument(documentIndex=1, fileName="ТЗ.xlsx", spreadsheetTables=[product_table]),
+        ParsedDocument(documentIndex=2, fileName="Документация.docx", spreadsheetTables=[application_table]),
+    ]
+
+    fields, meta, _ = validate_fields(job_with_lot(""), None, "", documents)
+
+    assert fields["nationalRegime"] == "restriction"
+    assert meta["nationalRegime"]["source"].startswith("ТЗ.xlsx")
+
+
+def test_pp_1875_application_table_is_read_from_word_text() -> None:
+    document = ParsedDocument(
+        documentIndex=1,
+        fileName="Документация.docx",
+        text=(
+            "Применение национального режима\n"
+            "Установлены Заказчиком ДА / НЕТ\n"
+            "Запрет НЕ УСТАНОВЛЕН\n"
+            "Ограничение НЕ УСТАНОВЛЕНО\n"
+            "Преимущество УСТАНОВЛЕНО\n"
+        ),
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), None, "", [document])
+
+    assert fields["nationalRegime"] == "preference"
+    assert meta["nationalRegime"]["source"] == "Документация.docx"
+
+
+def test_national_regime_uses_highest_established_measure() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "nationalRegime": FieldValue(
+                value="restriction; preference",
+                confidence="high",
+                source="Товарная таблица",
+                evidence="По разным позициям установлены ограничение и преимущество.",
+            )
+        }
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert fields["nationalRegime"] == "restriction"
+
+
 def test_generic_national_regime_enumeration_does_not_fill_card() -> None:
     extracted = ExtractedFieldsResponse(
         fields={
@@ -556,6 +709,74 @@ def test_batch_delivery_without_stated_term_remains_blank() -> None:
     fields, _, _ = validate_fields(job_with_lot(""), extracted, "", [])
 
     assert "deliveryBatchDays" not in fields
+
+
+def test_delivery_schedule_overrides_single_delivery_period() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="during_period",
+                confidence="high",
+                source="Contract.docx",
+                evidence="Delivery within 30 calendar days.",
+            ),
+            "deliveryDays": FieldValue(
+                value=30,
+                confidence="high",
+                source="Contract.docx",
+                evidence="Delivery within 30 calendar days.",
+            ),
+            "deliveryDate": FieldValue(
+                value="2027-12-31",
+                confidence="high",
+                source="Contract.docx",
+                evidence="Delivery period ends on 31.12.2027.",
+            ),
+            "deliveryNote": FieldValue(
+                value="Delivery according to the delivery schedule.",
+                confidence="high",
+                source="Contract.docx",
+                evidence="Delivery according to the delivery schedule.",
+            ),
+        }
+    )
+    text = (
+        "\u041f\u043e\u0441\u0442\u0430\u0432\u043a\u0430 \u0442\u043e\u0432\u0430\u0440\u0430 "
+        "\u043e\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043b\u044f\u0435\u0442\u0441\u044f "
+        "\u043f\u043e \u0433\u0440\u0430\u0444\u0438\u043a\u0443 \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438 "
+        "\u0434\u043e 31.12.2027."
+    )
+
+    fields, meta, warnings = validate_fields(job_with_lot(""), extracted, text, [])
+
+    assert fields["deliveryType"] == "by_requests"
+    assert "deliveryBatchDays" not in fields
+    assert "deliveryDays" not in fields
+    assert fields["deliveryDate"] == "2027-12-31"
+    assert "\u0433\u0440\u0430\u0444\u0438\u043a" in meta["deliveryType"]["evidence"].casefold()
+    assert any("\u0438\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d" in warning for warning in warnings)
+
+
+def test_single_batch_and_work_schedule_do_not_imply_batch_delivery() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="during_period",
+                confidence="high",
+                source="Contract.docx",
+                evidence="Delivery within 15 calendar days.",
+            )
+        }
+    )
+    text = (
+        "\u041f\u043e\u0441\u0442\u0430\u0432\u043a\u0430 \u043e\u0434\u043d\u043e\u0439 \u043f\u0430\u0440\u0442\u0438\u0435\u0439 "
+        "\u0432 \u0442\u0435\u0447\u0435\u043d\u0438\u0435 15 \u0434\u043d\u0435\u0439. "
+        "\u0413\u0440\u0430\u0444\u0438\u043a \u0440\u0430\u0431\u043e\u0442\u044b \u0441\u043a\u043b\u0430\u0434\u0430: 9:00-18:00."
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), extracted, text, [])
+
+    assert fields["deliveryType"] == "during_period"
 
 
 def test_unknown_lot_divisibility_defaults_to_indivisible() -> None:

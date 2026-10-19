@@ -110,6 +110,20 @@ _NATIONAL_REGIME_TABLE_HEADER_PATTERN = re.compile(
     r"\u0432\u0438\u0434\s+\u0437\u0430\u0449\u0438\u0442\u043d\w*\s+\u043c\u0435\u0440\w*",
     re.IGNORECASE,
 )
+_NATIONAL_REGIME_APPLICATION_HEADER_PATTERN = re.compile(
+    r"(?:применени\w*\s+национальн\w*\s+режим|"
+    r"установлен\w*\s+заказчик\w*|заказчик\w*\s+установлен\w*)",
+    re.IGNORECASE,
+)
+_NATIONAL_REGIME_NOT_APPLIED_PATTERN = re.compile(
+    r"(?:не\s+(?:установлен\w*|применя\w*)|не\s+применя\w*|"
+    r"не\s+установлено|нет)",
+    re.IGNORECASE,
+)
+_NATIONAL_REGIME_APPLIED_PATTERN = re.compile(
+    r"(?:\bда\b|\bустановлен\w*|\bприменя\w*)",
+    re.IGNORECASE,
+)
 _NATIONAL_MINIMUM_SHARE_PATTERN = re.compile(
     r"(?:минимальн\w*\s+обязательн\w*\s+дол\w*|"
     r"minimum\s+(?:mandatory\s+)?share)",
@@ -298,6 +312,88 @@ def _table_regime_value(value: Any) -> str | None:
     return None
 
 
+def _highest_national_regime(measures: set[str]) -> str | None:
+    """Return the single card value agreed for several established measures."""
+    return next(
+        (regime for regime in ("ban", "restriction", "preference") if regime in measures),
+        None,
+    )
+
+
+def _established_regimes_from_application_row(row_text: Any) -> set[str]:
+    """Read an explicit ``Да/Нет`` national-regime row, never legal boilerplate."""
+    text = re.sub(r"\s+", " ", str(row_text or "")).strip()
+    if not text or _NATIONAL_REGIME_NOT_APPLIED_PATTERN.search(text):
+        return set()
+    if not _NATIONAL_REGIME_APPLIED_PATTERN.search(text):
+        return set()
+    return {
+        regime
+        for regime, pattern in _NATIONAL_REGIME_PATTERNS
+        if pattern.search(text)
+    }
+
+
+def _national_regime_from_application_tables(
+    documents: list[ParsedDocument],
+    deterministic_text: str,
+) -> tuple[str, str, str] | None:
+    """Find a direct PP 1875 application table with a buyer's Yes/No choice.
+
+    Unlike a generic legal section, a table headed ``Применение национального
+    режима`` and ``Установлены заказчиком`` expressly says which measure the
+    buyer selected. It is a valid source when there is no more granular
+    product protection table.
+    """
+    measures: set[str] = set()
+    sources: list[str] = []
+    samples: list[str] = []
+
+    def add_rows(source: str, rows: list[str]) -> None:
+        joined = "\n".join(rows)
+        if not _NATIONAL_REGIME_APPLICATION_HEADER_PATTERN.search(joined):
+            return
+        for row in rows:
+            found = _established_regimes_from_application_row(row)
+            if not found:
+                continue
+            measures.update(found)
+            if source not in sources:
+                sources.append(source)
+            if len(samples) < 3:
+                samples.append(re.sub(r"\s+", " ", row).strip()[:500])
+
+    for document in documents:
+        for table in document.spreadsheetTables:
+            rows = [
+                " | ".join(str(value) for value in row.cells.values() if value)
+                for row in table.rows
+            ]
+            source = document.fileName or table.fileName or "Таблица применения национального режима"
+            if table.sheet:
+                source = f"{source}, лист {table.sheet}"
+            add_rows(source, rows)
+
+        # Word/PDF tables may be retained only as text. Restrict the scan to a
+        # bounded vicinity of the table header so an unrelated 'да' cannot
+        # establish a measure from generic PP 1875 prose elsewhere.
+        text = str(document.text or "")
+        for header in _NATIONAL_REGIME_APPLICATION_HEADER_PATTERN.finditer(text):
+            fragment = text[header.start() : header.start() + 6_000]
+            rows = [line for line in fragment.splitlines() if line.strip()]
+            add_rows(document.fileName or "Документация", rows)
+
+    if not measures and deterministic_text:
+        for header in _NATIONAL_REGIME_APPLICATION_HEADER_PATTERN.finditer(deterministic_text):
+            fragment = deterministic_text[header.start() : header.start() + 6_000]
+            add_rows("Текст документации", [line for line in fragment.splitlines() if line.strip()])
+
+    value = _highest_national_regime(measures)
+    if value is None:
+        return None
+    return value, "; ".join(sources), "; ".join(samples)
+
+
 def _national_regime_from_product_tables(
     documents: list[ParsedDocument],
 ) -> tuple[str, str, str] | None:
@@ -344,8 +440,7 @@ def _national_regime_from_product_tables(
 
     if not measures:
         return None
-    ordered = [regime for regime in ("ban", "restriction", "preference") if regime in measures]
-    value = "; ".join(ordered) if ordered else "no"
+    value = _highest_national_regime(measures) or "no"
     return value, "; ".join(sources), "; ".join(samples)
 
 
@@ -402,6 +497,19 @@ def _normalize_national_regime(value: Any, evidence: Any) -> str | None:
         return "no"
     if normalized in {"", "none", "null", "not_found", "не_найдено"}:
         return None
+    established = {
+        regime
+        for regime, pattern in _NATIONAL_REGIME_PATTERNS
+        if pattern.search(raw)
+    }
+    normalized_tokens = set(re.findall(r"[a-z_]+", normalized))
+    established.update(
+        regime
+        for regime in ("ban", "restriction", "preference")
+        if regime in normalized_tokens
+    )
+    if established:
+        return _highest_national_regime(established)
     return raw
 
 
@@ -419,18 +527,72 @@ def _explicit_result_date(text: str) -> tuple[str, str] | None:
     return _normalize_date(match.group(1)), match.group(0)[:500]
 
 
+_DIRECT_DELIVERY_REQUEST_PATTERN = re.compile(
+    r"\u043f\u043e\s+\u0437\u0430\u044f\u0432\u043a|"
+    r"\u0437\u0430\u044f\u0432\u043a\u0430\s+\u0437\u0430\u043a\u0430\u0437\u0447\u0438\u043a|"
+    r"\u043f\u043e\s+\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434",
+    re.IGNORECASE,
+)
+_BATCH_OR_DELIVERY_SCHEDULE_PATTERN = re.compile(
+    r"\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*"
+    r"(?:\s+(?:\u0442\u043e\u0432\u0430\u0440\w*|\u043e\u0442\u0434\u0435\u043b\u044c\u043d\w*|\u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\w*)){0,3}"
+    r"\s+\u043f\u0430\u0440\u0442\w*|"
+    r"\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*\s+\u043f\u043e\s+\u0433\u0440\u0430\u0444\u0438\u043a\w*|"
+    r"\u0433\u0440\u0430\u0444\u0438\u043a\w*\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|"
+    r"\u0441\u0440\u043e\u043a\w*\s+\u043e\u0442\u0434\u0435\u043b\u044c\u043d\w*\s+\u043f\u0430\u0440\u0442\w*",
+    re.IGNORECASE,
+)
+_SINGLE_BATCH_PATTERN = re.compile(
+    r"(?:\u043e\u0434\u043d\u043e\u0439|\u0435\u0434\u0438\u043d\u043e\u0439)\s+\u043f\u0430\u0440\u0442\w*",
+    re.IGNORECASE,
+)
+_WORK_SCHEDULE_PATTERN = re.compile(
+    r"\u0433\u0440\u0430\u0444\u0438\u043a\w*\s+\u0440\u0430\u0431\u043e\u0442\w*",
+    re.IGNORECASE,
+)
+_BATCH_TERM_PATTERN = re.compile(
+    r"(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435|\u043d\u0435\s+\u043f\u043e\u0437\u0434\u043d\u0435\u0435)\s+\d+\s+\S{2,20}\s+"
+    r"(?:\u0441|\u043f\u043e\u0441\u043b\u0435)\s+[^.]{0,80}\u0437\u0430\u044f\u0432\u043a|"
+    r"(?:\u0441\u0440\u043e\u043a\w*\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u043d\u0430\s+\u043a\u0430\u0436\u0434\w*)"
+    r"[^.]{0,80}\u043f\u0430\u0440\u0442\w*[^.]{0,80}\d+",
+    re.IGNORECASE,
+)
+
+
 def _delivery_type_has_request_evidence(evidence: Any) -> bool:
-    """`by_requests` needs an actual request/order mechanism, not a batch noun."""
+    """Recognize the business category "by requests / batches / schedule".
+
+    The report column uses one category for a request mechanism and for a
+    documented multi-batch delivery schedule.  A single batch and a warehouse
+    work schedule are not evidence of repeated deliveries.
+    """
     text = re.sub(r"\s+", " ", str(evidence or "")).casefold()
+    if _DIRECT_DELIVERY_REQUEST_PATTERN.search(text):
+        return True
     return bool(
-        re.search(
-            r"\u043f\u043e\s+\u0437\u0430\u044f\u0432\u043a|"
-            r"\u0437\u0430\u044f\u0432\u043a\u0430\s+\u0437\u0430\u043a\u0430\u0437\u0447\u0438\u043a|"
-            r"\u043f\u043e\s+\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434",
-            text,
-            re.IGNORECASE,
-        )
+        not _SINGLE_BATCH_PATTERN.search(text)
+        and not _WORK_SCHEDULE_PATTERN.search(text)
+        and _BATCH_OR_DELIVERY_SCHEDULE_PATTERN.search(text)
     )
+
+
+def _delivery_type_evidence_fragment(*values: Any) -> str:
+    """Return a short document fragment proving a repeated delivery mechanism."""
+    for raw_value in values:
+        text = re.sub(r"\s+", " ", str(raw_value or "")).strip()
+        if not text or not _delivery_type_has_request_evidence(text):
+            continue
+        match = _DIRECT_DELIVERY_REQUEST_PATTERN.search(text) or _BATCH_OR_DELIVERY_SCHEDULE_PATTERN.search(text)
+        if match is None:
+            continue
+        return text[max(0, match.start() - 160) : match.end() + 340][:500]
+    return ""
+
+
+def _delivery_days_are_batch_term(evidence: Any) -> bool:
+    """Whether a numeric delivery term is explicitly for a request or batch."""
+    text = re.sub(r"\s+", " ", str(evidence or "")).casefold()
+    return bool(text and _BATCH_TERM_PATTERN.search(text))
 
 
 def _has_explicit_delivery_deadline_evidence(evidence: Any) -> bool:
@@ -601,6 +763,7 @@ def validate_fields(
         warnings.append("LLM extraction не выполнен; применены deterministic fallbacks.")
 
     table_national_regime = _national_regime_from_product_tables(documents)
+    application_national_regime: tuple[str, str, str] | None = None
     if table_national_regime is not None:
         table_value, table_source, table_evidence = table_national_regime
         previous_value = fields.get("nationalRegime")
@@ -617,8 +780,34 @@ def validate_fields(
             "high",
             table_evidence,
         )
-    elif "nationalRegime" in fields and _is_generic_national_regime_list(
+    else:
+        application_national_regime = _national_regime_from_application_tables(
+            documents,
+            deterministic_text,
+        )
+        if application_national_regime is not None:
+            application_value, application_source, application_evidence = application_national_regime
+            previous_value = fields.get("nationalRegime")
+            if previous_value and str(previous_value).strip() != application_value:
+                warnings.append(
+                    "nationalRegime из специальной таблицы применения ПП №1875 заменил конфликтующий общий кандидат."
+                )
+            _set(
+                fields,
+                meta,
+                "nationalRegime",
+                application_value,
+                application_source,
+                "high",
+                application_evidence,
+            )
+    if (
+        table_national_regime is None
+        and application_national_regime is None
+        and "nationalRegime" in fields
+        and _is_generic_national_regime_list(
         meta.get("nationalRegime", {}).get("evidence")
+        )
     ):
         fields.pop("nationalRegime", None)
         meta.pop("nationalRegime", None)
@@ -851,11 +1040,33 @@ def validate_fields(
         )
     delivery_type = _normalize_delivery_type(fields.get("deliveryType"))
     delivery_evidence = meta.get("deliveryType", {}).get("evidence")
+    repeated_delivery_evidence = _delivery_type_evidence_fragment(
+        delivery_evidence,
+        meta.get("deliveryNote", {}).get("evidence"),
+        fields.get("deliveryNote"),
+        deterministic_text,
+    )
+    if repeated_delivery_evidence:
+        if delivery_type != "by_requests":
+            warnings.append(
+                "Тип поставки исправлен на «по заявкам»: найдено подтверждение "
+                "поставки партиями, по заявкам или графику."
+            )
+        delivery_type = "by_requests"
+        delivery_evidence = repeated_delivery_evidence
+        _set(
+            fields,
+            meta,
+            "deliveryType",
+            delivery_type,
+            "Документы / поставка партиями, по заявкам или графику",
+            "high",
+            delivery_evidence,
+        )
     if delivery_type == "by_requests" and not _delivery_type_has_request_evidence(
         delivery_evidence
     ):
-        # A phrase such as "отдельные партии" or an agreed date for each
-        # party describes logistics, but is not delivery on customer requests.
+        # A bare mention of a party still does not prove repeated delivery.
         # Leave the type blank rather than converting it into a false request
         # delivery; the factual text remains available in deliveryNote.
         delivery_date_evidence = meta.get("deliveryDate", {}).get("evidence")
@@ -890,15 +1101,21 @@ def validate_fields(
     if delivery_type == "by_requests":
         if not fields.get("deliveryBatchDays") and fields.get("deliveryDays"):
             delivery_days_meta = meta.get("deliveryDays", {})
-            _set(
-                fields,
-                meta,
-                "deliveryBatchDays",
-                fields["deliveryDays"],
-                "Документы / срок поставки партии",
-                delivery_days_meta.get("confidence", "high"),
-                str(delivery_days_meta.get("evidence") or "Срок поставки по заявке"),
-            )
+            delivery_days_evidence = str(delivery_days_meta.get("evidence") or "")
+            if _delivery_days_are_batch_term(delivery_days_evidence):
+                _set(
+                    fields,
+                    meta,
+                    "deliveryBatchDays",
+                    fields["deliveryDays"],
+                    "Документы / срок поставки партии",
+                    delivery_days_meta.get("confidence", "high"),
+                    delivery_days_evidence,
+                )
+            else:
+                warnings.append(
+                    "Общий срок поставки не перенесён в срок партии: нет прямой связи со сроком заявки или отдельной партии."
+                )
         fields.pop("deliveryDays", None)
         meta.pop("deliveryDays", None)
 

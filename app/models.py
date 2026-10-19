@@ -220,6 +220,28 @@ class ProductSourceReference(BaseModel):
         return text if text in {"excel_deterministic", "seldon_structured", "llm"} else "llm"
 
 
+class ProductReconciliationFact(BaseModel):
+    """A deterministic table fact used to audit a product-row reconciliation.
+
+    It is deliberately attached to the surviving canonical position.  The
+    detailed source rows may already be collapsed before catalog matching, but
+    remain inspectable by the product-audit LLM and in the result debug data.
+    """
+
+    factId: str
+    type: Literal["size_breakdown_equals_total"]
+    confidence: Literal["high"] = "high"
+    fileName: str = ""
+    table: str = ""
+    sectionRole: str = "other"
+    product: str = ""
+    unit: str = ""
+    sizeColumn: str = ""
+    totalQuantity: float
+    detailQuantitySum: float
+    detailRows: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+
+
 class ProductCharacteristic(BaseModel):
     name: str = ""
     value: str
@@ -300,6 +322,7 @@ class TenderPosition(BaseModel):
     # available here for diagnostics and report generation.
     sourceReferences: list[ProductSourceReference] = Field(default_factory=list, max_length=50)
     sourceCells: dict[str, str] = Field(default_factory=dict)
+    reconciliationFacts: list[ProductReconciliationFact] = Field(default_factory=list, max_length=20)
     characteristics: list[ProductCharacteristic] = Field(default_factory=list, max_length=100)
     characteristicConflicts: list[CharacteristicConflict] = Field(default_factory=list, max_length=50)
     searchCharacteristics: list[str] = Field(default_factory=list, max_length=5)
@@ -403,8 +426,26 @@ class ProductCandidateAssignment(BaseModel):
     rationale: str = ""
 
 
+class ProductReconciliationDecision(BaseModel):
+    """LLM confirmation or escalation of a deterministic table fact."""
+
+    factId: str
+    action: Literal[
+        "keep",
+        "merge_to_total",
+        "remove_as_duplicate",
+        "conflict_needs_review",
+    ]
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    rationale: str = ""
+
+
 class ProductCandidateAuditResponse(BaseModel):
     assignments: list[ProductCandidateAssignment] = Field(
+        default_factory=list,
+        max_length=200,
+    )
+    reconciliationDecisions: list[ProductReconciliationDecision] = Field(
         default_factory=list,
         max_length=200,
     )

@@ -8,6 +8,7 @@ from typing import Any
 from app.models import (
     DocumentPriceSource,
     ProductCharacteristic,
+    ProductReconciliationFact,
     ProductSourceReference,
     SpreadsheetRow,
     SpreadsheetTable,
@@ -3079,6 +3080,132 @@ def _drop_unconfirmed_llm_quantity_breakdowns(
     )
 
 
+def _drop_source_size_breakdowns_for_llm_totals(
+    deterministic: list[TenderPosition],
+    llm_products: list[TenderPosition],
+) -> tuple[list[TenderPosition], list[str]]:
+    """Keep an LLM total and attach proof for a same-table size breakdown.
+
+    Some clothing tables contain a separate row for every size and a repeated
+    ``total quantity`` value for the product family.  The LLM can correctly
+    recover that total, while deterministic extraction sees only the size
+    rows.  Without this reconciliation both representations reach
+    autopodbor as independent products.
+
+    This is intentionally narrow: rows must come from one table, explicitly
+    contain a size/height characteristic, have the exact same normalized name
+    and unit, and their quantities must add up to one LLM position. Repeated
+    goods in different tables or lots are therefore left untouched.
+
+    The source rows are collapsed deterministically, but their coordinates,
+    sizes and arithmetic are attached to the surviving total as a
+    ``reconciliationFact``. The subsequent product audit can therefore
+    confirm the action or request manual review without rereading the tender.
+    """
+    grouped: dict[
+        tuple[str, str, str, str], list[tuple[int, TenderPosition]]
+    ] = {}
+    for index, position in enumerate(deterministic):
+        reference = position.sourceReference
+        if (
+            reference is None
+            or reference.row is None
+            or position.quantity is None
+        ):
+            continue
+        scope = _source_table_scope(position)
+        name = _position_name_key(position)
+        unit = _position_unit_key(position.unit)
+        if not scope[0] or not name:
+            continue
+        grouped.setdefault(
+            (scope[0], scope[1], name, _word_table_key(position.lotNumber)), []
+        ).append((index, position))
+
+    def size_dimension(position: TenderPosition) -> tuple[str, str]:
+        for characteristic in position.characteristics:
+            header = _normalize_header(characteristic.name)
+            if re.search(r"(?:^| )(?:размер|рост|размерный|типоразмер)(?: |$)", header):
+                value = _clean(characteristic.value)
+                if value:
+                    return _clean(characteristic.name), value
+        return "", ""
+
+    skipped_indexes: set[int] = set()
+    warnings: list[str] = []
+    for (_, _, name, lot), entries in grouped.items():
+        if len(entries) < 2:
+            continue
+        units = {_position_unit_key(position.unit) for _, position in entries}
+        if len(units) != 1:
+            continue
+        unit = next(iter(units))
+        total = sum(float(position.quantity or 0) for _, position in entries)
+        size_rows = [size_dimension(position) for _, position in entries]
+        if not all(value for _, value in size_rows):
+            continue
+        parent_index, parent = next(
+            (
+                (index, position)
+                for index, position in enumerate(llm_products)
+                if position.source == "llm"
+                and position.quantity is not None
+                and _position_name_key(position) == name
+                and _position_unit_key(position.unit) in {"", unit}
+                and _word_table_key(position.lotNumber) == lot
+                and abs(float(position.quantity) - total) < 1e-9
+            ),
+            (None, None),
+        )
+        if parent is None:
+            continue
+        first_reference = entries[0][1].sourceReference
+        if first_reference is None:
+            continue
+        size_column = next((header for header, _ in size_rows if header), "Размер")
+        fact = ProductReconciliationFact(
+            factId=(
+                "size-breakdown:"
+                f"{_source_table_scope(entries[0][1])[0]}:"
+                f"{_source_table_scope(entries[0][1])[1]}:"
+                f"{lot}:{first_reference.row}:{parent_index}"
+            ),
+            type="size_breakdown_equals_total",
+            fileName=first_reference.fileName,
+            table=first_reference.sheet or first_reference.table,
+            sectionRole=first_reference.sectionRole,
+            product=parent.product,
+            unit=parent.unit or entries[0][1].unit,
+            sizeColumn=size_column,
+            totalQuantity=float(parent.quantity),
+            detailQuantitySum=total,
+            detailRows=[
+                {
+                    "candidateId": position.candidateId,
+                    "row": position.sourceReference.row if position.sourceReference else None,
+                    "size": size_value,
+                    "quantity": position.quantity,
+                    "sourceCells": position.sourceCells,
+                }
+                for (_, position), (_, size_value) in zip(entries, size_rows)
+            ],
+        )
+        parent_facts = list(parent.reconciliationFacts)
+        parent_facts.append(fact)
+        llm_products[parent_index] = parent.model_copy(
+            update={"reconciliationFacts": parent_facts}
+        )
+        skipped_indexes.update(index for index, _ in entries)
+        warnings.append(
+            "Collapsed source size breakdown into an LLM total and attached a "
+            f"reconciliation fact: {parent.product[:160]} ({parent.quantity:g} = {total:g})."
+        )
+    return (
+        [position for index, position in enumerate(deterministic) if index not in skipped_indexes],
+        warnings,
+    )
+
+
 def _position_table_identity(position: TenderPosition) -> tuple[str, float | None, str]:
     return (
         _position_name_key(position),
@@ -3232,6 +3359,10 @@ def merge_positions(
 ) -> tuple[list[TenderPosition], list[str]]:
     seldon = list(seldon or [])
     llm_products = list(llm_response.products if llm_response else [])
+    deterministic, source_breakdown_warnings = _drop_source_size_breakdowns_for_llm_totals(
+        deterministic,
+        llm_products,
+    )
     llm_products, breakdown_warnings = _drop_unconfirmed_llm_quantity_breakdowns(
         llm_products,
         deterministic + seldon + llm_products,
@@ -3246,6 +3377,7 @@ def merge_positions(
     combined = llm_products + seldon + deterministic
     warnings = (
         list(llm_response.warnings if llm_response else [])
+        + source_breakdown_warnings
         + breakdown_warnings
         + unreferenced_copy_warnings
         + aligned_copy_warnings

@@ -11,6 +11,7 @@ from app.models import (
     ExtractedFieldsResponse,
     ProductHierarchyResponse,
     ProductCandidateAuditResponse,
+    ProductReconciliationFact,
     TenderPosition,
     TenderPositionsResponse,
 )
@@ -429,7 +430,20 @@ def test_product_candidate_audit_uses_structured_response_and_source_cells() -> 
 
     client.json_call = fake_json_call  # type: ignore[method-assign]
     response = client.audit_product_candidates(
-        [TenderPosition(product="Аналоги рассматриваются", quantity=162)]
+        [
+            TenderPosition(
+                product="Аналоги рассматриваются",
+                quantity=162,
+                reconciliationFacts=[
+                    ProductReconciliationFact(
+                        factId="size-breakdown-1",
+                        type="size_breakdown_equals_total",
+                        totalQuantity=162,
+                        detailQuantitySum=162,
+                    )
+                ],
+            )
+        ]
     )
 
     assert response.assignments == []
@@ -439,6 +453,8 @@ def test_product_candidate_audit_uses_structured_response_and_source_cells() -> 
     assert "sourceReference" in str(captured["prompt"])
     assert "sourceContext" in str(captured["prompt"])
     assert "sameSourcePositionIndexes" in str(captured["prompt"])
+    assert "reconciliationFacts" in str(captured["prompt"])
+    assert captured["audit_details"] == {"reconciliationFactCount": 1}
 
 
 

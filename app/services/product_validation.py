@@ -10,6 +10,7 @@ from app.models import (
     ProductCandidateAuditResponse,
     ProductHierarchyAssignment,
     ProductHierarchyResponse,
+    ProductReconciliationDecision,
     ProductCharacteristic,
     ProductMatchItem,
     SpreadsheetCandidateReviewResponse,
@@ -328,6 +329,14 @@ def _base_debug(position_count: int) -> dict[str, Any]:
         "unresolved": [],
         "assignments": [],
         "hierarchy": {},
+        "reconciliation": {
+            "factCount": 0,
+            "facts": [],
+            "decisions": [],
+            "confirmedFactIds": [],
+            "conflicts": [],
+            "unconfirmedFactIds": [],
+        },
     }
 
 
@@ -362,6 +371,75 @@ def apply_product_candidate_audit(
         }
         if item not in unresolved:
             unresolved.append(item)
+
+    facts_by_id: dict[str, tuple[int, Any]] = {}
+    for index, position in enumerate(positions, start=1):
+        for fact in position.reconciliationFacts:
+            if not fact.factId or fact.factId in facts_by_id:
+                continue
+            facts_by_id[fact.factId] = (index, fact)
+            debug["reconciliation"]["facts"].append(
+                {
+                    "positionIndex": index,
+                    **fact.model_dump(mode="json"),
+                }
+            )
+    debug["reconciliation"]["factCount"] = len(facts_by_id)
+
+    reconciliation_decisions: dict[str, ProductReconciliationDecision] = {}
+    duplicate_reconciliation_fact_ids: set[str] = set()
+    for decision in response.reconciliationDecisions:
+        if decision.factId not in facts_by_id:
+            continue
+        if decision.factId in reconciliation_decisions:
+            duplicate_reconciliation_fact_ids.add(decision.factId)
+            continue
+        reconciliation_decisions[decision.factId] = decision
+        debug["reconciliation"]["decisions"].append(decision.model_dump(mode="json"))
+
+    for fact_id, (index, _) in facts_by_id.items():
+        decision = reconciliation_decisions.get(fact_id)
+        if decision is None:
+            # Absence of the optional confirmation never restores the detail
+            # rows or blocks the tender. The deterministic equality remains
+            # inspectable in debug and is retried on the next processing run.
+            debug["reconciliation"]["unconfirmedFactIds"].append(fact_id)
+            continue
+        if fact_id in duplicate_reconciliation_fact_ids:
+            require_review(index, "LLM-аудит вернул несколько решений по связи итоговой строки и размерной детализации")
+            debug["reconciliation"]["conflicts"].append(
+                {"factId": fact_id, "reason": "multiple LLM decisions"}
+            )
+            continue
+        if (
+            decision.action == "merge_to_total"
+            and decision.confidence >= AUDIT_REVIEW_CONFIDENCE
+        ):
+            debug["reconciliation"]["confirmedFactIds"].append(fact_id)
+            continue
+        if decision.action == "conflict_needs_review":
+            reason = decision.rationale or "LLM-аудит не подтвердил связь итоговой строки и размерной детализации"
+            require_review(index, reason)
+            debug["reconciliation"]["conflicts"].append(
+                {
+                    "factId": fact_id,
+                    "confidence": decision.confidence,
+                    "rationale": reason,
+                }
+            )
+            warnings.append(
+                "Связь итоговой товарной позиции с размерной детализацией требует ручной проверки: "
+                f"{positions[index - 1].product[:200]}."
+            )
+            continue
+        require_review(index, "LLM-аудит вернул недопустимое решение по связи итоговой строки и размерной детализации")
+        debug["reconciliation"]["conflicts"].append(
+            {
+                "factId": fact_id,
+                "confidence": decision.confidence,
+                "rationale": decision.rationale or f"unsupported action: {decision.action}",
+            }
+        )
 
     for index in range(1, len(positions) + 1):
         if index not in assignments:

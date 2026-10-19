@@ -409,6 +409,53 @@ def test_merge_drops_unreferenced_llm_clothing_size_breakdown() -> None:
     assert any("size breakdown" in warning for warning in warnings)
 
 
+def test_merge_keeps_llm_total_over_source_apparel_size_breakdown() -> None:
+    deterministic = [
+        TenderPosition(
+            product="Work trousers",
+            quantity=2,
+            unit="pcs",
+            source="word_table_deterministic",
+            sourceReference={
+                "fileName": "clothing-specification.docx",
+                "table": "Table 1",
+                "row": 3,
+                "productColumn": "B",
+            },
+            characteristics=[ProductCharacteristic(name="Размер", value="48-50")],
+        ),
+        TenderPosition(
+            product="Work trousers",
+            quantity=3,
+            unit="pcs",
+            source="word_table_deterministic",
+            sourceReference={
+                "fileName": "clothing-specification.docx",
+                "table": "Table 1",
+                "row": 4,
+                "productColumn": "B",
+            },
+            characteristics=[ProductCharacteristic(name="Размер", value="52-54")],
+        ),
+    ]
+    llm = TenderPositionsResponse(
+        products=[TenderPosition(product="Work trousers", quantity=5, unit="pcs")]
+    )
+
+    merged, warnings = merge_positions(deterministic, llm)
+
+    assert [(position.product, position.quantity) for position in merged] == [
+        ("Work trousers", 5)
+    ]
+    assert any("source size breakdown" in warning for warning in warnings)
+    facts = merged[0].reconciliationFacts
+    assert len(facts) == 1
+    assert facts[0].type == "size_breakdown_equals_total"
+    assert facts[0].detailQuantitySum == 5
+    assert facts[0].totalQuantity == 5
+    assert [row["size"] for row in facts[0].detailRows] == ["48-50", "52-54"]
+
+
 def test_merge_keeps_same_file_rows_and_prefers_nmck_copy_across_files() -> None:
     contract_positions = [
         TenderPosition(
