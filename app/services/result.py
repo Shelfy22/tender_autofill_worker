@@ -8,11 +8,34 @@ from app.models import NormalizedJob, TenderResult
 
 def _lot_divisible_report_value(value: Any) -> str:
     normalized = str(value or "").strip().casefold()
-    if normalized in {"yes", "true", "1", "да"}:
-        return "Да"
+    if normalized in {"yes", "true", "1", "да", "делимый"}:
+        return "Делимый"
     if normalized in {"no", "false", "0", "нет"}:
         return "Неделимый"
     return ""
+
+
+def _yes_no_display_value(value: Any) -> Any:
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"yes", "true", "1", "да"}:
+        return "Да"
+    if normalized in {"no", "false", "0", "нет"}:
+        return "Нет"
+    return value
+
+
+def _national_regime_display_value(value: Any) -> Any:
+    labels = {
+        "ban": "запрет",
+        "restriction": "ограничение",
+        "preference": "преимущество",
+        "no": "Нет",
+    }
+    raw = str(value or "").strip()
+    if not raw:
+        return value
+    parts = [part.strip() for part in raw.split(";")]
+    return "; ".join(labels.get(part.casefold(), part) for part in parts if part)
 
 
 def build_result_json(
@@ -27,18 +50,25 @@ def build_result_json(
     debug: dict[str, Any] | None,
 ) -> dict[str, Any]:
     result_fields = {**fields, "legalEntity": None, "toCode": job.to_code}
-    # The Daily finalizer reads ``fields`` rather than ``reportFields`` for
-    # this column. Preserve the machine value while building the result, then
-    # expose the requested business label in the outward payload.
-    if fields.get("lotDivisible") == "no":
-        result_fields["lotDivisible"] = "Неделимый"
+    # Keep normalized machine values while calculating the tender, then expose
+    # business labels only in the outward payload consumed by Daily.
+    lot_divisible_label = _lot_divisible_report_value(fields.get("lotDivisible"))
+    if lot_divisible_label:
+        result_fields["lotDivisible"] = lot_divisible_label
+    if "stateDefenseOrder" in fields:
+        result_fields["stateDefenseOrder"] = _yes_no_display_value(
+            fields.get("stateDefenseOrder")
+        )
+    if "nationalRegime" in fields:
+        result_fields["nationalRegime"] = _national_regime_display_value(
+            fields.get("nationalRegime")
+        )
     report_fields = dict(job.report_fields)
-    lot_divisible = _lot_divisible_report_value(fields.get("lotDivisible"))
-    if lot_divisible:
+    if lot_divisible_label:
         # Downstream XLSX generation uses the original Russian Daily headers.
         # Keep that column in sync with the normalized decision field.
-        report_fields["Лот делимый"] = lot_divisible
-        report_fields["lotDivisible"] = fields["lotDivisible"]
+        report_fields["Лот делимый"] = lot_divisible_label
+        report_fields["lotDivisible"] = lot_divisible_label
     result = TenderResult(
         fields=result_fields,
         meta=meta,
