@@ -41,6 +41,13 @@ def _value(value: Any) -> Any:
     return value
 
 
+def _export_cell_value(value: Any) -> Any:
+    """Return a spreadsheet-safe value without changing the source result."""
+    if isinstance(value, str):
+        return value.replace(";", ":")
+    return value
+
+
 def _source_label(detail: dict[str, Any]) -> str:
     reference = detail.get("sourceReference")
     if not isinstance(reference, dict):
@@ -122,7 +129,7 @@ def build_product_matching_workbook(
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "Автоподбор"
-    worksheet.append(HEADERS)
+    worksheet.append([_export_cell_value(value) for value in HEADERS])
 
     header_fill = PatternFill("solid", fgColor="D9EAF7")
     for cell in worksheet[1]:
@@ -147,32 +154,35 @@ def build_product_matching_workbook(
         product_id = detail.get("productId") or result.get("ID товара") or article
         worksheet.append(
             [
-                index,
-                _value(detail.get("sourceProduct") or detail.get("productQuery")),
-                _value(detail.get("quantity")),
-                _value(detail.get("unit")),
-                _value(article),
-                _value(link),
-                _value(product_id),
-                _value(result.get("Наименование") or ""),
-                _value(result.get("Производитель") or ""),
-                _value(detail.get("medianUnitPriceRub")),
-                _value(detail.get("priceCurrency") or result.get("Валюта")),
-                _value(detail.get("positionTotalPriceRub")),
-                _value(result.get("Соответствие") or ""),
-                _value(result.get("Обоснование") or ""),
-                _source_label(detail),
-                _value(detail.get("positionKey")),
-                _characteristics_label(detail.get("sourceCharacteristics")),
-                _catalog_characteristics_label(catalog_params),
-                _value(detail.get("productQuery")),
-                _list_label(detail.get("searchCharacteristics")),
-                _value(
-                    detail.get("searchCategoryCode")
-                    or detail.get("searchCategory")
-                ),
-                _list_label(detail.get("searchQueries")),
-                _conflicts_label(detail.get("characteristicConflicts")),
+                _export_cell_value(value)
+                for value in [
+                    index,
+                    _value(detail.get("sourceProduct") or detail.get("productQuery")),
+                    _value(detail.get("quantity")),
+                    _value(detail.get("unit")),
+                    _value(article),
+                    _value(link),
+                    _value(product_id),
+                    _value(result.get("Наименование") or ""),
+                    _value(result.get("Производитель") or ""),
+                    _value(detail.get("medianUnitPriceRub")),
+                    _value(detail.get("priceCurrency") or result.get("Валюта")),
+                    _value(detail.get("positionTotalPriceRub")),
+                    _value(result.get("Соответствие") or ""),
+                    _value(result.get("Обоснование") or ""),
+                    _source_label(detail),
+                    _value(detail.get("positionKey")),
+                    _characteristics_label(detail.get("sourceCharacteristics")),
+                    _catalog_characteristics_label(catalog_params),
+                    _value(detail.get("productQuery")),
+                    _list_label(detail.get("searchCharacteristics")),
+                    _value(
+                        detail.get("searchCategoryCode")
+                        or detail.get("searchCategory")
+                    ),
+                    _list_label(detail.get("searchQueries")),
+                    _conflicts_label(detail.get("characteristicConflicts")),
+                ]
             ]
         )
 

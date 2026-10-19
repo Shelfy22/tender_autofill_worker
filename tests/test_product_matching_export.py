@@ -82,3 +82,28 @@ def test_export_shows_params_only_for_selected_catalog_product() -> None:
     assert sheet["R2"].value == "Число жил: 3\nСечение: 2,5 мм2"
     assert sheet["R3"].value is None
     assert sheet.max_column == 23
+
+
+def test_export_replaces_semicolons_with_colons_in_all_text_cells() -> None:
+    workbook_bytes = build_product_matching_workbook(
+        {
+            "details": [
+                {
+                    "sourceProduct": "cable; 3x2.5",
+                    "searchCharacteristics": ["core; copper"],
+                    "searchQueries": ["cable; power"],
+                    "sourceCharacteristics": [
+                        {"name": "core; material", "value": "copper; tinned"}
+                    ],
+                }
+            ]
+        }
+    )
+
+    sheet = load_workbook(BytesIO(workbook_bytes)).active
+
+    assert sheet["B2"].value == "cable: 3x2.5"
+    assert sheet["Q2"].value == "core: material: copper: tinned"
+    assert sheet["T2"].value == "core: copper"
+    assert sheet["V2"].value == "cable: power"
+    assert all(";" not in str(cell.value) for row in sheet.iter_rows() for cell in row)
