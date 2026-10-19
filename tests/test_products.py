@@ -560,6 +560,40 @@ def test_partial_copies_keep_technical_position_and_price_details() -> None:
     assert any("служебная строка" in warning for warning in warnings)
 
 
+def test_model_variants_with_cyrillic_and_latin_letters_merge_across_documents() -> None:
+    technical = TenderPosition(
+        product="\u0410\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439 \u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c BA57-35-340010-100A-500",
+        quantity=23,
+        unit="\u0448\u0442",
+        characteristics=[ProductCharacteristic(name="Execution", value="UHL3")],
+        sourceReference={
+            "fileName": "technical.pdf",
+            "table": "Items",
+            "row": 2,
+            "sectionRole": "technical_specification",
+        },
+    )
+    price = TenderPosition(
+        product="\u0412\u042b\u041a\u041b\u042e\u0427\u0410\u0422\u0415\u041b\u042c \u0410\u0412\u0422\u041e\u041c\u0410\u0422\u0418\u0427\u0415\u0421\u041a\u0418\u0419 \u0412\u041057-35-340010-100\u0410-500",
+        quantity=23,
+        unit="\u0448\u0442",
+        documentUnitPriceRub=10_500,
+        sourceReference={
+            "fileName": "nmcd.xlsx",
+            "sheet": "Prices",
+            "row": 8,
+            "sectionRole": "price_justification",
+        },
+    )
+
+    merged, warnings = merge_positions([technical, price], None)
+
+    assert len(merged) == 1
+    assert merged[0].product == technical.product
+    assert merged[0].documentUnitPriceRub == 10_500
+    assert [item.value for item in merged[0].characteristics] == ["UHL3"]
+
+
 def test_repeated_names_are_paired_between_price_and_technical_sections() -> None:
     price_positions = [
         TenderPosition(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any
 
 from app.models import (
@@ -1944,6 +1945,93 @@ def _cross_table_product_identity(position: TenderPosition) -> str:
     return re.sub(r"[^a-zа-я0-9,./-]+", " ", value).strip()
 
 
+_MODEL_LOOKALIKE_TRANSLATION = str.maketrans(
+    {
+        "\u0410": "A", "\u0412": "B", "\u0421": "C", "\u0415": "E", "\u041d": "H", "\u041a": "K",
+        "\u041c": "M", "\u041e": "O", "\u0420": "P", "\u0422": "T", "\u0425": "X", "\u0423": "Y",
+        "\u0430": "a", "\u0432": "b", "\u0441": "c", "\u0435": "e", "\u043d": "h", "\u043a": "k",
+        "\u043c": "m", "\u043e": "o", "\u0440": "p", "\u0442": "t", "\u0445": "x", "\u0443": "y",
+    }
+)
+_MODEL_GENERIC_WORDS = (
+    "\u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438\u0439",
+    "\u0432\u044b\u043a\u043b\u044e\u0447\u0430\u0442\u0435\u043b\u044c",
+    "\u043f\u0443\u0441\u043a\u0430\u0442\u0435\u043b\u044c",
+    "\u043c\u0430\u0433\u043d\u0438\u0442\u043d\u044b\u0439",
+)
+_MODEL_ROW_SUFFIX_PATTERN = re.compile("\u0441\u0442\u0440\u043e\u043a\u0430\\s*\\d+", re.IGNORECASE)
+
+
+def _cross_document_model_identity(position: TenderPosition) -> str:
+    """Return a stable article/model key despite Cyrillic/Latin look-alikes."""
+    value = unicodedata.normalize("NFKC", _clean(position.product)).casefold()
+    value = _MODEL_ROW_SUFFIX_PATTERN.sub(" ", value)
+    for word in _MODEL_GENERIC_WORDS:
+        value = value.replace(word, " ")
+    value = value.translate(_MODEL_LOOKALIKE_TRANSLATION)
+    identity = "".join(re.findall(r"[a-z0-9]+", value))
+    # A plain generic label must never be used to collapse distinct products.
+    return identity if len(identity) >= 8 and sum(char.isdigit() for char in identity) >= 2 else ""
+
+
+def _merge_cross_document_model_copies(
+    positions: list[TenderPosition],
+    skipped_indexes: set[int],
+) -> int:
+    """Merge source copies that differ only in script/order around a model.
+
+    This targets lists such as ``BA57`` in a technical PDF versus ``ВА57`` in
+    the NMC workbook. Rows from one table remain separate, and explicitly
+    different lots are never compared.
+    """
+    groups: dict[
+        tuple[str, float | None, str, str],
+        dict[tuple[str, str], list[tuple[int, TenderPosition]]],
+    ] = {}
+    for index, position in enumerate(positions):
+        if index in skipped_indexes or position.sourceReference is None:
+            continue
+        identity = _cross_document_model_identity(position)
+        scope = _source_table_scope(position)
+        if not identity or not scope[0]:
+            continue
+        lot = _word_table_key(position.lotNumber)
+        groups.setdefault(
+            (identity, position.quantity, _position_unit_key(position.unit), lot), {}
+        ).setdefault(scope, []).append((index, position))
+
+    merged_count = 0
+    for scopes in groups.values():
+        if len(scopes) < 2:
+            continue
+        ordered_scopes = sorted(
+            scopes,
+            key=lambda scope: (
+                min(
+                    source_role_priority(_position_source_role(position))
+                    for _, position in scopes[scope]
+                ),
+                min(index for index, _ in scopes[scope]),
+            ),
+        )
+        canonical_rows = list(scopes[ordered_scopes[0]])
+        for duplicate_scope in ordered_scopes[1:]:
+            for pair_index, ((canonical_index, canonical), (duplicate_index, duplicate)) in enumerate(
+                zip(canonical_rows, scopes[duplicate_scope])
+            ):
+                if canonical_index in skipped_indexes or duplicate_index in skipped_indexes:
+                    continue
+                merged = _merge_replicated_position_details(canonical, duplicate)
+                positions[canonical_index] = merged
+                canonical_rows[pair_index] = (
+                    canonical_index,
+                    merged,
+                )
+                skipped_indexes.add(duplicate_index)
+                merged_count += 1
+    return merged_count
+
+
 def _source_table_scope(position: TenderPosition) -> tuple[str, str]:
     reference = position.sourceReference
     if reference is None:
@@ -2044,6 +2132,9 @@ def _cross_document_position_key(position: TenderPosition) -> tuple[str, str, fl
             else ""
         )
     )
+    lot = _word_table_key(position.lotNumber)
+    if lot:
+        strong_identity = f"lot:{lot}:{strong_identity}"
     return (product, strong_identity, position.quantity, _position_unit_key(position.unit))
 
 
@@ -2571,6 +2662,13 @@ def _deduplicate_cross_document_positions(
         warnings.append(
             "Merged partial copies across technical specification, price justification, "
             "and contract tables by normalized product identity, quantity, and unit."
+        )
+
+    model_copy_count = _merge_cross_document_model_copies(positions, skipped_indexes)
+    if model_copy_count:
+        warnings.append(
+            "Merged replicated product rows across documents by model/article, "
+            "quantity, and unit despite Cyrillic/Latin label variants."
         )
 
     # Some tenders repeat only two or three technical positions. The generic
