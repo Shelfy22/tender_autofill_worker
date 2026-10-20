@@ -48,6 +48,12 @@ _FIELD_PATTERNS: dict[str, tuple[_Anchor, ...]] = {
         _Anchor(re.compile(r"срок\w*\s+поставк\w*", re.I)),
         _Anchor(re.compile(r"(?:услови\w*|порядок|график|дат[аы])\s+поставк\w*", re.I)),
         _Anchor(re.compile(r"поставк\w*\s+(?:по\s+заявк\w*|партия\w*|единовременн\w*)", re.I)),
+        _Anchor(re.compile(
+            r"(?:не\s*гарантированн\w*|негарантированн\w*)\s+объ[её]м\w*"
+            r"[\s\S]{0,300}?(?:письменн\w*\s+)?(?:запрос\w*|уведомлени\w*)\s+"
+            r"(?:заказчик\w*|покупател\w*)",
+            re.I,
+        )),
         _Anchor(re.compile(r"(?:кажд\w*\s+)?партия\w*\s+(?:товар\w*\s+)?(?:поставля\w*|в\s+течени\w*)", re.I), False),
         _Anchor(re.compile(r"заявк\w*\s+(?:заказчик\w*|покупател\w*)", re.I), False),
         _Anchor(re.compile(r"поставк\w*", re.I), False),

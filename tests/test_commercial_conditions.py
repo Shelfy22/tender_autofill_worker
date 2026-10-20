@@ -42,6 +42,24 @@ def test_commercial_context_keeps_table_like_national_regime_and_delivery_eviden
     assert "до 15.12.2026" in context
 
 
+def test_commercial_context_keeps_conditional_unguaranteed_volume_request() -> None:
+    context = build_commercial_conditions_context(
+        "",
+        [
+            document(
+                "Гарантированный объём поставляется с 01.02.2027 по 28.02.2027.\n\n"
+                "Количество товара из негарантированного объёма поставляются исключительно "
+                "по письменному запросу Заказчика. Негарантированный объём: "
+                "с 01.02.2027 по 15.12.2027."
+            )
+        ],
+    )
+
+    assert "targets: delivery; anchor: strong" in context
+    assert "негарантированного объёма" in context
+    assert "письменному запросу Заказчика" in context
+
+
 def test_commercial_context_supports_procurement_wording_variants() -> None:
     context = build_commercial_conditions_context(
         "",

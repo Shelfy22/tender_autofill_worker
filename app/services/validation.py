@@ -110,6 +110,16 @@ _NATIONAL_REGIME_TABLE_HEADER_PATTERN = re.compile(
     r"\u0432\u0438\u0434\s+\u0437\u0430\u0449\u0438\u0442\u043d\w*\s+\u043c\u0435\u0440\w*",
     re.IGNORECASE,
 )
+_NATIONAL_REGIME_PRODUCT_COLUMN_PATTERN = re.compile(
+    r"(?:\u0432\u0438\u0434\s+\u0437\u0430\u0449\u0438\u0442\u043d\w*\s+\u043c\u0435\u0440\w*|"
+    r"\u043d\u0430\u0446\u0438\u043e\u043d\u0430\u043b\u044c\u043d\w*\s+\u0440\u0435\u0436\u0438\u043c)",
+    re.IGNORECASE,
+)
+_PRODUCT_TABLE_HEADER_PATTERN = re.compile(
+    r"(?:\u043d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\w*\s+(?:\u043f\u043e\u0437\u0438\u0446\u0438\w*|\u0442\u043e\u0432\u0430\u0440\w*)|"
+    r"\u043d\u043e\u043c\u0435\u043d\u043a\u043b\u0430\u0442\u0443\u0440\w*)",
+    re.IGNORECASE,
+)
 _NATIONAL_REGIME_APPLICATION_HEADER_PATTERN = re.compile(
     r"(?:применени\w*\s+национальн\w*\s+режим|"
     r"установлен\w*\s+заказчик\w*|заказчик\w*\s+установлен\w*)",
@@ -307,7 +317,10 @@ def _table_regime_value(value: Any) -> str | None:
     if _NATIONAL_MINIMUM_SHARE_PATTERN.search(normalized):
         return "no"
     for regime, pattern in _NATIONAL_REGIME_PATTERNS:
-        if pattern.fullmatch(normalized):
+        # Product columns often contain a full description such as
+        # "Запрет иностранных товаров, работ, услуг", not just the one-word
+        # measure.  The column header has already established its meaning.
+        if pattern.search(normalized):
             return regime
     return None
 
@@ -415,11 +428,22 @@ def _national_regime_from_product_tables(
                     (
                         (column, value)
                         for column, value in row.cells.items()
-                        if _NATIONAL_REGIME_TABLE_HEADER_PATTERN.search(str(value))
+                        if _NATIONAL_REGIME_PRODUCT_COLUMN_PATTERN.search(str(value))
                     ),
                     None,
                 )
                 if found_header is not None:
+                    # ``Национальный режим`` can also appear in a sheet that
+                    # merely documents allowed values for an Excel form.  It
+                    # is product evidence only when that same row is a real
+                    # product-table header.  The dedicated "Вид защитной
+                    # меры" header remains sufficient by itself.
+                    header_text = " | ".join(str(value) for value in row.cells.values())
+                    if (
+                        not _NATIONAL_REGIME_TABLE_HEADER_PATTERN.search(str(found_header[1]))
+                        and not _PRODUCT_TABLE_HEADER_PATTERN.search(header_text)
+                    ):
+                        continue
                     measure_column, header = found_header
                     continue
                 if not measure_column:
@@ -533,6 +557,17 @@ _DIRECT_DELIVERY_REQUEST_PATTERN = re.compile(
     r"\u043f\u043e\s+\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434",
     re.IGNORECASE,
 )
+_CONDITIONAL_VOLUME_REQUEST_PATTERN = re.compile(
+    r"(?:\u043d\u0435\s*\u0433\u0430\u0440\u0430\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\w*|"
+    r"\u043d\u0435\u0433\u0430\u0440\u0430\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\w*)\s+\u043e\u0431\u044a[\u0435\u0451]\u043c\w*"
+    r"[\s\S]{0,420}?"
+    r"(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043b\u044f\w*|\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u043e\u0442\u0433\u0440\u0443\u0436\u0430\w*)"
+    r"[\s\S]{0,180}?"
+    r"(?:\u0438\u0441\u043a\u043b\u044e\u0447\u0438\u0442\u0435\u043b\u044c\u043d\u043e\s+)?\u043f\u043e\s+"
+    r"(?:\u043f\u0438\u0441\u044c\u043c\u0435\u043d\u043d\w*\s+)?(?:\u0437\u0430\u043f\u0440\u043e\u0441\w*|\u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\w*)\s+"
+    r"(?:\u0437\u0430\u043a\u0430\u0437\u0447\u0438\u043a\w*|\u043f\u043e\u043a\u0443\u043f\u0430\u0442\u0435\u043b\w*)",
+    re.IGNORECASE,
+)
 _BATCH_OR_DELIVERY_SCHEDULE_PATTERN = re.compile(
     r"\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*"
     r"(?:\s+(?:\u0442\u043e\u0432\u0430\u0440\w*|\u043e\u0442\u0434\u0435\u043b\u044c\u043d\w*|\u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\w*)){0,3}"
@@ -567,7 +602,10 @@ def _delivery_type_has_request_evidence(evidence: Any) -> bool:
     work schedule are not evidence of repeated deliveries.
     """
     text = re.sub(r"\s+", " ", str(evidence or "")).casefold()
-    if _DIRECT_DELIVERY_REQUEST_PATTERN.search(text):
+    if (
+        _DIRECT_DELIVERY_REQUEST_PATTERN.search(text)
+        or _CONDITIONAL_VOLUME_REQUEST_PATTERN.search(text)
+    ):
         return True
     return bool(
         not _SINGLE_BATCH_PATTERN.search(text)
@@ -582,7 +620,11 @@ def _delivery_type_evidence_fragment(*values: Any) -> str:
         text = re.sub(r"\s+", " ", str(raw_value or "")).strip()
         if not text or not _delivery_type_has_request_evidence(text):
             continue
-        match = _DIRECT_DELIVERY_REQUEST_PATTERN.search(text) or _BATCH_OR_DELIVERY_SCHEDULE_PATTERN.search(text)
+        match = (
+            _DIRECT_DELIVERY_REQUEST_PATTERN.search(text)
+            or _CONDITIONAL_VOLUME_REQUEST_PATTERN.search(text)
+            or _BATCH_OR_DELIVERY_SCHEDULE_PATTERN.search(text)
+        )
         if match is None:
             continue
         return text[max(0, match.start() - 160) : match.end() + 340][:500]
@@ -1099,6 +1141,13 @@ def validate_fields(
     # For deliveries by requests/batches, a term such as "within N days after
     # a request" belongs to the batch column, not to the general delivery term.
     if delivery_type == "by_requests":
+        batch_days_evidence = str(meta.get("deliveryBatchDays", {}).get("evidence") or "")
+        if fields.get("deliveryBatchDays") and not _delivery_days_are_batch_term(batch_days_evidence):
+            fields.pop("deliveryBatchDays", None)
+            meta.pop("deliveryBatchDays", None)
+            warnings.append(
+                "Срок поставки партии не заполнен: число дней не связано прямо с заявкой или отдельной партией."
+            )
         if not fields.get("deliveryBatchDays") and fields.get("deliveryDays"):
             delivery_days_meta = meta.get("deliveryDays", {})
             delivery_days_evidence = str(delivery_days_meta.get("evidence") or "")

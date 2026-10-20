@@ -480,6 +480,84 @@ def test_product_protection_table_overrides_generic_national_regime_candidate() 
     assert any("товарной таблицы заменил" in warning for warning in warnings)
 
 
+def test_product_national_regime_column_uses_strongest_measure() -> None:
+    """A product table may name the column simply ``Национальный режим``."""
+    product_table = SpreadsheetTable(
+        fileName="Приложение 6. Сведения о позиции лота.xlsx",
+        sheet="Лист1",
+        rows=[
+            SpreadsheetRow(
+                row=2,
+                cells={
+                    "A": "№",
+                    "B": "Наименование позиции",
+                    "D": "Количество",
+                    "K": "Национальный режим",
+                },
+            ),
+            SpreadsheetRow(
+                row=4,
+                cells={
+                    "A": "2",
+                    "B": "Термостат",
+                    "K": "Ограничение иностранных товаров, работ, услуг",
+                },
+            ),
+            SpreadsheetRow(
+                row=17,
+                cells={
+                    "A": "15",
+                    "B": "Изолятор",
+                    "K": "Запрет иностранных товаров, работ, услуг",
+                },
+            ),
+        ],
+    )
+    documents = [
+        ParsedDocument(
+            documentIndex=1,
+            fileName="Приложение 6. Сведения о позиции лота.xlsx",
+            spreadsheetTables=[product_table],
+        )
+    ]
+
+    fields, meta, _ = validate_fields(job_with_lot(""), None, "", documents)
+
+    assert fields["nationalRegime"] == "ban"
+    assert meta["nationalRegime"]["confidence"] == "high"
+    assert "Запрет" in meta["nationalRegime"]["evidence"]
+
+
+def test_national_regime_form_template_is_not_a_product_table() -> None:
+    form_template = SpreadsheetTable(
+        fileName="Справочник значений.xlsx",
+        sheet="Лист2",
+        rows=[
+            SpreadsheetRow(
+                row=1,
+                cells={
+                    "A": "Тип поля",
+                    "B": "Национальный режим",
+                    "C": "Описание",
+                },
+            ),
+            SpreadsheetRow(row=2, cells={"B": "Запрет иностранных товаров"}),
+            SpreadsheetRow(row=3, cells={"B": "Ограничение иностранных товаров"}),
+        ],
+    )
+    documents = [
+        ParsedDocument(
+            documentIndex=1,
+            fileName="Справочник значений.xlsx",
+            spreadsheetTables=[form_template],
+        )
+    ]
+
+    fields, _, _ = validate_fields(job_with_lot(""), None, "", documents)
+
+    assert "nationalRegime" not in fields
+
+
 def test_pp_1875_application_table_uses_only_explicitly_established_measure() -> None:
     extracted = ExtractedFieldsResponse(
         fields={
@@ -708,6 +786,40 @@ def test_batch_delivery_without_stated_term_remains_blank() -> None:
 
     fields, _, _ = validate_fields(job_with_lot(""), extracted, "", [])
 
+    assert "deliveryBatchDays" not in fields
+
+
+def test_conditional_unguaranteed_volume_by_written_request_is_batch_delivery() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="during_period",
+                confidence="high",
+                source="ТЗ.docx",
+                evidence="Срок поставки с 01.02.2027 по 15.12.2027.",
+            ),
+            # An interval between two dates is not an explicitly stated
+            # quantity of delivery days and must not survive as a term.
+            "deliveryDays": FieldValue(
+                value=318,
+                confidence="medium",
+                source="ТЗ.docx",
+                evidence="Срок поставки с 01.02.2027 по 15.12.2027.",
+            ),
+        }
+    )
+    text = (
+        "Гарантированный объём поставляется с 01.02.2027 по 28.02.2027. "
+        "Количество товара из не гарантированного объёма поставляются исключительно "
+        "по письменному запросу Заказчика. Негарантированный объём: с 01.02.2027 "
+        "по 15.12.2027."
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), extracted, text, [])
+
+    assert fields["deliveryType"] == "by_requests"
+    assert "письменному запросу" in meta["deliveryType"]["evidence"].casefold()
+    assert "deliveryDays" not in fields
     assert "deliveryBatchDays" not in fields
 
 
