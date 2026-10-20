@@ -420,6 +420,52 @@ def test_batch_delivery_moves_llm_term_to_batch_delivery_days() -> None:
     assert "deliveryDays" not in fields
 
 
+def test_batch_delivery_term_is_extracted_when_llm_kept_it_only_in_note() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="by_requests",
+                confidence="high",
+                source="Contract.docx",
+                evidence="Поставка отдельными партиями по заявкам Покупателя.",
+            ),
+            "deliveryNote": FieldValue(
+                value="Поставка по заявкам; срок поставки 30 календарных дней с момента направления заявки.",
+                confidence="high",
+                source="Contract.docx",
+                evidence="Поставка по заявкам; срок поставки 30 календарных дней с момента направления заявки.",
+            ),
+        }
+    )
+    text = (
+        "Поставка отдельными партиями по заявкам Покупателя. "
+        "Срок поставки 30 календарных дней с момента направления заявки."
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), extracted, text, [])
+
+    assert fields["deliveryBatchDays"] == 30
+    assert "направления заявки" in meta["deliveryBatchDays"]["evidence"]
+
+
+def test_batch_delivery_does_not_treat_request_submission_deadline_as_delivery_term() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="by_requests",
+                confidence="high",
+                source="Contract.docx",
+                evidence="Поставка партиями по заявкам Покупателя.",
+            )
+        }
+    )
+    text = "Поставка партиями по заявкам Покупателя; заявка подаётся за 3 рабочих дня."
+
+    fields, _, _ = validate_fields(job_with_lot(""), extracted, text, [])
+
+    assert "deliveryBatchDays" not in fields
+
+
 def test_national_regime_is_not_overridden_by_global_document_regex() -> None:
     text = """
     Сведения о национальном режиме в соответствии с постановлением № 1875:

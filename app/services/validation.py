@@ -631,6 +631,22 @@ _BATCH_TERM_PATTERN = re.compile(
     r"[^.]{0,80}\u043f\u0430\u0440\u0442\w*[^.]{0,80}\d+",
     re.IGNORECASE,
 )
+_BATCH_DELIVERY_DURATION_PATTERN = re.compile(
+    r"(?<!\d)(\d{1,4})\s*"
+    r"(?:\([^)]{1,80}\)\s*)?"
+    r"(?:\u0440\u0430\u0431\u043e\u0447\w*|\u043a\u0430\u043b\u0435\u043d\u0434\u0430\u0440\u043d\w*|\u0431\u0430\u043d\u043a\u043e\u0432\u0441\u043a\w*)?\s*"
+    r"(\u0434\u043d(?:\u0435\u0439|\u044f)?|\u0441\u0443\u0442(?:\u043e\u043a|\u043a\u0438)?|\u043d\u0435\u0434\u0435\u043b\w*|\u0447\u0430\u0441\w*)\b",
+    re.IGNORECASE,
+)
+_DELIVERY_ACTION_PATTERN = re.compile(
+    r"(?:\u0441\u0440\u043e\u043a\w*\s+)?(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u043e\u0442\u0433\u0440\u0443\u0437\u043a\w*|\u0434\u043e\u0441\u0442\u0430\u0432\u043a\w*)",
+    re.IGNORECASE,
+)
+_REQUEST_SUBMISSION_DEADLINE_PATTERN = re.compile(
+    r"(?:\u0437\u0430\u044f\u0432\u043a\w*|\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434\u043a\w*)"
+    r"(?:\s+\w+){0,3}\s+\u0437\u0430\s*$",
+    re.IGNORECASE,
+)
 
 
 def _delivery_type_has_request_evidence(evidence: Any) -> bool:
@@ -674,6 +690,35 @@ def _delivery_days_are_batch_term(evidence: Any) -> bool:
     """Whether a numeric delivery term is explicitly for a request or batch."""
     text = re.sub(r"\s+", " ", str(evidence or "")).casefold()
     return bool(text and _BATCH_TERM_PATTERN.search(text))
+
+
+def _explicit_batch_delivery_days(text: Any) -> tuple[int, str] | None:
+    """Extract a directly stated delivery term for one request/batch."""
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    candidates: list[tuple[int, str]] = []
+    for match in _BATCH_DELIVERY_DURATION_PATTERN.finditer(normalized):
+        start, end = match.span()
+        context_start = max(0, start - 220)
+        context_end = min(len(normalized), end + 220)
+        context = normalized[context_start:context_end]
+        before = normalized[max(0, start - 90):start]
+        if _REQUEST_SUBMISSION_DEADLINE_PATTERN.search(before):
+            # A phrase such as "request submitted 3 days before" is not delivery.
+            continue
+        if not _DELIVERY_ACTION_PATTERN.search(context):
+            continue
+        if not _delivery_type_has_request_evidence(context):
+            continue
+
+        amount = int(match.group(1))
+        unit = match.group(2).casefold()
+        if unit.startswith("час"):
+            amount = ceil(amount / 24)
+        elif unit.startswith("недел"):
+            amount *= 7
+        candidates.append((amount, context[:500]))
+
+    return min(candidates, key=lambda candidate: candidate[0]) if candidates else None
 
 
 def _has_explicit_delivery_deadline_evidence(evidence: Any) -> bool:
@@ -1208,6 +1253,19 @@ def validate_fields(
             else:
                 warnings.append(
                     "Общий срок поставки не перенесён в срок партии: нет прямой связи со сроком заявки или отдельной партии."
+                )
+        if not fields.get("deliveryBatchDays"):
+            document_batch_days = _explicit_batch_delivery_days(deterministic_text)
+            if document_batch_days:
+                days, evidence = document_batch_days
+                _set(
+                    fields,
+                    meta,
+                    "deliveryBatchDays",
+                    days,
+                    "Documents / direct delivery term for request batch",
+                    "high",
+                    evidence,
                 )
         fields.pop("deliveryDays", None)
         meta.pop("deliveryDays", None)
