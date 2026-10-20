@@ -60,6 +60,24 @@ def test_commercial_context_keeps_conditional_unguaranteed_volume_request() -> N
     assert "письменному запросу Заказчика" in context
 
 
+def test_commercial_context_prioritizes_request_delivery_over_generic_deadlines() -> None:
+    context = build_commercial_conditions_context(
+        "",
+        [
+            document(
+                "Срок поставки указан в спецификации.\n\n"
+                "Срок поставки согласуется сторонами.\n\n"
+                "Срок поставки действует до 31.12.2027.\n\n"
+                "Товар поставляется отдельными партиями с учетом потребностей Покупателя "
+                "на основании заявок Покупателя."
+            )
+        ],
+    )
+
+    assert "отдельными партиями" in context
+    assert "на основании заявок Покупателя" in context
+
+
 def test_commercial_context_supports_procurement_wording_variants() -> None:
     context = build_commercial_conditions_context(
         "",

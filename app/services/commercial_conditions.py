@@ -45,9 +45,14 @@ _FIELD_PATTERNS: dict[str, tuple[_Anchor, ...]] = {
         _Anchor(re.compile(r"поставленн\w*\s+(?:товар|продукци\w*)\s+оплач", re.I), False),
     ),
     "delivery": (
-        _Anchor(re.compile(r"срок\w*\s+поставк\w*", re.I)),
-        _Anchor(re.compile(r"(?:услови\w*|порядок|график|дат[аы])\s+поставк\w*", re.I)),
-        _Anchor(re.compile(r"поставк\w*\s+(?:по\s+заявк\w*|партия\w*|единовременн\w*)", re.I)),
+        # Repeated-delivery mechanisms must be selected before a document's
+        # many generic "срок поставки" mentions consume its per-field quota.
+        _Anchor(re.compile(
+            r"(?:поставк\w*|поставля\w*|отгрузк\w*)"
+            r"[\s\S]{0,140}?(?:по\s+заявк\w*|по\s+разнаряд\w*|"
+            r"отдельн\w*\s+парт\w*|парт\w*)",
+            re.I,
+        )),
         _Anchor(re.compile(
             r"(?:не\s*гарантированн\w*|негарантированн\w*)\s+объ[её]м\w*"
             r"[\s\S]{0,300}?(?:письменн\w*\s+)?(?:запрос\w*|уведомлени\w*)\s+"
@@ -55,6 +60,8 @@ _FIELD_PATTERNS: dict[str, tuple[_Anchor, ...]] = {
             re.I,
         )),
         _Anchor(re.compile(r"(?:кажд\w*\s+)?партия\w*\s+(?:товар\w*\s+)?(?:поставля\w*|в\s+течени\w*)", re.I), False),
+        _Anchor(re.compile(r"срок\w*\s+поставк\w*", re.I)),
+        _Anchor(re.compile(r"(?:услови\w*|порядок|график|дат[аы])\s+поставк\w*", re.I)),
         _Anchor(re.compile(r"заявк\w*\s+(?:заказчик\w*|покупател\w*)", re.I), False),
         _Anchor(re.compile(r"поставк\w*", re.I), False),
     ),

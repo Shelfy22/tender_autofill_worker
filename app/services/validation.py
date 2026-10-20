@@ -73,20 +73,31 @@ _PAYMENT_DELAY_PATTERN = re.compile(
 )
 _PAYMENT_TERM_CONTEXT_PATTERN = re.compile(
     r"(?:\u043e\u0442\u0441\u0440\u043e\u0447\w*\s+(?:\u043f\u043b\u0430\u0442\u0435\u0436\w*|\u043e\u043f\u043b\u0430\u0442\w*)|"
-    r"(?:\u043e\u043f\u043b\u0430\u0442\w*|\u043f\u043b\u0430\u0442\u0451\u0436\w*|\u0440\u0430\u0441\u0447\u0451\u0442\w*)(?:(?![.;\n]).){0,80}?"
-    r"(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435|\u0432\s+\u0441\u0440\u043e\u043a\s+\u043d\u0435\s+\u0431\u043e\u043b\u0435\u0435|\u043d\u0435\s+\u043f\u043e\u0437\u0434\u043d\u0435\u0435|\u043f\u043e\u0441\u043b\u0435))"
+    r"(?:\u043e\u043f\u043b\u0430\u0442\w*|\u043f\u043b\u0430\u0442\u0451\u0436\w*|\u0440\u0430\u0441\u0447\u0451\u0442\w*)(?:(?![.;\n]).){0,360}?"
+    r"(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435|\u0432\s+\u0441\u0440\u043e\u043a\s+\u043d\u0435\s+\u0431\u043e\u043b\u0435\u0435|\u043d\u0435\s+\u0431\u043e\u043b\u0435\u0435|\u043d\u0435\s+\u043f\u043e\u0437\u0434\u043d\u0435\u0435|\u043f\u043e\u0441\u043b\u0435))"
     r"[^.\n]{0,180}",
     re.IGNORECASE,
 )
 _PAYMENT_DELAY_VALUE_PATTERN = re.compile(
     r"(?<!\d)(\d{1,4})\s*(?:(?:-|\u2013|\u2014|\u0434\u043e)\s*(\d{1,4}))?\s*"
-    r"(\u0440\u0430\u0431\u043e\u0447\w*|\u043a\u0430\u043b\u0435\u043d\u0434\u0430\u0440\u043d\w*)?\s*"
+    r"(?:\([^)]{1,80}\)\s*)?"
+    r"(\u0440\u0430\u0431\u043e\u0447\w*|\u043a\u0430\u043b\u0435\u043d\u0434\u0430\u0440\u043d\w*|\u0431\u0430\u043d\u043a\u043e\u0432\u0441\u043a\w*)?\s*"
     r"\u0434\u043d(?:\u0435\u0439|\u044f)?\b",
     re.IGNORECASE,
 )
 _SME_PAYMENT_PATTERN = re.compile(
     r"\b(?:мсп|субъект\w*\s+малого\s+и\s+среднего\s+предпринимательств\w*|"
     r"самозанят\w*)\b",
+    re.IGNORECASE,
+)
+_SME_ONLY_PROCUREMENT_PATTERN = re.compile(
+    r"(?:закупк\w*|участи\w*)[^.\n]{0,120}?"
+    r"(?:только|исключительно)[^.\n]{0,160}?"
+    r"(?:смсп|мсп|субъект\w*\s+малого\s+и\s+среднего\s+предпринимательств\w*)|"
+    r"(?:закупк\w*[^.\n]{0,80}?(?:провод\w*|осуществля\w*)[^.\n]{0,100}?\sсреди\s+)"
+    r"(?:смсп|мсп|субъект\w*\s+малого\s+и\s+среднего\s+предпринимательств\w*)|"
+    r"участник\w*\s+закупк\w*[^.\n]{0,100}?могут\s+быть\s+только[^.\n]{0,120}?"
+    r"(?:смсп|мсп|субъект\w*\s+малого\s+и\s+среднего\s+предпринимательств\w*)",
     re.IGNORECASE,
 )
 _CONTRACT_EXPIRY_DATE_PATTERN = re.compile(
@@ -244,13 +255,20 @@ def _explicit_commercial_fields(text: str) -> dict[str, tuple[Any, str]]:
     return result
 
 
-def _payment_delay_from_text(text: str) -> tuple[int, str] | None:
+def _payment_delay_from_text(
+    text: str,
+    *,
+    prefer_sme_term: bool = False,
+) -> tuple[int, str] | None:
     """Return the applicable payment delay in calendar days.
 
-    Where a procurement explicitly gives an SME/self-employed supplier a
-    separate term, the group has an eligible legal entity and that term wins.
-    It is stored as written. Otherwise retain the established conservative
-    rule: choose the longest term and convert it using ``ceil(days * 1.4)``.
+    A separate SME/self-employed term is an exception, not the main term for
+    an open procurement.  It wins only when participation is expressly limited
+    to SME/self-employed suppliers.  Otherwise retain the established
+    conservative rule: choose the longest applicable general term.  The
+    resulting column is expressed in calendar days: source terms in calendar
+    days stay unchanged; working, banking and unspecified days use
+    ``ceil(days * 1.4)``.
     """
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     candidates: list[tuple[int, str]] = []
@@ -263,15 +281,23 @@ def _payment_delay_from_text(text: str) -> tuple[int, str] | None:
         ) + 1
         evidence = normalized[clause_start:context_match.end()].strip()
         for value_match in _PAYMENT_DELAY_VALUE_PATTERN.finditer(evidence):
-            lower, upper, _unit = value_match.groups()
+            lower, upper, unit = value_match.groups()
             source_days = max(int(lower), int(upper or lower))
+            normalized_days = _normalize_payment_days(source_days, unit)
             if _SME_PAYMENT_PATTERN.search(evidence):
-                sme_candidates.append((source_days, evidence[:500]))
+                sme_candidates.append((normalized_days, evidence[:500]))
             else:
-                candidates.append((ceil(source_days * 1.4), evidence[:500]))
-    if sme_candidates:
+                candidates.append((normalized_days, evidence[:500]))
+    if prefer_sme_term and sme_candidates:
         return min(sme_candidates, key=lambda candidate: candidate[0])
-    return max(candidates, key=lambda candidate: candidate[0]) if candidates else None
+    if candidates:
+        return max(candidates, key=lambda candidate: candidate[0])
+    return min(sme_candidates, key=lambda candidate: candidate[0]) if sme_candidates else None
+
+
+def _procurement_is_sme_only(text: str) -> bool:
+    """True only for a tender explicitly restricted to SME/self-employed bidders."""
+    return bool(_SME_ONLY_PROCUREMENT_PATTERN.search(str(text or "")))
 
 
 def _payment_delay_from_field(value: Any, evidence: Any) -> tuple[int, str] | None:
@@ -284,9 +310,22 @@ def _payment_delay_from_field(value: Any, evidence: Any) -> tuple[int, str] | No
     match = re.search(r"\d{1,4}", str(value or ""))
     if match is None:
         return None
-    if _SME_PAYMENT_PATTERN.search(text):
-        return int(match.group(0)), text[:500]
-    return ceil(int(match.group(0)) * 1.4), text[:500]
+    source_days = int(match.group(0))
+    unit: str | None = None
+    for value_match in _PAYMENT_DELAY_VALUE_PATTERN.finditer(text):
+        lower, upper, candidate_unit = value_match.groups()
+        if source_days in {int(lower), int(upper or lower)}:
+            unit = candidate_unit
+            break
+    return _normalize_payment_days(source_days, unit), text[:500]
+
+
+def _normalize_payment_days(source_days: int, unit: str | None) -> int:
+    """Normalize a source payment term to calendar days for the output column."""
+    if str(unit or "").lower().startswith("календар"):
+        return source_days
+    # Working, banking and unspecified days are converted by the agreed rule.
+    return ceil(source_days * 1.4)
 
 
 def _contract_expiry_date(text: str) -> tuple[str, str] | None:
@@ -1041,21 +1080,26 @@ def validate_fields(
             else "Нет прямого требования спецсчёта для обеспечения заявки"
         ),
     )
-    # A separate term for an SME/self-employed supplier is selected because
-    # the group can participate through the eligible legal entity. In every
-    # other case retain the conservative largest-confirmed-term rule.
+    # The SME/self-employed payment term is selected only when this tender is
+    # explicitly restricted to those bidders.  In an open tender it is merely
+    # an exception; the card retains the longest general payment term.
     llm_payment_delay = _payment_delay_from_field(
         fields.get("paymentDelayDays"),
         meta.get("paymentDelayDays", {}).get("evidence"),
     )
-    document_payment_delay = _payment_delay_from_text(deterministic_text)
-    document_has_sme_term = bool(
-        document_payment_delay
+    sme_only_procurement = _procurement_is_sme_only(deterministic_text)
+    document_payment_delay = _payment_delay_from_text(
+        deterministic_text,
+        prefer_sme_term=sme_only_procurement,
+    )
+    document_uses_sme_term = bool(
+        sme_only_procurement
+        and document_payment_delay
         and _SME_PAYMENT_PATTERN.search(document_payment_delay[1])
     )
     payment_delay = (
         document_payment_delay
-        if document_has_sme_term
+        if document_uses_sme_term
         else max(
             (candidate for candidate in (llm_payment_delay, document_payment_delay) if candidate),
             key=lambda candidate: candidate[0],
@@ -1063,8 +1107,8 @@ def validate_fields(
         )
     )
     payment_delay_source = (
-        "Документы / срок оплаты для МСП или самозанятого"
-        if document_has_sme_term
+        "Документы / срок оплаты для закупки только у МСП или самозанятого"
+        if document_uses_sme_term
         else "Документы / максимальная отсрочка оплаты в календарных днях"
         if payment_delay == document_payment_delay
         else "LLM evidence / отсрочка переведена по правилу 1.4"
