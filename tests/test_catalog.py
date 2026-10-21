@@ -5,7 +5,13 @@ import json
 import httpx
 
 from app.config import Settings
-from app.models import CatalogSelection, ProductCharacteristic, ProductMatch, TenderPosition
+from app.models import (
+    CatalogSelection,
+    ProductCharacteristic,
+    ProductMatch,
+    ProductSourceReference,
+    TenderPosition,
+)
 from app.services.catalog import (
     _catalog_value_matches,
     _finalize_characteristic_audit,
@@ -58,6 +64,36 @@ def test_large_tender_catalog_scope_is_limited_to_first_130_positions() -> None:
     assert selected[-1].product == "PRODUCT-130"
     assert positions[130].product == "PRODUCT-131"
     assert any("130" in warning and "1000" in warning for warning in warnings)
+
+
+def test_catalog_truncates_excess_product_source_references() -> None:
+    references = [
+        ProductSourceReference(
+            fileName="specification.xlsx",
+            sheet="Products",
+            row=index,
+            extractionMethod="excel_deterministic",
+        )
+        for index in range(1, 54)
+    ]
+    # Product merging uses model_copy and can temporarily hold more diagnostic
+    # references than the final ProductMatchItem contract permits.
+    position = TenderPosition(
+        product="Cable",
+        sourceReferences=references[:50],
+    ).model_copy(update={"sourceReferences": references})
+    matcher = make_matcher(httpx.MockTransport(lambda _: httpx.Response(200, json={})))
+    matcher._match = lambda _: ProductMatch()  # type: ignore[method-assign]
+
+    try:
+        matched, warnings = matcher.match_all([position])
+    finally:
+        matcher.close()
+
+    assert len(matched) == 1
+    assert len(matched[0].sourceReferences) == 50
+    assert matched[0].sourceReferences[-1].row == 50
+    assert any("truncated from 53 to 50" in warning for warning in warnings)
 
 
 def make_matcher(

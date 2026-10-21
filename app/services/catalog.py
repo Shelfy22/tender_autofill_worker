@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from app.observability import RunObserver
 
 
+MAX_PRODUCT_SOURCE_REFERENCES = 50
+
+
 NOT_FOUND = ProductMatch(
     **{
         "Артикул": None,
@@ -701,6 +704,13 @@ class CatalogMatcher:
                 match = NOT_FOUND.model_copy(deep=True)
                 match.rationale = f"Ошибка поиска: {exc}"
                 warnings.append(f"{product.product}: catalog search error: {exc}")
+            source_references = product.sourceReferences
+            if len(source_references) > MAX_PRODUCT_SOURCE_REFERENCES:
+                warnings.append(
+                    f"{product.product}: source references truncated from "
+                    f"{len(source_references)} to {MAX_PRODUCT_SOURCE_REFERENCES}."
+                )
+                source_references = source_references[:MAX_PRODUCT_SOURCE_REFERENCES]
             result.append(
                 ProductMatchItem(
                     positionIndex=index,
@@ -726,7 +736,7 @@ class CatalogMatcher:
                     documentPriceEvidence=product.documentPriceEvidence,
                     documentPriceSource=product.documentPriceSource,
                     sourceReference=product.sourceReference,
-                    sourceReferences=product.sourceReferences,
+                    sourceReferences=source_references,
                     sourceCells=product.sourceCells,
                     match=match,
                 )
