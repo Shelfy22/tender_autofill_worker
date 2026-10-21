@@ -616,6 +616,32 @@ _BATCH_OR_DELIVERY_SCHEDULE_PATTERN = re.compile(
     r"\u0441\u0440\u043e\u043a\w*\s+\u043e\u0442\u0434\u0435\u043b\u044c\u043d\w*\s+\u043f\u0430\u0440\u0442\w*",
     re.IGNORECASE,
 )
+_DELIVERY_SCHEDULE_CUE_PATTERN = re.compile(
+    r"(?:\u0433\u0440\u0430\u0444\u0438\u043a\w*|\u043a\u0430\u043b\u0435\u043d\u0434\u0430\u0440\u043d\w*\s+\u043f\u043b\u0430\u043d\w*|"
+    r"\u043f\u043b\u0430\u043d\w*\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|"
+    r"\u0441\u0440\u043e\u043a\w*\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|"
+    r"\u043f\u0435\u0440\u0438\u043e\u0434\w*\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*)",
+    re.IGNORECASE,
+)
+_DELIVERY_SCHEDULE_MONTH_PATTERN = re.compile(
+    r"\b(\u044f\u043d\u0432\u0430\u0440|\u0444\u0435\u0432\u0440\u0430\u043b|\u043c\u0430\u0440\u0442|\u0430\u043f\u0440\u0435\u043b|\u043c\u0430\u0439|"
+    r"\u0438\u044e\u043d|\u0438\u044e\u043b|\u0430\u0432\u0433\u0443\u0441\u0442|\u0441\u0435\u043d\u0442\u044f\u0431\u0440|\u043e\u043a\u0442\u044f\u0431\u0440|"
+    r"\u043d\u043e\u044f\u0431\u0440|\u0434\u0435\u043a\u0430\u0431\u0440)\w*\b",
+    re.IGNORECASE,
+)
+_DELIVERY_SCHEDULE_QUARTER_PATTERN = re.compile(
+    r"(?:\b[1-4]\s*(?:-|\u2011)?\s*\u0439\s+\u043a\u0432\u0430\u0440\u0442\u0430\u043b\w*|"
+    r"\b\u043a\u0432\u0430\u0440\u0442\u0430\u043b\w*\s*[1-4]\b)",
+    re.IGNORECASE,
+)
+_DELIVERY_DATE_RANGE_PATTERN = re.compile(
+    r"(?:\u0441\u0440\u043e\u043a\w*[\s\S]{0,80}?\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|"
+    r"\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u043e\u0442\u0433\u0440\u0443\u0437\u043a\w*|\u0434\u043e\u0441\u0442\u0430\u0432\u043a\w*)"
+    r"[\s\S]{0,120}?\u0441\s*(\d{1,2}\.\d{1,2}\.\d{4})\s*"
+    r"(?:\u0433(?:\.|\u043e\u0434\u0430)?\s*)?(?:\u043f\u043e|\u0434\u043e)\s*"
+    r"(\d{1,2}\.\d{1,2}\.\d{4})",
+    re.IGNORECASE,
+)
 _SINGLE_BATCH_PATTERN = re.compile(
     r"(?:\u043e\u0434\u043d\u043e\u0439|\u0435\u0434\u0438\u043d\u043e\u0439)\s+\u043f\u0430\u0440\u0442\w*",
     re.IGNORECASE,
@@ -665,8 +691,74 @@ def _delivery_type_has_request_evidence(evidence: Any) -> bool:
     return bool(
         not _SINGLE_BATCH_PATTERN.search(text)
         and not _WORK_SCHEDULE_PATTERN.search(text)
-        and _BATCH_OR_DELIVERY_SCHEDULE_PATTERN.search(text)
+        and (
+            _BATCH_OR_DELIVERY_SCHEDULE_PATTERN.search(text)
+            or _delivery_schedule_fragment(text)
+        )
     )
+
+
+def _delivery_schedule_fragment(value: Any) -> str:
+    """Return evidence of a multi-period delivery plan, never just one deadline.
+
+    Procurement spreadsheets often place months/quarters in columns and
+    quantities in cells, without repeating the words "by requests" in every
+    row.  The card's ``by_requests`` category also covers that fixed schedule.
+    A single date column or an interval with two endpoints is deliberately not
+    enough: it remains a one-time delivery to a date.
+    """
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    for cue in _DELIVERY_SCHEDULE_CUE_PATTERN.finditer(text):
+        # Tables can be flattened into a long line by DOCX/PDF parsers.  Keep
+        # a sufficiently large local window to include all month columns while
+        # avoiding an unrelated annual schedule elsewhere in the document.
+        start = max(0, cue.start() - 180)
+        end = min(len(text), cue.end() + 2_400)
+        fragment = text[start:end]
+        months = {
+            match.group(1).casefold()
+            for match in _DELIVERY_SCHEDULE_MONTH_PATTERN.finditer(fragment)
+        }
+        quarters = {
+            re.sub(r"\s+", " ", match.group(0).casefold())
+            for match in _DELIVERY_SCHEDULE_QUARTER_PATTERN.finditer(fragment)
+        }
+        # Two or more different month/quarter headers establish a distribution
+        # over several periods.  Merely listing start/end dates does not.
+        if len(months) >= 2 or len(quarters) >= 2:
+            return fragment[:900]
+    return ""
+
+
+def _delivery_schedule_from_documents(documents: list[ParsedDocument]) -> str:
+    """Read Excel delivery calendars that preserve headers outside plain text."""
+    for document in documents:
+        for table in document.spreadsheetTables:
+            table_text = " ".join(
+                [document.fileName, table.sheet, *table.headerLabels.values()]
+                + [
+                    " ".join(row.cells.values())
+                    for row in table.rows[:250]
+                ]
+            )
+            evidence = _delivery_schedule_fragment(table_text)
+            if evidence:
+                return evidence
+    return ""
+
+
+def _single_delivery_date_range(text: Any) -> tuple[str, str] | None:
+    """Find a one-time delivery interval and return its final delivery date."""
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    match = _DELIVERY_DATE_RANGE_PATTERN.search(normalized)
+    if match is None:
+        return None
+    final_date = _normalize_date(match.group(2))
+    if not isinstance(final_date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", final_date):
+        return None
+    return final_date, match.group(0)[:500]
 
 
 def _delivery_type_evidence_fragment(*values: Any) -> str:
@@ -680,6 +772,9 @@ def _delivery_type_evidence_fragment(*values: Any) -> str:
             or _CONDITIONAL_VOLUME_REQUEST_PATTERN.search(text)
             or _BATCH_OR_DELIVERY_SCHEDULE_PATTERN.search(text)
         )
+        schedule = _delivery_schedule_fragment(text)
+        if schedule:
+            return schedule
         if match is None:
             continue
         return text[max(0, match.start() - 160) : match.end() + 340][:500]
@@ -1171,10 +1266,12 @@ def validate_fields(
         )
     delivery_type = _normalize_delivery_type(fields.get("deliveryType"))
     delivery_evidence = meta.get("deliveryType", {}).get("evidence")
+    table_delivery_schedule = _delivery_schedule_from_documents(documents)
     repeated_delivery_evidence = _delivery_type_evidence_fragment(
         delivery_evidence,
         meta.get("deliveryNote", {}).get("evidence"),
         fields.get("deliveryNote"),
+        table_delivery_schedule,
         deterministic_text,
     )
     if repeated_delivery_evidence:
@@ -1194,6 +1291,55 @@ def validate_fields(
             "high",
             delivery_evidence,
         )
+    # A single start/end interval is still a one-time delivery to its final
+    # date.  It must not become a multi-batch delivery simply because it has
+    # two dates.  A confirmed schedule above always has priority.
+    single_delivery_range = (
+        None if repeated_delivery_evidence else _single_delivery_date_range(deterministic_text)
+    )
+    if single_delivery_range:
+        delivery_date, range_evidence = single_delivery_range
+        if delivery_type != "single_date":
+            warnings.append(
+                "Тип поставки исправлен на «к дате»: найден единый интервал поставки без заявок, партий или графика."
+            )
+        delivery_type = "single_date"
+        delivery_evidence = range_evidence
+        _set(
+            fields,
+            meta,
+            "deliveryType",
+            delivery_type,
+            "Документы / единый интервал поставки",
+            "high",
+            range_evidence,
+        )
+        _set(
+            fields,
+            meta,
+            "deliveryDate",
+            delivery_date,
+            "Документы / конечная дата единого интервала поставки",
+            "high",
+            range_evidence,
+        )
+        # A calculated difference between the dates is not a document term.
+        fields.pop("deliveryDays", None)
+        meta.pop("deliveryDays", None)
+    if not delivery_type:
+        direct_date_evidence = meta.get("deliveryDate", {}).get("evidence")
+        if fields.get("deliveryDate") and _has_explicit_delivery_deadline_evidence(
+            direct_date_evidence
+        ):
+            delivery_type = "single_date"
+            delivery_evidence = direct_date_evidence
+        elif fields.get("deliveryDays"):
+            # A single term such as "within 21 calendar days" is an
+            # one-time delivery during a term unless batches were established.
+            delivery_type = "during_period"
+            delivery_evidence = str(
+                meta.get("deliveryDays", {}).get("evidence") or "Срок поставки в днях"
+            )
     if delivery_type == "by_requests" and not _delivery_type_has_request_evidence(
         delivery_evidence
     ):

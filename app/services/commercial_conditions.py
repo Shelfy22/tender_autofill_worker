@@ -45,6 +45,15 @@ _FIELD_PATTERNS: dict[str, tuple[_Anchor, ...]] = {
         _Anchor(re.compile(r"поставленн\w*\s+(?:товар|продукци\w*)\s+оплач", re.I), False),
     ),
     "delivery": (
+        # A calendar graph can be flattened by an XLSX/DOCX parser into one
+        # long line. Retrieve it before generic deadline wording consumes the
+        # per-source delivery-fragment budget.
+        _Anchor(re.compile(
+            r"(?:\u0433\u0440\u0430\u0444\u0438\u043a\w*\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|"
+            r"\u043a\u0430\u043b\u0435\u043d\u0434\u0430\u0440\u043d\w*\s+\u043f\u043b\u0430\u043d\w*\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|"
+            r"\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*[\s\S]{0,120}?\u043f\u043e\s+\u043c\u0435\u0441\u044f\u0446\w*)",
+            re.I,
+        )),
         # Repeated-delivery mechanisms must be selected before a document's
         # many generic "срок поставки" mentions consume its per-field quota.
         _Anchor(re.compile(

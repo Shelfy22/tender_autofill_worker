@@ -297,6 +297,23 @@ nationalRegime: при прямой «минимальной обязатель�
 """.strip()
 
 
+DELIVERY_CLASSIFICATION_RULES = """
+Delivery classification rules (apply to deliveryType only):
+- `by_requests`: direct requests/orders/dispatch instructions; separate batches;
+  or a delivery calendar/schedule that distributes quantities across two or
+  more months, quarters, dates, or stages. A fixed schedule is still
+  `by_requests`, even if its table never repeats the word "request".
+- `single_date`: one direct deadline, one date, or one continuous interval
+  "from DD.MM.YYYY to DD.MM.YYYY" with no repeated schedule. Put the final
+  date into deliveryDate. Do not calculate a day count from an interval.
+- `during_period`: one direct duration such as "within 21 calendar days" or
+  "within 20 working days", with no requests, batches, or schedule.
+- Do NOT infer `by_requests` from "position-by-position delivery", a single
+  batch, a repeated identical date for several addresses, or a warehouse work
+  schedule.
+""".strip()
+
+
 class LlmClient:
     def __init__(
         self,
@@ -1052,6 +1069,8 @@ Candidates:
         unit: DocumentAnalysisUnit,
     ) -> DocumentAnalysisResponse:
         prompt = f"""
+{DELIVERY_CLASSIFICATION_RULES}
+
 Проанализируй один DocumentAnalysisUnit. Верни только компактный JSON.
 
 Источник:
@@ -1201,6 +1220,8 @@ Spreadsheet candidates, если есть:
         legal condition instead of guessing from a full procurement document.
         """
         prompt = f"""
+{DELIVERY_CLASSIFICATION_RULES}
+
 Проверь фрагменты закупочной документации. Верни только JSON с fieldCandidates.
 Каждый candidate обязан содержать дословный evidence (не более 500 символов) и
 sourceReference с полем source из строки `[source: ...]`. Если фрагмент не

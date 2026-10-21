@@ -78,6 +78,22 @@ def test_commercial_context_prioritizes_request_delivery_over_generic_deadlines(
     assert "на основании заявок Покупателя" in context
 
 
+def test_commercial_context_prioritizes_delivery_calendar() -> None:
+    context = build_commercial_conditions_context(
+        "",
+        [
+            document(
+                "\u0421\u0440\u043e\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438 \u0442\u043e\u0432\u0430\u0440\u0430: \u0434\u043e 31.12.2027.\n\n"
+                "\u0413\u0440\u0430\u0444\u0438\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438: \u044f\u043d\u0432\u0430\u0440\u044c 2027 — 10 \u0448\u0442.; "
+                "\u043c\u0430\u0440\u0442 2027 — 15 \u0448\u0442."
+            )
+        ],
+    )
+
+    assert "\u0413\u0440\u0430\u0444\u0438\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438" in context
+    assert "targets: delivery; anchor: strong" in context
+
+
 def test_commercial_context_supports_procurement_wording_variants() -> None:
     context = build_commercial_conditions_context(
         "",

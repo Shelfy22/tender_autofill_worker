@@ -963,6 +963,97 @@ def test_delivery_schedule_overrides_single_delivery_period() -> None:
     assert any("\u0438\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d" in warning for warning in warnings)
 
 
+def test_month_quantity_schedule_is_batch_delivery_without_request_word() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="during_period",
+                confidence="high",
+                source="\u0422\u0417.xlsx",
+                evidence="\u041f\u043e\u0441\u0442\u0430\u0432\u043a\u0430 \u0432 \u0442\u0435\u0447\u0435\u043d\u0438\u0435 30 \u0434\u043d\u0435\u0439.",
+            ),
+            "deliveryDays": FieldValue(
+                value=30,
+                confidence="high",
+                source="\u0422\u0417.xlsx",
+                evidence="\u041f\u043e\u0441\u0442\u0430\u0432\u043a\u0430 \u0432 \u0442\u0435\u0447\u0435\u043d\u0438\u0435 30 \u0434\u043d\u0435\u0439.",
+            ),
+        }
+    )
+    schedule = SpreadsheetTable(
+        fileName="\u0422\u0417.xlsx",
+        sheet="\u0413\u0440\u0430\u0444\u0438\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438",
+        headerLabels={"B": "\u0421\u0440\u043e\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438", "C": "\u042f\u043d\u0432\u0430\u0440\u044c 2027", "D": "\u041c\u0430\u0440\u0442 2027"},
+        rows=[
+            SpreadsheetRow(row=1, cells={"B": "\u041a\u043e\u043b-\u0432\u043e", "C": "10", "D": "15"}),
+            SpreadsheetRow(row=2, cells={"B": "\u041a\u043e\u043b-\u0432\u043e", "C": "5", "D": "20"}),
+        ],
+    )
+    documents = [
+        ParsedDocument(
+            documentIndex=1,
+            fileName="\u0422\u0417.xlsx",
+            text="",
+            spreadsheetTables=[schedule],
+        )
+    ]
+
+    fields, meta, _ = validate_fields(job_with_lot(""), extracted, "", documents)
+
+    assert fields["deliveryType"] == "by_requests"
+    assert "deliveryDays" not in fields
+    assert "\u0433\u0440\u0430\u0444\u0438\u043a" in meta["deliveryType"]["evidence"].casefold()
+
+
+def test_single_delivery_date_interval_is_not_a_schedule() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="during_period",
+                confidence="high",
+                source="\u0414\u043e\u0433\u043e\u0432\u043e\u0440.docx",
+                evidence="\u0421\u0440\u043e\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438 \u0441 11.01.2027 \u043f\u043e 29.01.2027.",
+            ),
+            "deliveryDays": FieldValue(
+                value=18,
+                confidence="low",
+                source="\u0414\u043e\u0433\u043e\u0432\u043e\u0440.docx",
+                evidence="\u0421 11.01.2027 \u043f\u043e 29.01.2027.",
+            ),
+        }
+    )
+    text = "\u0421\u0440\u043e\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438 \u0442\u043e\u0432\u0430\u0440\u0430: \u0441 11.01.2027 \u043f\u043e 29.01.2027."
+
+    fields, _, _ = validate_fields(job_with_lot(""), extracted, text, [])
+
+    assert fields["deliveryType"] == "single_date"
+    assert fields["deliveryDate"] == "2027-01-29"
+    assert "deliveryDays" not in fields
+
+
+def test_position_by_position_delivery_is_not_batch_delivery() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryType": FieldValue(
+                value="by_requests",
+                confidence="high",
+                source="\u0422\u0417.docx",
+                evidence="\u0414\u043e\u043f\u0443\u0441\u043a\u0430\u0435\u0442\u0441\u044f \u043f\u043e\u043f\u043e\u0437\u0438\u0446\u0438\u043e\u043d\u043d\u0430\u044f \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0430.",
+            ),
+            "deliveryDate": FieldValue(
+                value="2026-12-12",
+                confidence="high",
+                source="\u0422\u0417.docx",
+                evidence="\u041f\u043e\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u043d\u0435 \u043f\u043e\u0437\u0434\u043d\u0435\u0435 12.12.2026.",
+            ),
+        }
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert fields["deliveryType"] == "single_date"
+
+
 def test_single_batch_and_work_schedule_do_not_imply_batch_delivery() -> None:
     extracted = ExtractedFieldsResponse(
         fields={
