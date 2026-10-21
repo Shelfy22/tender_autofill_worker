@@ -706,6 +706,25 @@ def test_prohibited_or_absent_spare_parts_do_not_trigger_repair_kit_reason() -> 
         assert checks["repairKitCheck"]["triggered"] is False
 
 
+def test_okpd_classifier_spare_parts_do_not_trigger_repair_kit_reason() -> None:
+    text = (
+        "34 | Паяльник 40 Вт | 28.29.70.110 | Оборудование и инструменты для пайки "
+        "и их комплектующие (запасные части), не имеющие самостоятельного применения | "
+        "Да | Нет\n"
+        "35 | Перфоратор | Тип двигателя щеточный. Наличие реверса предусмотрено."
+    )
+
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(total=2),
+        text,
+    )
+
+    assert REPAIR_KIT_REASON not in [reason.reason for reason in reasons]
+    assert checks["repairKitCheck"]["triggered"] is False
+
+
 def test_repair_kit_product_position_triggers_reason() -> None:
     product_name = "Комплект ЗИП для трансформатора ТМГ"
     reasons, checks = calculate_hard_reasons(

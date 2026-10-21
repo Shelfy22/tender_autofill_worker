@@ -143,6 +143,10 @@ _REQUIRED_ZIP_SUPPLY_PATTERNS = (
     ),
 )
 _REQUIRED_ZIP_COMPONENTS_PATTERN = _REQUIRED_ZIP_SUPPLY_PATTERNS[4]
+_OKPD_CODE_PATTERN = re.compile(
+    r"\b(?:\u043e\u043a\u043f\u0434(?:\s*[- ]?2)?\s*[:№-]?\s*)?\d{2}\.\d{2}\.\d{2}(?:\.\d{1,3})?\b",
+    re.IGNORECASE,
+)
 _ZIP_NON_MANDATORY_PATTERN = re.compile(
     r"(?:при\s+необходимости|по\s+запросу|по\s+согласованию|опциональн[а-яё]*|"
     r"по\s+отдельн[а-яё]*\s+заказ[а-яё]*|за\s+отдельн[а-яё]*\s+плат[а-яё]*|"
@@ -611,6 +615,14 @@ def _find_required_zip_supply_evidence(text: str) -> str | None:
     source = text or ""
     for pattern in _REQUIRED_ZIP_SUPPLY_PATTERNS:
         for match in pattern.finditer(source):
+            zip_term = _REQUIRED_ZIP_TERM_PATTERN.search(match.group(0))
+            if zip_term and _zip_term_is_okpd_classifier(
+                source,
+                match.start() + zip_term.start(),
+            ):
+                # An OKPD2 label can use "комплектующие (запасные части)".
+                # It is a classifier, not a required physical supply component.
+                continue
             context = _work_context(source, match, maximum_length=1400)
             prefix = source[max(0, match.start() - 240):match.start()]
             same_clause_prefix = re.split(r"[.!?\n|]", prefix)[-1]
@@ -627,6 +639,20 @@ def _find_required_zip_supply_evidence(text: str) -> str | None:
                 continue
             return context[:1200]
     return None
+
+
+_REQUIRED_ZIP_TERM_PATTERN = re.compile(_REQUIRED_ZIP_TERM, re.IGNORECASE)
+
+
+def _zip_term_is_okpd_classifier(source: str, term_start: int) -> bool:
+    """Return whether a ZIP keyword is in an OKPD2 classifier table cell."""
+    line_start = source.rfind("\n", 0, term_start) + 1
+    line_end = source.find("\n", term_start)
+    if line_end < 0:
+        line_end = len(source)
+    row = source[line_start:line_end]
+    term_offset = term_start - line_start
+    return bool(_OKPD_CODE_PATTERN.search(row[:term_offset]))
 
 
 def _find_repair_kit_product_evidence(product_check: dict[str, Any]) -> str | None:
@@ -1795,7 +1821,8 @@ def build_decision_prompt(
   отсутствует либо имеет низкую уверенность, остаётся подтверждённой причиной отказа.
 - Для «{REPAIR_KIT_REASON}» confirm допустим только при обязательной поставке физического
   ЗИП/ремкомплекта/запасных частей либо когда сама закупаемая позиция является ими. Dismiss —
-  если слова относятся к запрету, отсутствию, исключению, опциональной поставке или документации.
+если слова относятся к запрету, отсутствию, исключению, опциональной поставке, документации,
+названию ОКПД2/классификатора либо типовому договорному слову «комплектующие».
 - Все hardReasons, не вошедшие в reviewableHardReasons, неизменяемы и не могут быть отменены LLM.
 - Наличие hardReasons не означает, что анализ можно закончить: обязательно проверь все остальные причины справочника.
 - detectedReasons должен содержать полный список всех подтверждённых недетерминированных причин,
@@ -1851,7 +1878,9 @@ def build_decision_prompt(
   Для продукции по чертежу/эскизу/макету проверяй также sourceRequirements позиции.
 - Не считать обязательным ЗИП необязательные/опциональные комплекты «по запросу»,
   «при необходимости», «по отдельному заказу», а также только документацию, инструкцию,
-  паспорт или руководство по ЗИП без обязанности поставить сам физический комплект.
+паспорт или руководство по ЗИП без обязанности поставить сам физический комплект. Название
+группы ОКПД2/классификатора, в том числе «комплектующие (запасные части)», и общее договорное
+упоминание комплектующих не являются такой обязанностью.
 - Причина «{REMOTE_TERRITORY_REASON}» полностью детерминирована и недоступна LLM.
   Проверяется только фактическое место/адрес поставки или грузополучатель. Регион регистрации,
   деятельности или нахождения заказчика/организатора сам по себе не подтверждает место поставки.

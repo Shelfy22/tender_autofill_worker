@@ -364,6 +364,7 @@ def test_document_analyzer_prompt_distinguishes_documents_from_works_and_zip() -
     assert str(captured["operation"]).startswith("analyze_document: spec.pdf")
     assert "Не считай инструкцию/руководство/документацию по монтажу" in prompt
     assert "ЗИП/ремкомплект/запасные части" in prompt
+    assert "ОКПД2/классификатора" in prompt
     assert "stateDefenseOrder" in prompt
     assert "specialAccount" in prompt
     assert "ГОЗ/275-ФЗ" in prompt
