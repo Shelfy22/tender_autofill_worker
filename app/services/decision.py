@@ -203,6 +203,20 @@ _PAYMENT_TERM_DAYS_PATTERN = re.compile(
     r"(\d{1,4})\s*(?:рабоч(?:их|ие)?|календарн(?:ых|ые)?)?\s*д(?:ней|ня|ень)?\b",
     re.IGNORECASE,
 )
+_PAYMENT_DELAY_EVIDENCE_PATTERN = re.compile(
+    r"(?:"
+    r"отсрочк[а-яё]*\s+(?:платеж[а-яё]*|оплат[а-яё]*)"
+    r"|(?:оплат[а-яё]*|расч[её]т[а-яё]*)[^.;\n]{0,120}?"
+    r"(?:в\s+течение|не\s+более|не\s+позднее|через|по\s+истечении)"
+    r")"
+    r"[^\d.;\n]{0,80}(?P<days>\d+)\s*"
+    r"(?:(?:рабоч|календарн)[а-яё]*)?\s*д(?:ней|ня|ень)?\b",
+    re.IGNORECASE,
+)
+_DELIVERY_TERM_IN_PAYMENT_EVIDENCE_PATTERN = re.compile(
+    r"срок[а-яё]*\s+(?:поставк[а-яё]*|доставк[а-яё]*)",
+    re.IGNORECASE,
+)
 
 _CONSIGNMENT_DIRECT_PATTERN = re.compile(
     r"\b(?:консигнац[а-яё]*|консигнационн[а-яё]*\s+склад[а-яё]*)\b",
@@ -608,6 +622,27 @@ def _find_sme_payment_term(text: str) -> tuple[int, str] | None:
         for match in _PAYMENT_TERM_DAYS_PATTERN.finditer(clause):
             candidates.append((int(match.group(1)), clause[:500]))
     return min(candidates, key=lambda candidate: candidate[0]) if candidates else None
+
+
+def _find_payment_delay_evidence(text: str) -> str | None:
+    """Return a >=90-day payment term, never a delivery-table value.
+
+    Spreadsheet parsers preserve each Excel row as a separate line.  Searching
+    a whole workbook allowed a payment-column title and a ``90 days`` value
+    from a distant delivery column to be combined into a false refusal.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        # A header may precede its value in a compact table, but never borrow
+        # a number from more distant rows.
+        clause = " ".join(lines[index : index + 2])
+        for match in _PAYMENT_DELAY_EVIDENCE_PATTERN.finditer(clause):
+            if int(match.group("days")) < 90:
+                continue
+            if _DELIVERY_TERM_IN_PAYMENT_EVIDENCE_PATTERN.search(match.group(0)):
+                continue
+            return re.sub(r"\s+", " ", match.group(0)).strip()[:900]
+    return None
 
 
 def _find_required_zip_supply_evidence(text: str) -> str | None:
@@ -1045,15 +1080,9 @@ def calculate_hard_reasons(
 
     sme_payment_term = _find_sme_payment_term(all_text)
     if not (sme_payment_term and sme_payment_term[0] < 90):
-        for match in re.finditer(
-            r"(?:отсрочк[а-я]*|оплат[а-яё\s]{0,120}?в\s+течение)"
-            r"[^\d]{0,80}(\d+)\s*(?:(рабоч|календарн)[а-я]*)?\s*д",
-            all_text,
-            re.I,
-        ):
-            number_of_days = int(match.group(1))
-            if number_of_days >= 90:
-                _add(reasons, PAYMENT_DELAY_REASON, match.group(0), 35)
+        payment_delay_evidence = _find_payment_delay_evidence(all_text)
+        if payment_delay_evidence:
+            _add(reasons, PAYMENT_DELAY_REASON, payment_delay_evidence, 35)
 
     created = parse_date(_field(fields, "dateCreated")) or date.today()
     delivery = parse_date(_field(fields, "deliveryDate"))
@@ -1322,6 +1351,15 @@ def apply_final_decision(
         ),
         None,
     )
+    confirmed_payment_delay_evidence = next(
+        (
+            item.evidence
+            for item in hard
+            if item.reason == PAYMENT_DELAY_REASON
+            and _find_payment_delay_evidence(item.evidence) is not None
+        ),
+        None,
+    )
     confirmed_organizer_cancellation_evidence = next(
         (
             item.evidence
@@ -1395,6 +1433,11 @@ def apply_final_decision(
             ):
                 continue
             if (
+                item.reason == PAYMENT_DELAY_REASON
+                and confirmed_payment_delay_evidence is None
+            ):
+                continue
+            if (
                 item.reason == ORGANIZER_CANCELLATION_REASON
                 and confirmed_organizer_cancellation_evidence is None
             ):
@@ -1423,6 +1466,10 @@ def apply_final_decision(
         llm_primary == PAYMENT_DEPENDENCY_REASON
         and confirmed_payment_dependency_evidence is None
     )
+    invalid_payment_delay_primary = (
+        llm_primary == PAYMENT_DELAY_REASON
+        and confirmed_payment_delay_evidence is None
+    )
     invalid_organizer_cancellation_primary = (
         llm_primary == ORGANIZER_CANCELLATION_REASON
         and confirmed_organizer_cancellation_evidence is None
@@ -1443,6 +1490,7 @@ def apply_final_decision(
         or invalid_repair_kit_primary
         or invalid_consignment_primary
         or invalid_payment_dependency_primary
+        or invalid_payment_delay_primary
         or invalid_organizer_cancellation_primary
     ):
         llm_primary = allowed_detected[0].reason if allowed_detected else None

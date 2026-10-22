@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable
 
-from app.models import ParsedDocument
+from app.models import ParsedDocument, SpreadsheetTable
 
 
 @dataclass(frozen=True)
@@ -112,8 +112,61 @@ def _source_blocks(page_text: str, documents: Iterable[ParsedDocument]) -> Itera
     if _compact(page_text):
         yield "Страница тендера", str(page_text)
     for document in documents:
-        if _compact(document.text):
-            yield document.fileName or document.originalFileName or "Документ без имени", document.text
+        text = _exclude_reference_lookup_sheets(document)
+        if _compact(text):
+            yield document.fileName or document.originalFileName or "Документ без имени", text
+
+
+_REFERENCE_LOOKUP_TERMS = (
+    re.compile(r"тип\w*\s+закуп", re.I),
+    re.compile(r"способ\w*\s+достав", re.I),
+    re.compile(r"наличи\w*\s+договор", re.I),
+    re.compile(r"филиал", re.I),
+    re.compile(r"класс\w*\s+тру", re.I),
+    re.compile(r"классификатор\w*\s+тру", re.I),
+    re.compile(r"доп\w*\s+материал", re.I),
+    re.compile(r"(?:ндс|время\w*\s+работ)", re.I),
+)
+_PAYMENT_HEADER_PATTERN = re.compile(r"(?:услови\w*|срок\w*|порядок\w*)\s+(?:оплат\w*|расч[её]т\w*)", re.I)
+_DELIVERY_HEADER_PATTERN = re.compile(r"срок\w*\s+(?:поставк\w*|доставк\w*)", re.I)
+
+
+def _is_reference_lookup_sheet(table: SpreadsheetTable) -> bool:
+    """Identify cross-domain Excel lookup sheets, not tender conditions."""
+    top_rows = [row for row in table.rows if row.row <= 12]
+    header_text = " ".join(value for row in top_rows for value in row.cells.values())
+    if not (
+        _PAYMENT_HEADER_PATTERN.search(header_text)
+        and _DELIVERY_HEADER_PATTERN.search(header_text)
+    ):
+        return False
+    return sum(bool(pattern.search(header_text)) for pattern in _REFERENCE_LOOKUP_TERMS) >= 3
+
+
+def _exclude_reference_lookup_sheets(document: ParsedDocument) -> str:
+    """Remove lookup-sheet blocks from raw Excel evidence.
+
+    A cross-domain helper sheet can place a delivery period and a payment
+    heading far apart on one page.  They are independent reference lists, not
+    the commercial conditions of this tender.
+    """
+    lookup_sheets = [
+        table.sheet.strip()
+        for table in document.spreadsheetTables
+        if table.sheet.strip() and _is_reference_lookup_sheet(table)
+    ]
+    if not lookup_sheets:
+        return document.text
+
+    text = document.text
+    for sheet in lookup_sheets:
+        escaped = re.escape(sheet)
+        text = re.sub(
+            rf"(?ms)^Лист:\s*{escaped}\s*$.*?(?=^Лист:\s*|\Z)",
+            "",
+            text,
+        )
+    return text
 
 
 def build_commercial_conditions_context(

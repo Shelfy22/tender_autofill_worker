@@ -1,4 +1,4 @@
-from app.models import ParsedDocument
+from app.models import ParsedDocument, SpreadsheetRow, SpreadsheetTable
 from app.services.commercial_conditions import build_commercial_conditions_context
 
 
@@ -145,6 +145,52 @@ def test_commercial_context_does_not_select_a_bare_payment_word() -> None:
     )
 
     assert "targets: paymentDelayDays" not in context
+
+
+def test_commercial_context_ignores_cross_domain_excel_lookup_sheet() -> None:
+    table = SpreadsheetTable(
+        fileName="НМЦД.xlsx",
+        sheet="условия",
+        rows=[
+            SpreadsheetRow(
+                row=3,
+                cells={
+                    "B": "тип закупки",
+                    "D": "способ доставки",
+                    "F": "условия оплаты",
+                    "H": "наличие договора",
+                    "J": "Филиал",
+                    "P": "сроки поставки",
+                    "R": "классификатор ТРУ",
+                    "V": "НДС",
+                },
+            ),
+            SpreadsheetRow(
+                row=16,
+                cells={"P": "90 дней", "R": "Запорно-регулирующая арматура"},
+            ),
+        ],
+    )
+    context = build_commercial_conditions_context(
+        "",
+        [
+            ParsedDocument(
+                documentIndex=1,
+                fileName="НМЦД.xlsx",
+                text=(
+                    "Лист: условия\n"
+                    "Строка 3: B: тип закупки | D: способ доставки | F: условия оплаты | "
+                    "H: наличие договора | J: Филиал | P: сроки поставки | "
+                    "R: классификатор ТРУ | V: НДС\n"
+                    "Строка 16: P: 90 дней | R: Запорно-регулирующая арматура"
+                ),
+                spreadsheetTables=[table],
+            )
+        ],
+    )
+
+    assert "paymentDelayDays" not in context
+    assert "90 дней" not in context
 
 
 def test_commercial_context_keeps_contextual_fallbacks_for_common_contract_phrases() -> None:

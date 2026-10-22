@@ -1581,6 +1581,20 @@ def test_payment_delay_below_ninety_days_does_not_reject() -> None:
     assert PAYMENT_DELAY_REASON not in [item.reason for item in reasons]
 
 
+def test_payment_delay_ignores_ninety_days_under_delivery_column() -> None:
+    text = "\n".join(
+        (
+            "Лист: условия",
+            "Строка 3: F: условия оплаты | P: сроки поставки | R: классификатор ТРУ",
+            "Строка 16: P: 90 дней | R: Запорно-регулирующая арматура",
+        )
+    )
+
+    reasons, _ = calculate_hard_reasons(job(), {}, product_check(), text)
+
+    assert PAYMENT_DELAY_REASON not in _reason_names(reasons)
+
+
 def test_sme_payment_term_prevents_ninety_day_payment_rejection() -> None:
     text = (
         "Если поставщик является субъектом МСП или самозанятым, оплата "
