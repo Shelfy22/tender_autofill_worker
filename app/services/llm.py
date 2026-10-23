@@ -242,13 +242,11 @@ def _response_schema(schema: type[T], *, strict: bool) -> dict[str, Any]:
 
 FIELD_NAMES = [
     "dateCreated", "submissionDeadlineDate", "submissionDeadlineTime", "tenderUrlSource",
-    "federalLaw", "stateDefenseOrder", "tenderStatus", "tenderStatusNote", "tenderStatusReason",
+    "stateDefenseOrder", "tenderStatus", "tenderStatusNote", "tenderStatusReason",
     "tenderGroup", "initialPrice", "finalPrice", "resultDate", "contractDate", "deliveryType",
     "deliveryBatchDays", "deliveryDays", "deliveryDate", "paymentDelayDays", "lotDivisible",
-    "deliveryNote", "counterpartyCode", "counterpartyName", "counterpartyInn", "counterpartyKpp",
-    "counterpartyCkg", "counterpartyPotential", "deal", "contract", "counterpartyNote",
-    "customerContactPerson", "op", "legalEntity", "tenderSubmittedDate", "tenderWonDate",
-    "applicationSecurity", "contractSecurity", "warrantySecurity", "warrantyMonths",
+    "deliveryNote", "customerContactPerson", "tenderSubmittedDate",
+    "warrantySecurity", "warrantyMonths",
     "nationalRegime", "specialAccount",
 ]
 
@@ -282,9 +280,7 @@ deliveryDate и deliveryDays заполняй только по прямому �
 resultDate ищи только в документах по прямой формулировке «Дата подведения итогов (закупки)»;
 не подставляй дату протокола, дату окончания подачи или иной срок. contractDate всегда оставляй null:
 он рассчитывается кодом как resultDate + 20 календарных дней.
-counterparty — заказчик/получатель, не поставщик, банк, УФК или грузоотправитель.
-op — внутреннее ОП ЭТМ, не контактное лицо заказчика.
-legalEntity всегда null. Код ТО не извлекай: он приходит программно.
+Код ТО приходит программно и не извлекается из документации.
 Приоритет: договор/ТЗ/спецификация, затем Seldon/страница.
 nationalRegime: при прямой «минимальной обязательной доле закупок товаров российского
 происхождения» по ПП №1875 верни `minimum_share`; при отсутствии подтверждённой меры
@@ -1090,10 +1086,11 @@ Candidates:
    есть, brand/article/model, lotNumber и positionNumber, чтобы Consolidator мог сопоставить их.
 3. reasonHits — только реально подтверждённые недетерминированные причины отказа. Не возвращай false для остальных причин.
 4. fieldCandidates — найденные поля карточки тендера, если они явно есть в этом unit.
+Не ищи и не возвращай федеральный закон, обеспечение заявки/контракта, данные
+контрагента, ЦКГ, потенциал, сделку, договор, ОП, юридическое лицо или дату
+выигрыша тендера: эти поля исключены из отчёта.
 
 Для fieldCandidates обязательно проверь условия закупки, договор и ТЗ на точные ключи:
-- applicationSecurity — обеспечение заявки;
-- contractSecurity — обеспечение исполнения контракта/договора;
 - warrantySecurity — обеспечение гарантийных обязательств;
 - warrantyMonths — минимальный гарантийный срок на товар в целых месяцах из прямого
   условия или таблицы: 12 месяцев = 12, 5 лет = 60. Не путай его со сроком ремонта,
@@ -1143,8 +1140,10 @@ Candidates:
   исключение: выбери общий наибольший срок и сохрани все условия в evidence. Нормализация
   применит правило `ceil(дни × 1.4)`;
 - deliveryNote — это примечание именно к deliveryType, а не самостоятельный тип
-  отгрузки. Сохрани короткие фактические детали: рабочие дни, заявки/график/
-  разнарядки, размер партии, разгрузка, особое условие оплаты или «Уточнить ...».
+  отгрузки. Сохрани короткие фактические детали: от чего отсчитывается срок,
+  заявки/график/разнарядки, размер партии, разгрузка, особое условие оплаты или
+  «Уточнить ...». Не возвращай только единицу срока («рабочие дни», «календарные
+  дни», «банковские дни») без числа и другого условия: в таком случае null.
   Не пиши сюда только общую фразу «Поставка партиями/по заявкам», если в unit есть
   более конкретный факт.
 resultDate — обязательно ищи в документации, извещении и проекте договора по
@@ -1275,7 +1274,9 @@ sourceReference с полем source из строки `[source: ...]`. Если
 - не записывай дату окончания договора как deliveryDate, если она не названа
   сроком/условием поставки.
 deliveryNote — краткое фактическое условие: от чего отсчитывается срок,
-вариативность сроков, заявки/график/разнарядки. Не дублируй туда тип поставки.
+вариативность сроков, заявки/график/разнарядки. Не дублируй туда тип поставки и
+не возвращай только единицу срока («рабочие дни», «календарные дни», «банковские
+дни») без числа и другого условия: в таком случае null.
 
 4. warrantyMonths. Верни минимальный гарантийный срок на товар в месяцах:
 12 месяцев = 12, 5 лет = 60. Подходят «гарантия», «гарантийный срок»,

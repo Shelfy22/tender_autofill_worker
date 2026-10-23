@@ -6,6 +6,52 @@ from typing import Any
 from app.models import NormalizedJob, TenderResult
 
 
+REPORT_OMITTED_FIELD_KEYS = frozenset(
+    {
+        "federalLaw",
+        "applicationSecurity",
+        "contractSecurity",
+        "counterpartyCode",
+        "counterpartyName",
+        "counterpartyInn",
+        "counterpartyKpp",
+        "counterpartyCkg",
+        "counterpartyPotential",
+        "deal",
+        "contract",
+        "counterpartyNote",
+        "op",
+        "legalEntity",
+        "tenderWonDate",
+        # Legacy aliases must not reintroduce customer data in outward JSON.
+        "counterparty",
+        "inn",
+        "kpp",
+    }
+)
+
+REPORT_OMITTED_HEADERS = frozenset(
+    {
+        "Обеспечение заявки",
+        "Обеспечение контракта",
+        "Обеспечение исполнения контракта",
+        "Федеральный закон",
+        "Код контрагента",
+        "Название контрагента",
+        "ИНН контрагента",
+        "КПП контрагента",
+        "ЦКГ",
+        "Потенциал",
+        "Сделка",
+        "Договор",
+        "Примечание к контрагенту",
+        "ОП",
+        "Юридическое лицо ЭТМ",
+        "Тендер выигран",
+    }
+)
+
+
 def _lot_divisible_report_value(value: Any) -> str:
     normalized = str(value or "").strip().casefold()
     if normalized in {"yes", "true", "1", "да", "делимый"}:
@@ -49,7 +95,17 @@ def build_result_json(
     logs: list[dict[str, Any]],
     debug: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    result_fields = {**fields, "legalEntity": None, "toCode": job.to_code}
+    result_fields = {
+        key: value
+        for key, value in fields.items()
+        if key not in REPORT_OMITTED_FIELD_KEYS
+    }
+    result_meta = {
+        key: value
+        for key, value in meta.items()
+        if key not in REPORT_OMITTED_FIELD_KEYS
+    }
+    result_fields["toCode"] = job.to_code
     # Keep normalized machine values while calculating the tender, then expose
     # business labels only in the outward payload consumed by Daily.
     lot_divisible_label = _lot_divisible_report_value(fields.get("lotDivisible"))
@@ -63,7 +119,11 @@ def build_result_json(
         result_fields["nationalRegime"] = _national_regime_display_value(
             fields.get("nationalRegime")
         )
-    report_fields = dict(job.report_fields)
+    report_fields = {
+        key: value
+        for key, value in job.report_fields.items()
+        if key not in REPORT_OMITTED_HEADERS
+    }
     if lot_divisible_label:
         # Downstream XLSX generation uses the original Russian Daily headers.
         # Keep that column in sync with the normalized decision field.
@@ -71,7 +131,7 @@ def build_result_json(
         report_fields["lotDivisible"] = lot_divisible_label
     result = TenderResult(
         fields=result_fields,
-        meta=meta,
+        meta=result_meta,
         productCheck=product_check,
         decision=decision,
         warnings=list(dict.fromkeys(str(warning) for warning in warnings if str(warning).strip())),

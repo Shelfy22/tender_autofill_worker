@@ -1570,7 +1570,7 @@ def apply_final_decision(
                 unresolved_labels.append(product_label or review_reason)
 
     if hard:
-        status = "Отказано КСОТП"
+        status = "Отказано ИИ"
         if hard_non_coverage:
             # Existing priority order is preserved among all deterministic reasons
             # except coverage, which is only the fallback primary reason.
@@ -1591,7 +1591,7 @@ def apply_final_decision(
         if documentation_reason and documentation_reason.evidence:
             note_parts.append(documentation_reason.evidence)
     elif llm_decision and llm_decision.decision == "reject" and llm_primary:
-        status, reason, confidence = "Отказано КСОТП", llm_primary, llm_decision.confidence
+        status, reason, confidence = "Отказано ИИ", llm_primary, llm_decision.confidence
         reason_origin = "llm"
         note_parts.append(llm_decision.note or f"Подтверждён критерий отказа: {llm_primary}.")
     elif remote_territory_manual_reasons:
@@ -1607,12 +1607,12 @@ def apply_final_decision(
         status, reason, confidence = "Загружен Seldon", None, "medium"
         reason_origin = "semantic_hard_reason_manual_review"
     elif llm_decision and llm_decision.decision == "reject":
-        status, reason, confidence = "Согласовано КСОТП", None, llm_decision.confidence
+        status, reason, confidence = "Согласовано ИИ", None, llm_decision.confidence
         note_parts.append(
             "LLM reject содержал только запрещённую/неподтверждённую controlled-причину."
         )
     elif llm_decision and llm_decision.decision == "approve":
-        status, reason, confidence = "Согласовано КСОТП", None, llm_decision.confidence
+        status, reason, confidence = "Согласовано ИИ", None, llm_decision.confidence
         note_parts.append(llm_decision.note or "Критерии отказа не подтверждены.")
     else:
         status, reason, confidence = "Загружен Seldon", "Прочее", "low"
@@ -1663,7 +1663,7 @@ def apply_final_decision(
             }
         )
 
-    if status == "Отказано КСОТП":
+    if status == "Отказано ИИ":
         for item in hard:
             add_additional_reason(item.reason, item.evidence, "Детерминированное правило", "high")
         for item in llm_reason_candidates:
@@ -1701,7 +1701,7 @@ def apply_final_decision(
         if reason_origin == "product_validation"
         else "Детерминированные правила согласования"
         if reason_origin == "deterministic"
-        else "LLM: решение КСОТП"
+        else "LLM: решение ИИ"
     )
     meta["tenderStatus"] = {
         "source": status_source,

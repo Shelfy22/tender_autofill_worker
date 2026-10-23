@@ -97,6 +97,75 @@ def test_batch_delivery_does_not_invent_generic_delivery_note() -> None:
     assert "deliveryNote" not in fields
 
 
+def test_single_delivery_period_calculates_date_from_contract_date() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "resultDate": FieldValue(
+                value="2026-10-16",
+                confidence="high",
+                source="notice.docx",
+                evidence="Result date: 16.10.2026.",
+            ),
+            "deliveryType": FieldValue(
+                value="during_period",
+                confidence="high",
+                source="contract.docx",
+                evidence="Delivery within 30 calendar days after contract signing.",
+            ),
+            "deliveryDays": FieldValue(
+                value=30,
+                confidence="high",
+                source="contract.docx",
+                evidence="Within 30 calendar days after contract signing.",
+            ),
+        }
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert fields["contractDate"] == "2026-11-05"
+    assert fields["deliveryDate"] == "2026-12-05"
+    assert meta["deliveryDate"]["source"] == "Расчёт / дата заключения договора + срок поставки"
+
+
+def test_delivery_year_period_uses_last_day_of_year() -> None:
+    text = "\u0421\u0440\u043e\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438 \u0442\u043e\u0432\u0430\u0440\u0430: \u0432 \u0442\u0435\u0447\u0435\u043d\u0438\u0435 2027 \u0433\u043e\u0434\u0430."
+
+    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["deliveryType"] == "single_date"
+    assert fields["deliveryDate"] == "2027-12-31"
+
+
+def test_delivery_month_period_uses_last_day_of_final_month() -> None:
+    text = (
+        "\u0421\u0440\u043e\u043a \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438 \u0442\u043e\u0432\u0430\u0440\u0430: \u0432 \u0442\u0435\u0447\u0435\u043d\u0438\u0435 \u0441 \u043c\u0430\u0440\u0442\u0430 \u043f\u043e \u0430\u043f\u0440\u0435\u043b\u044c 2027 \u0433\u043e\u0434\u0430."
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["deliveryType"] == "single_date"
+    assert fields["deliveryDate"] == "2027-04-30"
+
+
+def test_delivery_note_with_only_day_unit_is_removed() -> None:
+    extracted = ExtractedFieldsResponse(
+        fields={
+            "deliveryNote": FieldValue(
+                value="\u0440\u0430\u0431\u043e\u0447\u0438\u0435 \u0434\u043d\u0438",
+                confidence="low",
+                source="contract.docx",
+                evidence="Delivery within 30 working days.",
+            )
+        }
+    )
+
+    fields, _, warnings = validate_fields(job_with_lot(""), extracted, "", [])
+
+    assert "deliveryNote" not in fields
+    assert any("\u0443\u043a\u0430\u0437\u0430\u043d \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u0438\u043f \u0434\u043d\u0435\u0439" in warning for warning in warnings)
+
+
 def test_direct_payment_term_fills_missing_llm_field() -> None:
     text = """
     Срок поставки товара составляет 28 календарных дней.
@@ -213,7 +282,7 @@ def test_delivery_type_is_detected_from_document_request_rule() -> None:
     assert fields["deliveryType"] == "by_requests"
 
 
-def test_direct_security_fallback_does_not_fill_warranty_columns() -> None:
+def test_removed_application_and_contract_security_are_not_extracted() -> None:
     text = """
     Обеспечение заявки: не требуется.
     Размер обеспечения исполнения договора составляет 5% цены договора.
@@ -224,10 +293,11 @@ def test_direct_security_fallback_does_not_fill_warranty_columns() -> None:
     fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
 
     assert "applicationSecurity" not in fields
-    assert fields["contractSecurity"] == "5% цены договора"
+    assert "contractSecurity" not in fields
     assert "warrantySecurity" not in fields
     assert "warrantyMonths" not in fields
-    assert meta["contractSecurity"]["confidence"] == "high"
+    assert "applicationSecurity" not in meta
+    assert "contractSecurity" not in meta
 
 
 def test_contract_validity_date_does_not_fill_delivery_date() -> None:

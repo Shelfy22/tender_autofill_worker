@@ -11,11 +11,11 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.logging import stage
-from app.models import DocumentAnalysisResult, JobClaim, ParsedDocument, TenderPositionsResponse, TenderResult
+from app.models import DocumentAnalysisResult, JobClaim, NormalizedJob, ParsedDocument, TenderPositionsResponse, TenderResult
 from app.observability import RunObserver
 from app.services.catalog import CatalogMatcher, limit_catalog_positions
 from app.services.coverage import summarize_product_coverage
-from app.services.customer import IProClient, resolve_actual_customer
+from app.services.customer import IProClient
 from app.services.decision import (
     apply_final_decision,
     build_decision_prompt,
@@ -65,7 +65,21 @@ from app.services.yandex_disk import upload_product_matching_report
 
 
 T = TypeVar("T")
+
+
+def _ipro_lookup_input(job: NormalizedJob) -> dict[str, Any]:
+    """Build the minimum internal IPro request without report customer fields."""
+    organizer = job.seldon_purchase.get("organizer")
+    organizer = organizer if isinstance(organizer, dict) else {}
+    return {
+        "counterpartyInn": organizer.get("inn"),
+        "counterpartyKpp": organizer.get("kpp"),
+    }
+
+
 logger = logging.getLogger(__name__)
+
+
 def build_product_extraction_text(
     deterministic_text: str,
     documents: list[ParsedDocument],
@@ -543,17 +557,16 @@ class TenderPipeline:
             )
             self.warnings.extend(validation_warnings)
 
-            fields, meta, customer_warnings, customer_debug = self._run_stage(
-                "Resolve Actual Customer",
-                lambda: resolve_actual_customer(
-                    llm, job, fields, meta, parsed_documents, page_text
-                ),
-            )
-            self.warnings.extend(customer_warnings)
-
-            fields, meta, counterparty_lookup, ipro_warnings = self._run_stage(
+            # Customer columns were removed from the report. IPro is retained
+            # only as a technical check against the organizer INN/KPP from
+            # Seldon; no LLM customer extraction or customer fields are saved.
+            customer_debug = {
+                "skipped": True,
+                "reason": "Customer fields are disabled; IPro uses Seldon organizer data only.",
+            }
+            _, _, counterparty_lookup, ipro_warnings = self._run_stage(
                 "Проверка контрагента в IPro",
-                lambda: ipro.lookup(fields, meta),
+                lambda: ipro.lookup(_ipro_lookup_input(job), {}),
             )
             self.warnings.extend(ipro_warnings)
 

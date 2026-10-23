@@ -372,7 +372,7 @@ def test_llm_cannot_reintroduce_storage_after_missing_documents_as_consignment()
         ),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert decision["llmReasonCandidates"] == []
 
@@ -403,11 +403,11 @@ def test_unresolved_product_audit_does_not_create_disabled_coverage_rejection() 
         llm_decision=LlmDecision(decision="approve", confidence="high"),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert "Товарный аудит обнаружил" in fields["tenderStatusNote"]
     assert "не блокирует расчёт покрытия" in fields["tenderStatusNote"]
-    assert meta["tenderStatus"]["source"] == "LLM: решение КСОТП"
+    assert meta["tenderStatus"]["source"] == "LLM: решение ИИ"
     assert decision["manualReviewRequired"] is True
 
 
@@ -463,12 +463,12 @@ def test_missing_ipro_is_advisory_for_approved_tender_with_product_review() -> N
         llm_decision=LlmDecision(decision="approve", confidence="high"),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert "Товарный аудит обнаружил" in fields["tenderStatusNote"]
     assert "Выключатель —" in fields["tenderStatusNote"]
     assert "IPro не найдена" in fields["tenderStatusNote"]
-    assert meta["tenderStatus"]["source"] == "LLM: решение КСОТП"
+    assert meta["tenderStatus"]["source"] == "LLM: решение ИИ"
     assert decision["counterpartyRequiresWork"] is True
     assert decision["manualReviewRequired"] is True
 
@@ -499,10 +499,10 @@ def test_product_review_is_advisory_when_tender_is_approved() -> None:
         llm_decision=LlmDecision(decision="approve", confidence="high"),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert "Анализатор FPL1014 — Низкая уверенность" in fields["tenderStatusNote"]
-    assert meta["tenderStatus"]["source"] == "LLM: решение КСОТП"
+    assert meta["tenderStatus"]["source"] == "LLM: решение ИИ"
     assert decision["manualReviewRequired"] is True
 
 
@@ -537,7 +537,7 @@ def test_supply_work_rejection_has_priority_over_ipro_and_product_review() -> No
         ),
     )
 
-    assert fields["tenderStatus"] == "Отказано КСОТП"
+    assert fields["tenderStatus"] == "Отказано ИИ"
     assert fields["tenderStatusReason"] == SUPPLY_WORK_REASON
     assert decision["counterpartyAdvisoryOnly"] is True
     assert decision["manualReviewRequired"] is True
@@ -812,7 +812,7 @@ def test_llm_zip_reason_is_accepted_for_required_main_product_completeness() -> 
         ),
     )
 
-    assert fields["tenderStatus"] == "Отказано КСОТП"
+    assert fields["tenderStatus"] == "Отказано ИИ"
     assert fields["tenderStatusReason"] == REPAIR_KIT_REASON
     assert decision["llmReasonCandidates"][0]["reason"] == REPAIR_KIT_REASON
 
@@ -842,7 +842,7 @@ def test_llm_cannot_reintroduce_zip_from_prohibited_spare_parts() -> None:
         ),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert fields.get("tenderStatusReason") is None
     assert decision["llmReasonCandidates"] == []
 
@@ -875,7 +875,7 @@ def test_llm_can_dismiss_deterministic_zip_reason_after_evidence_review() -> Non
         ),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert decision["hardReasons"] == []
     assert decision["dismissedHardReasons"][0]["reason"] == REPAIR_KIT_REASON
     assert "не требует поставки" in decision["note"]
@@ -892,7 +892,7 @@ def test_deterministic_zip_reason_remains_without_explicit_high_confidence_revie
         llm_decision=LlmDecision(decision="approve", confidence="high"),
     )
 
-    assert fields["tenderStatus"] == "Отказано КСОТП"
+    assert fields["tenderStatus"] == "Отказано ИИ"
     assert decision["hardReasons"][0]["reason"] == REPAIR_KIT_REASON
     assert decision["dismissedHardReasons"] == []
 
@@ -922,7 +922,7 @@ def test_llm_can_dismiss_semantic_consignment_candidate_with_high_confidence() -
         ),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert decision["hardReasons"] == []
     assert decision["dismissedHardReasons"][0]["reason"] == CONSIGNMENT_REASON
 
@@ -978,7 +978,7 @@ def test_llm_cannot_reintroduce_delivery_deadline_without_validated_date() -> No
         ),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert decision["llmReasonCandidates"] == []
 
@@ -1008,7 +1008,7 @@ def test_llm_supply_work_reason_is_suppressed_for_expertise_context() -> None:
         ),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert decision["llmReasonCandidates"] == []
 
@@ -1039,7 +1039,7 @@ def test_llm_supply_work_reason_is_suppressed_for_documentation_only() -> None:
         ),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert decision["llmReasonCandidates"] == []
 
@@ -1069,7 +1069,7 @@ def test_llm_cannot_reintroduce_deterministic_one_million_reason() -> None:
         report_id=1,
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert decision["llmReasonCandidates"] == []
 
@@ -1098,7 +1098,7 @@ def test_hard_rejection_has_priority_over_counterparty_work() -> None:
         counterparty_lookup={"status": "not_found", "reason": "нет контрагента"},
         llm_decision=LlmDecision(decision="approve"),
     )
-    assert fields["tenderStatus"] == "Отказано КСОТП"
+    assert fields["tenderStatus"] == "Отказано ИИ"
     assert fields["tenderStatusReason"] == PRICE_REASON
     assert "Дополнительная информация по контрагенту: нет контрагента" in fields["tenderStatusNote"]
     assert decision["counterpartyRequiresWork"] is True
@@ -1112,7 +1112,7 @@ def test_hard_rejection_has_priority_over_counterparty_work() -> None:
         counterparty_lookup={"status": "matched"},
         llm_decision=LlmDecision(decision="approve"),
     )
-    assert fields["tenderStatus"] == "Отказано КСОТП"
+    assert fields["tenderStatus"] == "Отказано ИИ"
     assert fields["tenderStatusReason"] == PRICE_REASON
 
 
@@ -1126,7 +1126,7 @@ def test_missing_ipro_is_advisory_when_tender_would_otherwise_be_approved() -> N
         llm_decision=LlmDecision(decision="approve"),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert "ИНН/КПП не найдены в IPro" in fields["tenderStatusNote"]
     assert decision["counterpartyRequiresWork"] is True
@@ -1153,7 +1153,7 @@ def test_llm_rejection_has_priority_over_counterparty_work() -> None:
         ),
     )
 
-    assert fields["tenderStatus"] == "Отказано КСОТП"
+    assert fields["tenderStatus"] == "Отказано ИИ"
     assert fields["tenderStatusReason"] == SUPPLY_WORK_REASON
     assert "Дополнительная информация по контрагенту: контрагент отсутствует" in fields["tenderStatusNote"]
     assert decision["counterpartyAdvisoryOnly"] is True
@@ -1168,7 +1168,7 @@ def test_llm_approve_without_hard_reasons() -> None:
         counterparty_lookup={"status": "matched"},
         llm_decision=LlmDecision(decision="approve", note="Критерии не найдены"),
     )
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
 
 
@@ -1219,7 +1219,7 @@ def test_unavailable_documents_are_rejected_with_diagnostic_note() -> None:
         report_id=3,
     )
 
-    assert fields["tenderStatus"] == "Отказано КСОТП"
+    assert fields["tenderStatus"] == "Отказано ИИ"
     assert fields["tenderStatusReason"] == DOCUMENTATION_REASON
     assert documentation_note in fields["tenderStatusNote"]
     assert decision["reason"] == DOCUMENTATION_REASON
@@ -1238,7 +1238,7 @@ def test_missing_products_or_coverage_cannot_be_approved() -> None:
         counterparty_lookup={"status": "matched"},
         llm_decision=LlmDecision(decision="approve"),
     )
-    assert fields["tenderStatus"] == "Отказано КСОТП"
+    assert fields["tenderStatus"] == "Отказано ИИ"
     assert fields["tenderStatusReason"] == DOCUMENTATION_REASON
 
 
@@ -1256,7 +1256,7 @@ def test_coverage_reason_is_ignored_when_rule_is_disabled() -> None:
         llm_decision=LlmDecision(decision="approve"),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert decision["hardReasons"] == []
 
@@ -1537,7 +1537,7 @@ def test_llm_cannot_reintroduce_remote_reason_from_customer_region() -> None:
         ),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert decision["llmReasonCandidates"] == []
 
@@ -1696,7 +1696,7 @@ def test_223_marketing_research_filename_overrides_missing_documentation_reason(
     )
 
     assert checks["marketResearchCheck"]["detectedInFileName"] is True
-    assert fields["tenderStatus"] == "Отказано КСОТП"
+    assert fields["tenderStatus"] == "Отказано ИИ"
     assert fields["tenderStatusReason"] == MARKET_RESEARCH_REASON
     assert decision["marketResearchReasonSuppressed"] is False
 
@@ -1724,7 +1724,7 @@ def test_llm_cannot_restore_market_research_reason_for_223_or_44_fz() -> None:
             llm_decision=llm_decision,
             report_id=report_id,
         )
-        assert fields["tenderStatus"] == "Согласовано КСОТП"
+        assert fields["tenderStatus"] == "Согласовано ИИ"
         assert "tenderStatusReason" not in fields
         assert decision["llmReasonCandidates"] == []
         assert decision["marketResearchReasonSuppressed"] is True
@@ -1928,6 +1928,6 @@ def test_llm_cannot_reintroduce_deterministic_35_kv_reason() -> None:
         ),
     )
 
-    assert fields["tenderStatus"] == "Согласовано КСОТП"
+    assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
     assert decision["llmReasonCandidates"] == []

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import re
 from math import ceil
 from datetime import date, datetime, timedelta
@@ -11,14 +12,11 @@ from app.services.normalization import deduplicate_strings
 
 ALLOWED_FIELDS = {
     "dateCreated", "submissionDeadlineDate", "submissionDeadlineTime", "tenderUrlSource",
-    "federalLaw", "stateDefenseOrder", "tenderStatus", "tenderStatusNote", "tenderStatusReason",
+    "stateDefenseOrder", "tenderStatus", "tenderStatusNote", "tenderStatusReason",
     "tenderGroup", "initialPrice", "finalPrice", "resultDate", "contractDate", "deliveryType",
     "deliveryBatchDays", "deliveryDays", "deliveryDate", "paymentDelayDays", "lotDivisible",
-    "deliveryNote", "counterpartyCode", "counterpartyName", "counterpartyInn", "counterpartyKpp",
-    "counterpartyCkg", "counterpartyPotential", "deal", "contract", "counterpartyNote",
-    "customerContactPerson", "op", "tenderSubmittedDate", "tenderWonDate", "applicationSecurity",
-    "contractSecurity", "warrantySecurity", "warrantyMonths", "nationalRegime", "specialAccount",
-    "counterparty", "inn", "kpp",
+    "deliveryNote", "customerContactPerson", "tenderSubmittedDate", "warrantySecurity",
+    "warrantyMonths", "nationalRegime", "specialAccount",
 }
 
 
@@ -104,6 +102,20 @@ _CONTRACT_EXPIRY_DATE_PATTERN = re.compile(
     r"(?:\u0441\u0440\u043e\u043a\s+\u0434\u0435\u0439\u0441\u0442\u0432\w*\s+\u0434\u043e\u0433\u043e\u0432\u043e\u0440\w*|"
     r"\u0434\u043e\u0433\u043e\u0432\u043e\u0440\w*[^.\n]{0,120}?\u0434\u0435\u0439\u0441\u0442\u0432\w*)"
     r"[^.\n]{0,180}?(?:\u0434\u043e|\u043f\u043e)\s*(\d{1,2}\.\d{1,2}\.\d{4})",
+    re.IGNORECASE,
+)
+_DELIVERY_YEAR_PERIOD_PATTERN = re.compile(
+    r"(?:\u0441\u0440\u043e\u043a\w*\s+(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u0434\u043e\u0441\u0442\u0430\u0432\u043a\w*)|"
+    r"(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u0434\u043e\u0441\u0442\u0430\u0432\u043a\w*))"
+    r"[^.;\n]{0,180}?\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435\s+(20\d{2})\s*(?:\u0433(?:\.|\u043e\u0434\u0430)?)\b",
+    re.IGNORECASE,
+)
+_DELIVERY_MONTH_RANGE_PATTERN = re.compile(
+    r"(?:\u0441\u0440\u043e\u043a\w*\s+(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u0434\u043e\u0441\u0442\u0430\u0432\u043a\w*)|"
+    r"(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u0434\u043e\u0441\u0442\u0430\u0432\u043a\w*))"
+    r"[^.;\n]{0,180}?(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435\s+)?\u0441\s+"
+    r"(\u044f\u043d\u0432\u0430\u0440\u044f|\u044f\u043d\u0432\u0430\u0440\u044c|\u0444\u0435\u0432\u0440\u0430\u043b\u044f|\u0444\u0435\u0432\u0440\u0430\u043b\u044c|\u043c\u0430\u0440\u0442\u0430|\u043c\u0430\u0440\u0442|\u0430\u043f\u0440\u0435\u043b\u044f|\u0430\u043f\u0440\u0435\u043b\u044c|\u043c\u0430\u044f|\u043c\u0430\u0439|\u0438\u044e\u043d\u044f|\u0438\u044e\u043d\u044c|\u0438\u044e\u043b\u044f|\u0438\u044e\u043b\u044c|\u0430\u0432\u0433\u0443\u0441\u0442\u0430|\u0430\u0432\u0433\u0443\u0441\u0442|\u0441\u0435\u043d\u0442\u044f\u0431\u0440\u044f|\u0441\u0435\u043d\u0442\u044f\u0431\u0440\u044c|\u043e\u043a\u0442\u044f\u0431\u0440\u044f|\u043e\u043a\u0442\u044f\u0431\u0440\u044c|\u043d\u043e\u044f\u0431\u0440\u044f|\u043d\u043e\u044f\u0431\u0440\u044c|\u0434\u0435\u043a\u0430\u0431\u0440\u044f|\u0434\u0435\u043a\u0430\u0431\u0440\u044c)\s+\u043f\u043e\s+"
+    r"(\u044f\u043d\u0432\u0430\u0440\u044f|\u044f\u043d\u0432\u0430\u0440\u044c|\u0444\u0435\u0432\u0440\u0430\u043b\u044f|\u0444\u0435\u0432\u0440\u0430\u043b\u044c|\u043c\u0430\u0440\u0442\u0430|\u043c\u0430\u0440\u0442|\u0430\u043f\u0440\u0435\u043b\u044f|\u0430\u043f\u0440\u0435\u043b\u044c|\u043c\u0430\u044f|\u043c\u0430\u0439|\u0438\u044e\u043d\u044f|\u0438\u044e\u043d\u044c|\u0438\u044e\u043b\u044f|\u0438\u044e\u043b\u044c|\u0430\u0432\u0433\u0443\u0441\u0442\u0430|\u0430\u0432\u0433\u0443\u0441\u0442|\u0441\u0435\u043d\u0442\u044f\u0431\u0440\u044f|\u0441\u0435\u043d\u0442\u044f\u0431\u0440\u044c|\u043e\u043a\u0442\u044f\u0431\u0440\u044f|\u043e\u043a\u0442\u044f\u0431\u0440\u044c|\u043d\u043e\u044f\u0431\u0440\u044f|\u043d\u043e\u044f\u0431\u0440\u044c|\u0434\u0435\u043a\u0430\u0431\u0440\u044f|\u0434\u0435\u043a\u0430\u0431\u0440\u044c)\s+(20\d{2})\s*(?:\u0433(?:\.|\u043e\u0434\u0430)?)?",
     re.IGNORECASE,
 )
 _NATIONAL_REGIME_CONTEXT_PATTERN = re.compile(
@@ -335,6 +347,81 @@ def _contract_expiry_date(text: str) -> tuple[str, str] | None:
     if match is None:
         return None
     return _normalize_date(match.group(1)), match.group(0)[:500]
+
+
+_RUSSIAN_MONTH_FORMS = {
+    "январь": 1, "января": 1,
+    "февраль": 2, "февраля": 2,
+    "март": 3, "марта": 3,
+    "апрель": 4, "апреля": 4,
+    "май": 5, "мая": 5,
+    "июнь": 6, "июня": 6,
+    "июль": 7, "июля": 7,
+    "август": 8, "августа": 8,
+    "сентябрь": 9, "сентября": 9,
+    "октябрь": 10, "октября": 10,
+    "ноябрь": 11, "ноября": 11,
+    "декабрь": 12, "декабря": 12,
+}
+
+
+def _russian_month_number(value: Any) -> int | None:
+    """Recognize both full and truncated Russian month forms from tables."""
+    month = str(value or "").casefold()
+    return next(
+        (
+            number
+            for form, number in _RUSSIAN_MONTH_FORMS.items()
+            if form.startswith(month) or month.startswith(form)
+        ),
+        None,
+    )
+
+
+def _delivery_period_end_date(text: str) -> tuple[str, str] | None:
+    """Return the final date for a directly stated delivery year/month period."""
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    month_range = _DELIVERY_MONTH_RANGE_PATTERN.search(normalized)
+    if month_range:
+        _, final_month_name, year_text = month_range.groups()
+        final_month = _russian_month_number(final_month_name)
+        if final_month:
+            year = int(year_text)
+            last_day = calendar.monthrange(year, final_month)[1]
+            return f"{year:04d}-{final_month:02d}-{last_day:02d}", month_range.group(0)[:500]
+    year_period = _DELIVERY_YEAR_PERIOD_PATTERN.search(normalized)
+    if year_period:
+        year = int(year_period.group(1))
+        return f"{year:04d}-12-31", year_period.group(0)[:500]
+    return None
+
+
+def _calculated_delivery_date(contract_date: Any, delivery_days: Any) -> str | None:
+    """Calculate a one-time delivery date from the calculated contract date."""
+    normalized_contract_date = _normalize_date(contract_date)
+    try:
+        days = int(float(str(delivery_days)))
+    except (TypeError, ValueError):
+        return None
+    if (
+        not isinstance(normalized_contract_date, str)
+        or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized_contract_date)
+        or days <= 0
+    ):
+        return None
+    return (date.fromisoformat(normalized_contract_date) + timedelta(days=days)).isoformat()
+
+
+_WEAK_DELIVERY_NOTE_PATTERN = re.compile(
+    r"^(?:(?:рабоч|календарн|банковск)[а-яё]*\s+)?дн(?:ей|я|и)?[.!;,:-]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_weak_delivery_note(value: Any) -> bool:
+    """Reject a unit-of-time fragment that gives the employee no condition."""
+    note = re.sub(r"\s+", " ", str(value or "")).strip()
+    return bool(note and _WEAK_DELIVERY_NOTE_PATTERN.fullmatch(note))
 
 
 def _national_regime_from_text(text: str) -> tuple[str, str] | None:
@@ -721,6 +808,19 @@ def _delivery_schedule_fragment(value: Any) -> str:
             match.group(1).casefold()
             for match in _DELIVERY_SCHEDULE_MONTH_PATTERN.finditer(fragment)
         }
+        # A phrase such as "с марта по апрель 2027 года" names the bounds of
+        # one delivery period.  Its two month names are not a delivery
+        # calendar, even though the generic schedule heuristic sees two
+        # different months.
+        month_range = _DELIVERY_MONTH_RANGE_PATTERN.search(fragment)
+        if month_range:
+            range_months = {
+                _russian_month_number(month_range.group(1)),
+                _russian_month_number(month_range.group(2)),
+            }
+            detected_months = {_russian_month_number(month) for month in months}
+            if detected_months.issubset(range_months):
+                continue
         quarters = {
             re.sub(r"\s+", " ", match.group(0).casefold())
             for match in _DELIVERY_SCHEDULE_QUARTER_PATTERN.finditer(fragment)
@@ -1047,9 +1147,10 @@ def validate_fields(
         else:
             fields["nationalRegime"] = national_regime
 
-    # The autofill columns must contain only an explicitly stated amount or
-    # percentage. Do not turn an absent requirement into "not required".
-    for key in ("applicationSecurity", "contractSecurity", "warrantySecurity"):
+    # The remaining warranty-security column must contain an explicitly stated
+    # amount or percentage. Application and contract security are no longer
+    # part of the report and are deliberately not extracted.
+    for key in ("warrantySecurity",):
         value = str(fields.get(key) or "").strip()
         if value and (
             _NON_NUMERIC_SECURITY_VALUE_PATTERN.search(value)
@@ -1057,30 +1158,6 @@ def validate_fields(
         ):
             fields.pop(key, None)
             meta.pop(key, None)
-
-    # Warranty fields are semantically scoped in procurement documents. They
-    # must remain the document LLM's decision; regex fallback is only for the
-    # application and contract security columns.
-    for key, (value, evidence) in _explicit_security_fields(deterministic_text).items():
-        if key in {"warrantySecurity", "warrantyMonths"}:
-            continue
-        if not fields.get(key):
-            _set(
-                fields,
-                meta,
-                key,
-                value,
-                "Документы / прямое условие обеспечения или гарантии",
-                "high",
-                evidence,
-            )
-
-    if not fields.get("counterpartyName") and fields.get("counterparty"):
-        fields["counterpartyName"] = fields["counterparty"]
-    if not fields.get("counterpartyInn") and fields.get("inn"):
-        fields["counterpartyInn"] = fields["inn"]
-    if not fields.get("counterpartyKpp") and fields.get("kpp"):
-        fields["counterpartyKpp"] = fields["kpp"]
 
     _set(fields, meta, "tenderUrlSource", fields.get("tenderUrlSource") or job.tender_url, "Input tenderUrl", "high", job.tender_url or "")
     _set(fields, meta, "dateCreated", fields.get("dateCreated") or date.today().isoformat(), "Workflow", "medium", "Дата запуска workflow")
@@ -1143,14 +1220,6 @@ def validate_fields(
         if value is not None and str(value).strip() != "":
             _set(fields, meta, "initialPrice", value, "Seldon structured data", "high", str(value))
 
-    organizer = purchase.get("organizer") if isinstance(purchase.get("organizer"), dict) else {}
-    customer_name = organizer.get("name") or job.report_fields.get("Название заказчика") or job.report_fields.get("Организатор")
-    customer_inn = organizer.get("inn") or job.report_fields.get("ИНН заказчика") or job.report_fields.get("ИНН заказчика/организатора")
-    customer_kpp = organizer.get("kpp") or job.report_fields.get("КПП заказчика") or job.report_fields.get("КПП заказчика/организатора")
-    _set(fields, meta, "counterpartyName", fields.get("counterpartyName") or customer_name, "Seldon/Daily", "medium", str(customer_name or ""))
-    _set(fields, meta, "counterpartyInn", fields.get("counterpartyInn") or customer_inn, "Seldon/Daily", "medium", str(customer_inn or ""))
-    _set(fields, meta, "counterpartyKpp", fields.get("counterpartyKpp") or customer_kpp, "Seldon/Daily", "medium", str(customer_kpp or ""))
-
     report_lot_divisible = job.report_fields.get("Лот делимый")
     if report_lot_divisible is None:
         report_lot_divisible = job.report_fields.get("lotDivisible")
@@ -1176,10 +1245,6 @@ def validate_fields(
             f"Лот делимый: {report_lot_divisible}",
         )
 
-    text_lower = deterministic_text.lower().replace("ё", "е")
-    if not fields.get("federalLaw"):
-        law = "223" if "223-фз" in text_lower or job.report_id == 1 else "44" if "44-фз" in text_lower or job.report_id == 2 else "commercial" if job.report_id == 3 else None
-        _set(fields, meta, "federalLaw", law, "Seldon/документы", "high", f"reportId={job.report_id}")
     goz_evidence = _direct_goz_evidence(deterministic_text)
     previous_goz = fields.get("stateDefenseOrder")
     if str(previous_goz or "").casefold() in {"yes", "да", "true", "1"} and not goz_evidence:
@@ -1373,6 +1438,36 @@ def validate_fields(
             str(meta.get("deliveryType", {}).get("evidence") or "Условие поставки"),
         )
 
+    # A stated delivery period covering a whole year or a range of months has
+    # a usable final delivery date even though the source does not name a day.
+    # It is not a duration in days and must not be converted into one.
+    delivery_period_end = _delivery_period_end_date(deterministic_text)
+    if delivery_period_end:
+        period_end_date, period_evidence = delivery_period_end
+        _set(
+            fields,
+            meta,
+            "deliveryDate",
+            period_end_date,
+            "Документы / конечная дата периода поставки",
+            "high",
+            period_evidence,
+        )
+        if delivery_type != "by_requests":
+            delivery_type = "single_date"
+            delivery_evidence = period_evidence
+            _set(
+                fields,
+                meta,
+                "deliveryType",
+                delivery_type,
+                "Документы / конечная дата периода поставки",
+                "high",
+                period_evidence,
+            )
+            fields.pop("deliveryDays", None)
+            meta.pop("deliveryDays", None)
+
     # For deliveries by requests/batches, a term such as "within N days after
     # a request" belongs to the batch column, not to the general delivery term.
     if delivery_type == "by_requests":
@@ -1416,6 +1511,33 @@ def validate_fields(
         fields.pop("deliveryDays", None)
         meta.pop("deliveryDays", None)
 
+    # The card needs a calendar endpoint for a one-time delivery within a
+    # stated term.  Contract date is deterministically calculated above, so
+    # this result is reproducible and remains traceable in field metadata.
+    if delivery_type == "during_period":
+        calculated_delivery_date = _calculated_delivery_date(
+            fields.get("contractDate"), fields.get("deliveryDays")
+        )
+        if calculated_delivery_date:
+            _set(
+                fields,
+                meta,
+                "deliveryDate",
+                calculated_delivery_date,
+                "Расчёт / дата заключения договора + срок поставки",
+                "high",
+                f"{fields['contractDate']} + {fields['deliveryDays']} календарных дней",
+            )
+
+    # "Рабочие дни" alone is merely the unit of a term, not a delivery
+    # condition, so it should not be shown as a note to the employee.
+    if _is_weak_delivery_note(fields.get("deliveryNote")):
+        fields.pop("deliveryNote", None)
+        meta.pop("deliveryNote", None)
+        warnings.append(
+            "Примечание к поставке очищено: указан только тип дней без срока или условия."
+        )
+
     lot_text = f"{fields.get('lotDivisible', '')} {meta.get('lotDivisible', {}).get('evidence', '')}"
     direct_lot = re.search(r"лот\s+неделим|делени[ея]\s+лота\s+не\s+допуска|лот\s+делим|подач[а-я]+\s+на\s+част[ьи]\s+лота", lot_text, re.I)
     trusted_lot_column = (
@@ -1438,28 +1560,13 @@ def validate_fields(
             "В документах нет подтверждения делимости лота",
         )
 
-    for key in ("dateCreated", "submissionDeadlineDate", "resultDate", "contractDate", "deliveryDate", "tenderSubmittedDate", "tenderWonDate"):
+    for key in ("dateCreated", "submissionDeadlineDate", "resultDate", "contractDate", "deliveryDate", "tenderSubmittedDate"):
         if fields.get(key):
             fields[key] = _normalize_date(fields[key])
     if fields.get("submissionDeadlineTime"):
         match = re.search(r"(\d{1,2})[:.](\d{2})", str(fields["submissionDeadlineTime"]))
         if match:
             fields["submissionDeadlineTime"] = f"{match.group(1).zfill(2)}:{match.group(2)}"
-    for key, length in (("counterpartyInn", (10, 12)), ("counterpartyKpp", (9,))):
-        if fields.get(key):
-            digits = re.sub(r"\D", "", str(fields[key]))
-            fields[key] = digits
-            if len(digits) not in length:
-                warnings.append(f"{key} выглядит некорректно: {digits}")
-                meta.setdefault(key, {})["confidence"] = "low"
-
     fields["toCode"] = job.to_code
     meta["toCode"] = {"source": "Seldon filters / Код ТО", "confidence": "high", "evidence": f"Код ТО: {job.to_code}"}
-    fields["legalEntity"] = None
-    fields["counterparty"] = fields.get("counterpartyName")
-    fields["inn"] = fields.get("counterpartyInn")
-    fields["kpp"] = fields.get("counterpartyKpp")
-    meta["counterparty"] = meta.get("counterpartyName")
-    meta["inn"] = meta.get("counterpartyInn")
-    meta["kpp"] = meta.get("counterpartyKpp")
     return fields, meta, deduplicate_strings(warnings)

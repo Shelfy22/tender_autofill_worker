@@ -71,7 +71,7 @@ def test_run_observer_persists_stage_timeline_and_completion() -> None:
     observer.stage_finished("LLM fields", duration_seconds=1.25)
     observer.finish_completed(
         {
-            "fields": {"tenderStatus": "Согласовано КСОТП"},
+            "fields": {"tenderStatus": "Согласовано ИИ"},
             "warnings": ["warning"],
             "decision": {"decision": "approve"},
             "productCheck": {"coverage": 75, "total": 4, "supplied": 3},
