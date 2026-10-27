@@ -11,11 +11,11 @@ from app.services.normalization import deduplicate_strings
 
 
 ALLOWED_FIELDS = {
-    "dateCreated", "submissionDeadlineDate", "submissionDeadlineTime", "tenderUrlSource",
+    "dateCreated",
     "stateDefenseOrder", "tenderStatus", "tenderStatusNote", "tenderStatusReason",
-    "tenderGroup", "initialPrice", "finalPrice", "resultDate", "contractDate", "deliveryType",
+    "tenderGroup", "resultDate", "contractDate", "deliveryType",
     "deliveryBatchDays", "deliveryDays", "deliveryDate", "paymentDelayDays", "lotDivisible",
-    "deliveryNote", "customerContactPerson", "tenderSubmittedDate", "warrantySecurity",
+    "deliveryNote", "customerContactPerson", "tenderSubmittedDate", "contractSecurity", "warrantySecurity",
     "warrantyMonths", "nationalRegime", "specialAccount",
 }
 
@@ -166,6 +166,20 @@ _GOZ_DIRECT_PATTERN = re.compile(
     r"(?:\b\u0433\u043e\u0437\b|\u0433\u043e\u0441\u043e\u0431\u043e\u0440\u043e\u043d\u0437\u0430\u043a\u0430\u0437|"
     r"\u0433\u043e\u0441\u0443\u0434\u0430\u0440\u0441\u0442\u0432\u0435\u043d\u043d\w*\s+\u043e\u0431\u043e\u0440\u043e\u043d\u043d\w*\s+\u0437\u0430\u043a\u0430\u0437|"
     r"\b275\s*[-\u2011\u2013\u2014]?\s*\u0444\u0437\b)",
+    re.IGNORECASE,
+)
+_GOZ_275_FZ_PATTERN = re.compile(
+    r"\b275\s*[-\u2011\u2013\u2014]?\s*\u0444\u0437\b",
+    re.IGNORECASE,
+)
+_GOZ_NATIONAL_REGIME_TEMPLATE_PATTERN = re.compile(
+    r"(?:"
+    r"(?:(?:\u043f\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\w*|\u043f\u043f)"
+    r"[^.\n]{0,100}?\u2116?\s*1875)"
+    r"|(?:\u043f\u0435\u0440\u0435\u0447\u043d\w*\s+\u0441\u043e\u0433\u043b\u0430\u0441\u043d\u043e\s+\u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\w*\s+\u2116?\s*1\s+(?:\u043a\s+)?\u043f\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\w*)"
+    r"|(?:\u0437\u0430\u043a\u0443\u043f\u043e\u043a\s+\u0432\s+\u0440\u0430\u043c\u043a\u0430\u0445\s+\u0433\u043e\u0441\u0443\u0434\u0430\u0440\u0441\u0442\u0432\u0435\u043d\u043d\w*\s+\u043e\u0431\u043e\u0440\u043e\u043d\u043d\w*\s+\u0437\u0430\u043a\u0430\u0437\w*"
+    r"\s+\u0434\u043b\u044f\s+\u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\w*\s+\u043c\u0435\u0440\u043e\u043f\u0440\u0438\u044f\u0442\u0438\w*\s+\u0433\u043e\u0441\u0443\u0434\u0430\u0440\u0441\u0442\u0432\u0435\u043d\u043d\w*\s+\u043f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\w*)"
+    r")",
     re.IGNORECASE,
 )
 _SPECIAL_ACCOUNT_TERM_PATTERN = re.compile(
@@ -605,9 +619,30 @@ def _is_generic_national_regime_list(evidence: Any) -> bool:
     )
 
 
+def _is_national_regime_goz_template(text: str, match: re.Match[str]) -> bool:
+    """Exclude the PP 1875 boilerplate describing the regulation's scope."""
+    sentence_start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start()))
+    sentence_end_candidates = [
+        position
+        for position in (text.find(".", match.end()), text.find("\n", match.end()))
+        if position >= 0
+    ]
+    sentence_end = min(sentence_end_candidates) if sentence_end_candidates else len(text)
+    sentence = text[sentence_start + 1:sentence_end]
+    return bool(_GOZ_NATIONAL_REGIME_TEMPLATE_PATTERN.search(sentence))
+
+
 def _direct_goz_evidence(text: str) -> str:
-    match = _GOZ_DIRECT_PATTERN.search(text or "")
-    return match.group(0) if match is not None else ""
+    normalized = str(text or "")
+    for match in _GOZ_DIRECT_PATTERN.finditer(normalized):
+        # An explicit reference to the GOZ law stays sufficient evidence. Other
+        # GOZ wording may be merely the PP 1875 national-regime boilerplate.
+        if _GOZ_275_FZ_PATTERN.fullmatch(match.group(0)):
+            return match.group(0)
+        if _is_national_regime_goz_template(normalized, match):
+            continue
+        return match.group(0)
+    return ""
 
 
 def _has_required_special_account(text: str) -> bool:
@@ -1147,10 +1182,22 @@ def validate_fields(
         else:
             fields["nationalRegime"] = national_regime
 
-    # The remaining warranty-security column must contain an explicitly stated
-    # amount or percentage. Application and contract security are no longer
-    # part of the report and are deliberately not extracted.
-    for key in ("warrantySecurity",):
+    # Only the contract and warranty security columns remain in the report.
+    # Accept them only when a document states a numeric amount or percentage.
+    # Application security is deliberately excluded.
+    explicit_security = _explicit_security_fields(deterministic_text)
+    for key in ("contractSecurity", "warrantySecurity"):
+        if not fields.get(key) and key in explicit_security:
+            value, evidence = explicit_security[key]
+            _set(
+                fields,
+                meta,
+                key,
+                value,
+                "Документы / прямое условие обеспечения",
+                "high",
+                evidence,
+            )
         value = str(fields.get(key) or "").strip()
         if value and (
             _NON_NUMERIC_SECURITY_VALUE_PATTERN.search(value)
@@ -1159,10 +1206,12 @@ def validate_fields(
             fields.pop(key, None)
             meta.pop(key, None)
 
-    _set(fields, meta, "tenderUrlSource", fields.get("tenderUrlSource") or job.tender_url, "Input tenderUrl", "high", job.tender_url or "")
+    # These values arrive in the Daily/Seldon row. They must never be chosen
+    # by the document LLM, though the deadline and initial price remain needed
+    # internally for deterministic checks.
+    _set(fields, meta, "tenderUrlSource", job.tender_url, "Input tenderUrl", "high", job.tender_url or "")
     _set(fields, meta, "dateCreated", fields.get("dateCreated") or date.today().isoformat(), "Workflow", "medium", "Дата запуска workflow")
     _set(fields, meta, "tenderStatus", fields.get("tenderStatus") or "Загружен Seldon", "Default", "medium", "Исходный статус")
-    _set(fields, meta, "finalPrice", fields.get("finalPrice") or "0", "Default", "low", "Конечная цена не найдена")
 
     purchase = job.seldon_purchase
     # The result date is a document fact. The contract date is derived only
@@ -1215,10 +1264,29 @@ def validate_fields(
             "high",
             deadline_evidence,
         )
-    if not fields.get("initialPrice"):
-        value = purchase.get("purchasePrice") or purchase.get("initialPrice") or purchase.get("price")
-        if value is not None and str(value).strip() != "":
-            _set(fields, meta, "initialPrice", value, "Seldon structured data", "high", str(value))
+    initial_price = next(
+        (
+            value
+            for value in (
+                purchase.get("purchasePrice"),
+                purchase.get("initialPrice"),
+                purchase.get("price"),
+                job.report_fields.get("Начальная цена"),
+            )
+            if value is not None and str(value).strip() != ""
+        ),
+        None,
+    )
+    if initial_price is not None:
+        _set(
+            fields,
+            meta,
+            "initialPrice",
+            initial_price,
+            "Seldon structured data",
+            "high",
+            str(initial_price),
+        )
 
     report_lot_divisible = job.report_fields.get("Лот делимый")
     if report_lot_divisible is None:

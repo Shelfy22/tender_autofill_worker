@@ -59,16 +59,18 @@ def test_result_omits_retired_report_fields_and_headers() -> None:
         },
     )
     omitted_fields = {
-        "federalLaw", "applicationSecurity", "contractSecurity", "counterpartyCode",
+        "federalLaw", "applicationSecurity", "dateCreated", "tenderGroup", "counterpartyCode",
         "counterpartyName", "counterpartyInn", "counterpartyKpp", "counterpartyCkg",
         "counterpartyPotential", "deal", "contract", "counterpartyNote", "op",
         "legalEntity", "tenderWonDate",
+        "submissionDeadlineDate", "submissionDeadlineTime", "tenderUrlSource",
+        "initialPrice", "finalPrice",
     }
 
     result = build_result_json(
         job,
-        fields={key: "obsolete" for key in omitted_fields},
-        meta={key: {"source": "test"} for key in omitted_fields},
+        fields={**{key: "obsolete" for key in omitted_fields}, "contractSecurity": "5%"},
+        meta={**{key: {"source": "test"} for key in omitted_fields}, "contractSecurity": {"source": "contract"}},
         product_check=None,
         decision=None,
         warnings=[],
@@ -78,6 +80,7 @@ def test_result_omits_retired_report_fields_and_headers() -> None:
 
     assert omitted_fields.isdisjoint(result["fields"])
     assert omitted_fields.isdisjoint(result["meta"])
+    assert result["fields"]["contractSecurity"] == "5%"
     assert set(job.report_fields).isdisjoint(result["reportFields"])
 
 

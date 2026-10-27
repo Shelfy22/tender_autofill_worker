@@ -8,11 +8,11 @@ from app.models import JobClaim, NormalizedJob
 
 REPORT_HEADERS: dict[int, list[str]] = {
     1: [
-        "SeldonID", "0", "Осталось дней", "Статус закупки", "Электронная площадка",
-        "Способ закупки", "Наименование", "Организатор", "Начальная цена", "Конечная цена",
+        "SeldonID", "0", "Степень завершения", "Осталось дней", "Статус закупки", "Торговая площадка",
+        "Способ закупки", "Наименование", "Название заказчика", "Начальная цена", "Конечная цена",
         "Валюта", "Дата начала приёма заявок", "Дата окончания приёма заявок", "Дата изменения",
         "№ извещения", "Ссылка на тендер", "Регион заказчика/организатора",
-        "ИНН заказчика/организатора", "Дата проведения аукциона", "Размер обеспечения заявки",
+        "ИНН заказчика", "Дата проведения аукциона", "Размер обеспечения заявки",
         "Код ТО", "Код ФЗ",
     ],
     2: [
@@ -29,6 +29,15 @@ REPORT_HEADERS: dict[int, list[str]] = {
         "Валюта", "Дата начала приёма заявок", "Дата окончания приёма заявок", "Дата изменения",
         "Ссылка на тендер", "Регион заказчика/организатора", "ИНН заказчика", "Код ТО", "Код ФЗ",
     ],
+}
+
+
+# Report 223 had older column names in Daily.  Accept them on input during the
+# rollout, but emit only the current headers in ``reportFields``.
+REPORT_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
+    "Торговая площадка": ("Электронная площадка",),
+    "Название заказчика": ("Организатор",),
+    "ИНН заказчика": ("ИНН заказчика/организатора",),
 }
 
 
@@ -147,6 +156,18 @@ def normalize_job_payload(claim: JobClaim) -> NormalizedJob:
     supplied_fields = payload.get("reportFields")
     if isinstance(supplied_fields, dict):
         report_fields.update(supplied_fields)
+    for current_header, legacy_headers in REPORT_HEADER_ALIASES.items():
+        current_value = report_fields.get(current_header)
+        if current_value is None or str(current_value).strip() == "":
+            for legacy_header in legacy_headers:
+                legacy_value = first_defined(
+                    report_fields.get(legacy_header), payload.get(legacy_header)
+                )
+                if legacy_value is not None:
+                    report_fields[current_header] = legacy_value
+                    break
+        for legacy_header in legacy_headers:
+            report_fields.pop(legacy_header, None)
     for header in REPORT_HEADERS.get(report_id, []):
         report_fields.setdefault(header, payload.get(header, ""))
 

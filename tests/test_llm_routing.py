@@ -84,10 +84,14 @@ def test_structured_output_uses_pydantic_json_schema() -> None:
     assert set(schema["required"]) == {"fields", "warnings"}
     fields_schema = schema["properties"]["fields"]
     assert fields_schema["additionalProperties"] is False
-    assert "dateCreated" in fields_schema["required"]
-    assert fields_schema["properties"]["initialPrice"] == {
+    assert "contractSecurity" in fields_schema["required"]
+    assert fields_schema["properties"]["contractSecurity"] == {
         "$ref": "#/$defs/FieldValue"
     }
+    assert {
+        "submissionDeadlineDate", "submissionDeadlineTime", "tenderUrlSource",
+        "initialPrice", "finalPrice",
+    }.isdisjoint(fields_schema["properties"])
 
 
 def test_json_object_compatibility_mode_can_be_selected() -> None:

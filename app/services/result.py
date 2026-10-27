@@ -10,7 +10,15 @@ REPORT_OMITTED_FIELD_KEYS = frozenset(
     {
         "federalLaw",
         "applicationSecurity",
-        "contractSecurity",
+        # Source-only Daily/Seldon columns; they must not be duplicated by AI.
+        "submissionDeadlineDate",
+        "submissionDeadlineTime",
+        "tenderUrlSource",
+        "initialPrice",
+        "finalPrice",
+        # Retained internally for calculations but not emitted to Daily.
+        "dateCreated",
+        "tenderGroup",
         "counterpartyCode",
         "counterpartyName",
         "counterpartyInn",
@@ -32,6 +40,8 @@ REPORT_OMITTED_FIELD_KEYS = frozenset(
 
 REPORT_OMITTED_HEADERS = frozenset(
     {
+        "Дата заведения",
+        "Тендерная группа",
         "Обеспечение заявки",
         "Обеспечение контракта",
         "Обеспечение исполнения контракта",

@@ -241,12 +241,12 @@ def _response_schema(schema: type[T], *, strict: bool) -> dict[str, Any]:
 
 
 FIELD_NAMES = [
-    "dateCreated", "submissionDeadlineDate", "submissionDeadlineTime", "tenderUrlSource",
+    "dateCreated",
     "stateDefenseOrder", "tenderStatus", "tenderStatusNote", "tenderStatusReason",
-    "tenderGroup", "initialPrice", "finalPrice", "resultDate", "contractDate", "deliveryType",
+    "tenderGroup", "resultDate", "contractDate", "deliveryType",
     "deliveryBatchDays", "deliveryDays", "deliveryDate", "paymentDelayDays", "lotDivisible",
     "deliveryNote", "customerContactPerson", "tenderSubmittedDate",
-    "warrantySecurity", "warrantyMonths",
+    "contractSecurity", "warrantySecurity", "warrantyMonths",
     "nationalRegime", "specialAccount",
 ]
 
@@ -260,9 +260,15 @@ tenderStatus на извлечении по умолчанию «Загруже�
 stateDefenseOrder=yes только при прямом ГОЗ / «государственном оборонном заказе» / 275-ФЗ.
 Казначейское сопровождение, субсидия, идентификатор государственного контракта (соглашения),
 счёт целевых средств или отдельный счёт без связи с ГОЗ/275-ФЗ не являются признаками ГОЗ.
+Типовой текст о национальном режиме по ПП №1875 («а также закупок в рамках государственного
+оборонного заказа…») описывает сферу действия постановления, а не эту закупку: для него ставь no.
 specialAccount=yes только при прямом требовании специального банковского счёта участника именно
 для обеспечения заявки. Счёт поставщика для целевых средств, казначейский или отдельный счёт
 по договору не является спецсчётом; иначе no.
+contractSecurity: return only an explicitly stated amount or percentage for
+security of performance of the contract/agreement; otherwise null.
+warrantySecurity: return only an explicitly stated amount or percentage for
+security of warranty obligations; otherwise null.
 lotDivisible только при прямой формулировке делимости/неделимости.
 deliveryDate и deliveryDays заполняй только по прямому сроку поставки/доставки товара:
 «срок поставки», «поставить до/не позднее», «доставка до», «в течение N дней».
@@ -1086,11 +1092,12 @@ Candidates:
    есть, brand/article/model, lotNumber и positionNumber, чтобы Consolidator мог сопоставить их.
 3. reasonHits — только реально подтверждённые недетерминированные причины отказа. Не возвращай false для остальных причин.
 4. fieldCandidates — найденные поля карточки тендера, если они явно есть в этом unit.
-Не ищи и не возвращай федеральный закон, обеспечение заявки/контракта, данные
+Не ищи и не возвращай федеральный закон, обеспечение заявки, данные
 контрагента, ЦКГ, потенциал, сделку, договор, ОП, юридическое лицо или дату
 выигрыша тендера: эти поля исключены из отчёта.
 
 Для fieldCandidates обязательно проверь условия закупки, договор и ТЗ на точные ключи:
+- contractSecurity — размер обеспечения исполнения контракта или договора: возвращай только прямо указанные сумму или процент;
 - warrantySecurity — обеспечение гарантийных обязательств;
 - warrantyMonths — минимальный гарантийный срок на товар в целых месяцах из прямого
   условия или таблицы: 12 месяцев = 12, 5 лет = 60. Не путай его со сроком ремонта,
@@ -1098,6 +1105,8 @@ Candidates:
 - stateDefenseOrder — верни только `yes` при прямом ГОЗ, «государственном оборонном
   заказе» или 275-ФЗ. Казначейское сопровождение, субсидия, идентификатор госконтракта
   (соглашения), счёт целевых средств и отдельный счёт без связи с ГОЗ/275-ФЗ не являются
+  доказательством. Упоминание ГОЗ в типовом тексте национального режима по ПП №1875
+  (в частности «а также закупок в рамках государственного оборонного заказа…») не является
   доказательством; не возвращай `no` из-за отсутствия фразы в unit;
 - specialAccount — верни только `yes` при прямом требовании специального банковского
   счёта участника для обеспечения заявки. Казначейский/целевой/отдельный счёт по договору

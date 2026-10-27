@@ -53,7 +53,7 @@ def test_submission_deadline_is_taken_from_seldon_not_document_llm() -> None:
         report_id=1,
         seldon_id="1",
         report_fields={"Дата окончания приёма заявок": "01.08.2026 12:30:00"},
-        seldon_purchase={"endDate": "2026-08-07T09:00:00"},
+        seldon_purchase={"endDate": "2026-08-07T09:00:00", "price": "900 000"},
     )
     extracted = ExtractedFieldsResponse(
         fields={
@@ -62,7 +62,13 @@ def test_submission_deadline_is_taken_from_seldon_not_document_llm() -> None:
                 confidence="low",
                 source="Документ.docx",
                 evidence="Срок подачи до 01.08.2026",
-            )
+            ),
+            "initialPrice": FieldValue(
+                value="800 000",
+                confidence="low",
+                source="Документ.docx",
+                evidence="Цена 800 000",
+            ),
         }
     )
 
@@ -73,6 +79,8 @@ def test_submission_deadline_is_taken_from_seldon_not_document_llm() -> None:
     # CSV formatter adds seconds in the combined deadline column.
     assert fields["submissionDeadlineTime"] == "09:00"
     assert meta["submissionDeadlineDate"]["source"] == "Seldon/Daily / дата окончания подачи"
+    assert fields["initialPrice"] == "900 000"
+    assert meta["initialPrice"]["source"] == "Seldon structured data"
 
 
 def test_batch_delivery_does_not_invent_generic_delivery_note() -> None:
@@ -282,22 +290,21 @@ def test_delivery_type_is_detected_from_document_request_rule() -> None:
     assert fields["deliveryType"] == "by_requests"
 
 
-def test_removed_application_and_contract_security_are_not_extracted() -> None:
+def test_contract_and_warranty_security_are_extracted_but_application_is_not() -> None:
     text = """
-    Обеспечение заявки: не требуется.
-    Размер обеспечения исполнения договора составляет 5% цены договора.
-    Обеспечение гарантийных обязательств: 1%.
-    Гарантийный срок составляет 24 месяца.
+    \u041e\u0431\u0435\u0441\u043f\u0435\u0447\u0435\u043d\u0438\u0435 \u0437\u0430\u044f\u0432\u043a\u0438: \u043d\u0435 \u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f.
+    \u0420\u0430\u0437\u043c\u0435\u0440 \u043e\u0431\u0435\u0441\u043f\u0435\u0447\u0435\u043d\u0438\u044f \u0438\u0441\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f \u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0430 \u0441\u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 5% \u0446\u0435\u043d\u044b \u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0430.
+    \u041e\u0431\u0435\u0441\u043f\u0435\u0447\u0435\u043d\u0438\u0435 \u0433\u0430\u0440\u0430\u043d\u0442\u0438\u0439\u043d\u044b\u0445 \u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u0441\u0442\u0432: 1%.
+    \u0413\u0430\u0440\u0430\u043d\u0442\u0438\u0439\u043d\u044b\u0439 \u0441\u0440\u043e\u043a \u0441\u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 24 \u043c\u0435\u0441\u044f\u0446\u0430.
     """
 
     fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
 
     assert "applicationSecurity" not in fields
-    assert "contractSecurity" not in fields
-    assert "warrantySecurity" not in fields
-    assert "warrantyMonths" not in fields
+    assert fields["contractSecurity"].startswith("5%")
+    assert fields["warrantySecurity"].startswith("1%")
     assert "applicationSecurity" not in meta
-    assert "contractSecurity" not in meta
+    assert meta["contractSecurity"]["confidence"] == "high"
 
 
 def test_contract_validity_date_does_not_fill_delivery_date() -> None:
@@ -939,6 +946,32 @@ def test_direct_goz_and_bid_security_special_account_are_preserved() -> None:
     assert fields["specialAccount"] == "yes"
     assert meta["stateDefenseOrder"]["confidence"] == "high"
     assert meta["specialAccount"]["confidence"] == "high"
+
+
+def test_pp_1875_national_regime_boilerplate_does_not_create_goz() -> None:
+    text = (
+        "Требования применяются к товарам по перечню согласно приложению № 1 "
+        "Постановления Правительства РФ от 23.12.2024 № 1875, а также закупок "
+        "в рамках государственного оборонного заказа для выполнения мероприятий "
+        "государственных программ Российской Федерации."
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["stateDefenseOrder"] == "no"
+    assert meta["stateDefenseOrder"]["evidence"] == "Нет прямого упоминания ГОЗ или 275-ФЗ"
+
+
+def test_real_goz_after_pp_1875_boilerplate_is_not_lost() -> None:
+    text = (
+        "По ПП № 1875 применяются ограничения, в том числе к закупкам в рамках "
+        "государственного оборонного заказа для выполнения мероприятий государственных программ. "
+        "Поставка по настоящему договору выполняется в рамках ГОЗ."
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), None, text, [])
+
+    assert fields["stateDefenseOrder"] == "yes"
 
 
 def test_batch_delivery_without_stated_term_remains_blank() -> None:
