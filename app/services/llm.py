@@ -1478,9 +1478,15 @@ RECONCILIATION FACTS:
 - reconciliationFacts are calculated from source-table coordinates before this audit. They are not LLM guesses.
 - A size_breakdown_equals_total fact means that the listed detail rows are from one table, each has an explicit
   size/height value, and their quantity sum exactly equals the canonical total row.
+- An allocation_breakdown_equals_total fact means that NMC/price rows split the one technical-specification
+  product among филиалы/addresses, and their sum equals the TЗ total. Retain only the TЗ product.
+- An allocation_breakdown_conflicts_with_total fact means the same safe product identity was found, but the
+  allocation sum differs from the TЗ total. Retain the TЗ product, do not recreate allocation rows, and return
+  conflict_needs_review so that the discrepancy is visible to a person.
 - For every supplied reconciliation fact, return exactly one reconciliationDecisions entry:
-  merge_to_total when the fact supports retaining only the total; conflict_needs_review only if the supplied
-  source data itself makes the relation unsafe. Do not use keep or remove_as_duplicate for such a fact.
+  merge_to_total for either *_equals_total fact; conflict_needs_review for
+  allocation_breakdown_conflicts_with_total or when the supplied source data itself makes the relation unsafe.
+  Do not use keep or remove_as_duplicate for such a fact.
 - The detailed rows may already be collapsed before this audit. Do not recreate them as new purchase items.
 
 Проведи финальный аудит кандидатов на товарные позиции до поиска в каталоге.

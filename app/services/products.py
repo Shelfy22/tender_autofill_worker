@@ -2151,9 +2151,12 @@ def _source_reference_key(reference: ProductSourceReference | None) -> tuple[str
 
 
 def _all_source_references(position: TenderPosition) -> list[ProductSourceReference]:
-    references = list(position.sourceReferences)
-    if position.sourceReference is not None:
-        references.append(position.sourceReference)
+    # Keep the canonical row first. Source references are bounded, therefore
+    # appending it after a long list of allocation rows could hide the primary
+    # TЗ/specification evidence.
+    references = (
+        [position.sourceReference] if position.sourceReference is not None else []
+    ) + list(position.sourceReferences)
     result: list[ProductSourceReference] = []
     seen: set[tuple[str, str, int | None, str]] = set()
     for reference in references:
@@ -2258,7 +2261,10 @@ def _merge_replicated_position_details(
         seen_references.add(key)
         deduplicated_references.append(reference)
     if deduplicated_references != canonical.sourceReferences:
-        updates["sourceReferences"] = deduplicated_references
+        # TenderPosition deliberately bounds this diagnostic list. A schedule
+        # can contain hundreds of allocation rows, but the canonical source
+        # and the first supporting rows are enough to investigate it.
+        updates["sourceReferences"] = deduplicated_references[:50]
 
     # Price is authoritative in an NMC/price-justification table, regardless
     # of which source donated the most concrete product title.
@@ -2274,6 +2280,152 @@ def _merge_replicated_position_details(
             if not _missing(value):
                 updates[field] = value
     return canonical.model_copy(update=updates) if updates else canonical
+
+
+def _same_master_and_allocation_product(
+    master: TenderPosition,
+    allocation: TenderPosition,
+) -> bool:
+    """Confirm a safe identity match across a TЗ master and NMC allocation.
+
+    Quantities intentionally do *not* participate: an NMC can split the total
+    from the technical specification between branches or delivery addresses.
+    Exact normalized title (or model/article) and compatible units are still
+    required, so similarly named but different goods are not collapsed.
+    """
+    if _position_unit_key(master.unit) != _position_unit_key(allocation.unit):
+        return False
+    master_lot = _word_table_key(master.lotNumber)
+    allocation_lot = _word_table_key(allocation.lotNumber)
+    if master_lot and allocation_lot and master_lot != allocation_lot:
+        return False
+
+    master_article = _word_table_key(master.article)
+    allocation_article = _word_table_key(allocation.article)
+    if master_article and master_article == allocation_article:
+        return True
+    master_model = _word_table_key(master.model)
+    allocation_model = _word_table_key(allocation.model)
+    if master_model and master_model == allocation_model:
+        return True
+
+    master_identity = _cross_table_product_identity(master)
+    allocation_identity = _cross_table_product_identity(allocation)
+    # One-word generic labels (for example, just "кабель") are too weak for
+    # an automatic merge unless model/article confirmed the match above.
+    return bool(
+        master_identity
+        and master_identity == allocation_identity
+        and len(master_identity.split()) >= 2
+    )
+
+
+def _merge_branch_allocations_into_technical_masters(
+    positions: list[TenderPosition],
+    skipped_indexes: set[int],
+) -> int:
+    """Collapse NMC branch/address allocations into their TЗ master row.
+
+    A price justification often repeats one purchased product for each
+    филиал/адрес. These rows are logistics allocations, not independent
+    catalog items. The rule is intentionally narrow: there must be exactly
+    one matching technical-specification position and at least two matching
+    NMC rows. If the allocation sum differs from the TЗ total, the TЗ total
+    remains authoritative and a reconciliation conflict is attached for the
+    product auditor/debug output.
+    """
+    technical_indexes = [
+        index
+        for index, position in enumerate(positions)
+        if index not in skipped_indexes
+        and _position_source_role(position) == TECHNICAL_ROLE
+        and position.quantity is not None
+    ]
+    allocations_by_master: dict[int, list[int]] = {}
+    for allocation_index, allocation in enumerate(positions):
+        if (
+            allocation_index in skipped_indexes
+            or _position_source_role(allocation) != PRICE_ROLE
+            or allocation.quantity is None
+        ):
+            continue
+        matches = [
+            master_index
+            for master_index in technical_indexes
+            if _source_table_scope(positions[master_index])
+            != _source_table_scope(allocation)
+            and _same_master_and_allocation_product(
+                positions[master_index], allocation
+            )
+        ]
+        if len(matches) == 1:
+            allocations_by_master.setdefault(matches[0], []).append(allocation_index)
+
+    merged_count = 0
+    for master_index, allocation_indexes in allocations_by_master.items():
+        # One NMC row may merely be a document copy. Existing cross-document
+        # logic handles that case. Several rows are required before treating
+        # them as a филиал/адрес breakdown.
+        if len(allocation_indexes) < 2:
+            continue
+        master = positions[master_index]
+        allocation_rows = [positions[index] for index in allocation_indexes]
+        allocation_total = sum(float(item.quantity or 0) for item in allocation_rows)
+        for allocation_index in allocation_indexes:
+            master = _merge_replicated_position_details(
+                master,
+                positions[allocation_index],
+            )
+            skipped_indexes.add(allocation_index)
+            merged_count += 1
+
+        reference = master.sourceReference
+        if reference is not None:
+            fact_type = (
+                "allocation_breakdown_equals_total"
+                if abs(float(master.quantity or 0) - allocation_total) < 1e-9
+                else "allocation_breakdown_conflicts_with_total"
+            )
+            fact = ProductReconciliationFact(
+                factId=(
+                    "allocation-breakdown:"
+                    f"{_source_table_scope(master)[0]}:"
+                    f"{_source_table_scope(master)[1]}:"
+                    f"{reference.row or master_index}"
+                ),
+                type=fact_type,
+                fileName=reference.fileName,
+                table=reference.sheet or reference.table,
+                sectionRole=reference.sectionRole,
+                product=master.product,
+                unit=master.unit,
+                totalQuantity=float(master.quantity or 0),
+                detailQuantitySum=allocation_total,
+                detailRows=[
+                    {
+                        "fileName": item.sourceReference.fileName
+                        if item.sourceReference is not None
+                        else "",
+                        "table": (
+                            item.sourceReference.sheet or item.sourceReference.table
+                            if item.sourceReference is not None
+                            else ""
+                        ),
+                        "row": item.sourceReference.row
+                        if item.sourceReference is not None
+                        else None,
+                        "quantity": item.quantity,
+                        "sourceCells": item.sourceCells,
+                    }
+                    for item in allocation_rows
+                ],
+            )
+            facts = list(master.reconciliationFacts)
+            if not any(existing.factId == fact.factId for existing in facts):
+                facts.append(fact)
+                master = master.model_copy(update={"reconciliationFacts": facts})
+        positions[master_index] = master
+    return merged_count
 
 
 def _merge_technical_subset_into_price_position(
@@ -2656,6 +2808,16 @@ def _deduplicate_cross_document_positions(
         warnings.append(
             "Merged replicated table copies after aligned row order, quantity, "
             "unit, and stable product identities were confirmed."
+        )
+
+    branch_allocation_count = _merge_branch_allocations_into_technical_masters(
+        positions,
+        skipped_indexes,
+    )
+    if branch_allocation_count:
+        warnings.append(
+            "Collapsed NMC branch/address allocation rows into their matching "
+            "technical-specification product totals."
         )
 
     partial_copy_count = _merge_partial_cross_table_copies(positions, skipped_indexes)

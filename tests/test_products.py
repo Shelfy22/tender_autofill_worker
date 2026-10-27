@@ -884,6 +884,123 @@ def test_aligned_table_copies_across_documents_merge_into_one_canonical_position
     assert any("replicated table copies" in warning for warning in warnings)
 
 
+def test_branch_allocations_are_collapsed_into_a_technical_master() -> None:
+    technical = TenderPosition(
+        product="Pump X100",
+        quantity=10,
+        unit="pcs",
+        sourceReference={
+            "fileName": "technical-specification.docx",
+            "table": "Items",
+            "row": 2,
+            "sectionRole": "technical_specification",
+        },
+    )
+    allocations = [
+        TenderPosition(
+            product="Pump X100",
+            quantity=quantity,
+            unit="pcs",
+            sourceReference={
+                "fileName": "nmcd.xlsx",
+                "sheet": "Allocation by branch",
+                "row": row,
+                "sectionRole": "price_justification",
+            },
+            sourceCells={"Product": "Pump X100", "Address": address},
+        )
+        for row, quantity, address in ((2, 4, "Branch A"), (3, 6, "Branch B"))
+    ]
+    unrelated_price_row = TenderPosition(
+        product="Valve V10",
+        quantity=1,
+        unit="pcs",
+        sourceReference={
+            "fileName": "nmcd.xlsx",
+            "sheet": "Allocation by branch",
+            "row": 4,
+            "sectionRole": "price_justification",
+        },
+    )
+
+    merged, warnings = merge_positions(
+        [technical, *allocations, unrelated_price_row],
+        None,
+    )
+
+    assert [(item.product, item.quantity) for item in merged] == [
+        ("Pump X100", 10),
+        ("Valve V10", 1),
+    ]
+    assert merged[0].sourceReference is not None
+    assert merged[0].sourceReference.sectionRole == "technical_specification"
+    assert {reference.row for reference in merged[0].sourceReferences} == {2, 3}
+    assert merged[0].reconciliationFacts[0].type == "allocation_breakdown_equals_total"
+    assert merged[0].reconciliationFacts[0].detailQuantitySum == 10
+    assert any("branch/address allocation" in warning for warning in warnings)
+
+
+def test_branch_allocation_quantity_conflict_keeps_technical_total_for_review() -> None:
+    technical = TenderPosition(
+        product="Pump X100",
+        quantity=10,
+        unit="pcs",
+        sourceReference={
+            "fileName": "technical-specification.docx",
+            "table": "Items",
+            "row": 2,
+            "sectionRole": "technical_specification",
+        },
+    )
+    allocations = [
+        TenderPosition(
+            product="Pump X100",
+            quantity=quantity,
+            unit="pcs",
+            sourceReference={
+                "fileName": "nmcd.xlsx",
+                "sheet": "Allocation by branch",
+                "row": row,
+                "sectionRole": "price_justification",
+            },
+        )
+        for row, quantity in ((2, 4), (3, 5))
+    ]
+
+    merged, _ = merge_positions([technical, *allocations], None)
+
+    assert len(merged) == 1
+    assert merged[0].quantity == 10
+    fact = merged[0].reconciliationFacts[0]
+    assert fact.type == "allocation_breakdown_conflicts_with_total"
+    assert fact.totalQuantity == 10
+    assert fact.detailQuantitySum == 9
+
+
+def test_repeated_price_rows_without_a_technical_master_are_not_collapsed() -> None:
+    price_rows = [
+        TenderPosition(
+            product="Pump X100",
+            quantity=quantity,
+            unit="pcs",
+            sourceReference={
+                "fileName": "nmcd.xlsx",
+                "sheet": "Allocation by branch",
+                "row": row,
+                "sectionRole": "price_justification",
+            },
+        )
+        for row, quantity in ((2, 4), (3, 6))
+    ]
+
+    merged, _ = merge_positions(price_rows, None)
+
+    assert [(item.product, item.quantity) for item in merged] == [
+        ("Pump X100", 4),
+        ("Pump X100", 6),
+    ]
+
+
 def test_technical_table_subset_keeps_all_nmcd_rows_canonical() -> None:
     nmcd_positions = [
         TenderPosition(

@@ -229,7 +229,11 @@ class ProductReconciliationFact(BaseModel):
     """
 
     factId: str
-    type: Literal["size_breakdown_equals_total"]
+    type: Literal[
+        "size_breakdown_equals_total",
+        "allocation_breakdown_equals_total",
+        "allocation_breakdown_conflicts_with_total",
+    ]
     confidence: Literal["high"] = "high"
     fileName: str = ""
     table: str = ""
