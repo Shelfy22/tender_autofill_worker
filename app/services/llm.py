@@ -313,6 +313,13 @@ Delivery classification rules (apply to deliveryType only):
 - Do NOT infer `by_requests` from "position-by-position delivery", a single
   batch, a repeated identical date for several addresses, or a warehouse work
   schedule.
+- A reference to a schedule is sufficient only when its table actually
+  allocates non-zero quantities across at least two different periods. A
+  blank form, one deadline, or "according to schedule" without the schedule
+  is not evidence of repeated delivery.
+- Ignore conditional project wording such as "if a specification provides for
+  requests/schedule" and any occurrence of "batch" in payment, acceptance,
+  warranty, notification, or penalty clauses.
 """.strip()
 
 

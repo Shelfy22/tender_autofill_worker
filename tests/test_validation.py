@@ -448,7 +448,7 @@ def test_payment_delay_converts_llm_value_when_text_is_fragmented() -> None:
     assert meta["paymentDelayDays"]["source"] == "LLM evidence / отсрочка переведена по правилу 1.4"
 
 
-def test_llm_payment_evidence_wins_over_regex_fallback() -> None:
+def test_document_payment_evidence_wins_over_unrelated_llm_term() -> None:
     extracted = ExtractedFieldsResponse(
         fields={
             "paymentDelayDays": FieldValue(
@@ -467,8 +467,8 @@ def test_llm_payment_evidence_wins_over_regex_fallback() -> None:
         [],
     )
 
-    assert fields["paymentDelayDays"] == 42
-    assert meta["paymentDelayDays"]["source"] == "LLM evidence / отсрочка переведена по правилу 1.4"
+    assert fields["paymentDelayDays"] == 10
+    assert meta["paymentDelayDays"]["source"].startswith("Документы /")
 
 
 def test_payment_delay_recognizes_payment_deadline_wording() -> None:
@@ -1020,7 +1020,7 @@ def test_conditional_unguaranteed_volume_by_written_request_is_batch_delivery() 
     assert "deliveryBatchDays" not in fields
 
 
-def test_delivery_schedule_overrides_single_delivery_period() -> None:
+def test_schedule_reference_without_allocations_does_not_override_single_delivery_period() -> None:
     extracted = ExtractedFieldsResponse(
         fields={
             "deliveryType": FieldValue(
@@ -1058,12 +1058,12 @@ def test_delivery_schedule_overrides_single_delivery_period() -> None:
 
     fields, meta, warnings = validate_fields(job_with_lot(""), extracted, text, [])
 
-    assert fields["deliveryType"] == "by_requests"
+    assert fields["deliveryType"] == "during_period"
     assert "deliveryBatchDays" not in fields
-    assert "deliveryDays" not in fields
+    assert fields["deliveryDays"] == 30
     assert fields["deliveryDate"] == "2027-12-31"
-    assert "\u0433\u0440\u0430\u0444\u0438\u043a" in meta["deliveryType"]["evidence"].casefold()
-    assert any("\u0438\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d" in warning for warning in warnings)
+    assert "30 calendar days" in meta["deliveryType"]["evidence"]
+    assert not any("\u0438\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d \u043d\u0430 \u00ab\u043f\u043e \u0437\u0430\u044f\u0432\u043a\u0430\u043c\u00bb" in warning for warning in warnings)
 
 
 def test_month_quantity_schedule_is_batch_delivery_without_request_word() -> None:

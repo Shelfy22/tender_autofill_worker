@@ -338,11 +338,22 @@ def _payment_delay_from_field(value: Any, evidence: Any) -> tuple[int, str] | No
         return None
     source_days = int(match.group(0))
     unit: str | None = None
-    for value_match in _PAYMENT_DELAY_VALUE_PATTERN.finditer(text):
+    evidence_terms = list(_PAYMENT_DELAY_VALUE_PATTERN.finditer(text))
+    for value_match in evidence_terms:
         lower, upper, candidate_unit = value_match.groups()
         if source_days in {int(lower), int(upper or lower)}:
             unit = candidate_unit
             break
+    if evidence_terms and unit is None:
+        # The model can return an already normalised calendar number (for
+        # example 84 for "60 working days").  The evidence remains the
+        # primary source: recover its raw term instead of applying x1.4 to
+        # the model's derived value a second time.
+        raw_terms = [
+            (max(int(item.group(1)), int(item.group(2) or item.group(1))), item.group(3))
+            for item in evidence_terms
+        ]
+        source_days, unit = max(raw_terms, key=lambda item: item[0])
     return _normalize_payment_days(source_days, unit), text[:500]
 
 
@@ -453,6 +464,8 @@ def _national_regime_from_text(text: str) -> tuple[str, str] | None:
 def _table_regime_value(value: Any) -> str | None:
     normalized = re.sub(r"\s+", " ", str(value or "").casefold().replace("ё", "е")).strip()
     if not normalized:
+        return None
+    if _NATIONAL_REGIME_NOT_APPLIED_PATTERN.search(normalized):
         return None
     if _NATIONAL_MINIMUM_SHARE_PATTERN.search(normalized):
         return "no"
@@ -619,6 +632,34 @@ def _is_generic_national_regime_list(evidence: Any) -> bool:
     )
 
 
+def _has_explicit_national_regime_evidence(evidence: Any) -> bool:
+    """Accept an LLM regime only when its evidence proves this procurement.
+
+    A mention of PP 1875, an application form, or a list of all measures is
+    not a tender-specific decision. Tables are resolved separately above;
+    this guard applies only to the residual LLM candidate.
+    """
+    text = re.sub(r"\s+", " ", str(evidence or "")).strip()
+    if not text or _is_generic_national_regime_list(text):
+        return False
+    if _NATIONAL_MINIMUM_SHARE_PATTERN.search(text):
+        return True
+    for _, pattern in _NATIONAL_REGIME_PATTERNS:
+        for match in pattern.finditer(text):
+            fragment = text[max(0, match.start() - 100):match.end() + 140]
+            if _NATIONAL_REGIME_NOT_APPLIED_PATTERN.search(fragment):
+                continue
+            if _NATIONAL_REGIME_APPLIED_PATTERN.search(fragment) or re.search(
+                r"в\s+форме\s+установлен\w*", fragment, re.IGNORECASE
+            ):
+                return True
+            # A direct product reference to an appendix identifies the
+            # selected PP 1875 list, unlike a generic legal citation.
+            if re.search(r"приложени\w*\s*№?\s*[12]\b", fragment, re.IGNORECASE):
+                return True
+    return False
+
+
 def _is_national_regime_goz_template(text: str, match: re.Match[str]) -> bool:
     """Exclude the PP 1875 boilerplate describing the regulation's scope."""
     sentence_start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start()))
@@ -772,6 +813,17 @@ _WORK_SCHEDULE_PATTERN = re.compile(
     r"\u0433\u0440\u0430\u0444\u0438\u043a\w*\s+\u0440\u0430\u0431\u043e\u0442\w*",
     re.IGNORECASE,
 )
+_CONDITIONAL_DELIVERY_TEMPLATE_PATTERN = re.compile(
+    r"(?:если|в\s+случае\s+если)[^.]{0,180}?"
+    r"(?:предусмотрен\w*|указан\w*|установлен\w*)[^.]{0,180}?"
+    r"(?:спецификац\w*|заявк\w*|график\w*)",
+    re.IGNORECASE,
+)
+_EXPLICIT_BATCH_DELIVERY_PATTERN = re.compile(
+    r"(?:поставка|отгрузка)[^.]{0,120}?"
+    r"(?:отдельн\w*\s+парт\w*|нескольк\w*\s+парт\w*|парт\w*\s+по\s+заявк)",
+    re.IGNORECASE,
+)
 _BATCH_TERM_PATTERN = re.compile(
     r"(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435|\u043d\u0435\s+\u043f\u043e\u0437\u0434\u043d\u0435\u0435)\s+\d+\s+\S{2,20}\s+"
     r"(?:\u0441|\u043f\u043e\u0441\u043b\u0435)\s+[^.]{0,80}\u0437\u0430\u044f\u0432\u043a|"
@@ -805,6 +857,10 @@ def _delivery_type_has_request_evidence(evidence: Any) -> bool:
     work schedule are not evidence of repeated deliveries.
     """
     text = re.sub(r"\s+", " ", str(evidence or "")).casefold()
+    # A project contract often says "if the specification provides for a
+    # schedule/requests". It is a template option, not a term of this lot.
+    if _CONDITIONAL_DELIVERY_TEMPLATE_PATTERN.search(text):
+        return False
     if (
         _DIRECT_DELIVERY_REQUEST_PATTERN.search(text)
         or _CONDITIONAL_VOLUME_REQUEST_PATTERN.search(text)
@@ -814,7 +870,7 @@ def _delivery_type_has_request_evidence(evidence: Any) -> bool:
         not _SINGLE_BATCH_PATTERN.search(text)
         and not _WORK_SCHEDULE_PATTERN.search(text)
         and (
-            _BATCH_OR_DELIVERY_SCHEDULE_PATTERN.search(text)
+            _EXPLICIT_BATCH_DELIVERY_PATTERN.search(text)
             or _delivery_schedule_fragment(text)
         )
     )
@@ -862,7 +918,12 @@ def _delivery_schedule_fragment(value: Any) -> str:
         }
         # Two or more different month/quarter headers establish a distribution
         # over several periods.  Merely listing start/end dates does not.
-        if len(months) >= 2 or len(quarters) >= 2:
+        # A title "delivery schedule" by itself is not enough. The schedule
+        # must contain a real allocation, otherwise a one-date appendix or a
+        # blank offer form would be misclassified as delivery by requests.
+        numbers = re.findall(r"(?<!\d)[1-9]\d*(?:[.,]\d+)?(?!\d)", fragment)
+        has_allocation = len(numbers) >= 2
+        if has_allocation and (len(months) >= 2 or len(quarters) >= 2):
             return fragment[:900]
     return ""
 
@@ -1161,14 +1222,14 @@ def validate_fields(
         table_national_regime is None
         and application_national_regime is None
         and "nationalRegime" in fields
-        and _is_generic_national_regime_list(
-        meta.get("nationalRegime", {}).get("evidence")
+        and not _has_explicit_national_regime_evidence(
+            meta.get("nationalRegime", {}).get("evidence")
         )
     ):
         fields.pop("nationalRegime", None)
         meta.pop("nationalRegime", None)
         warnings.append(
-            "nationalRegime не заполнен: evidence перечисляет общие меры ПП №1875 без связи с товарной позицией."
+            "nationalRegime не заполнен: evidence перечисляет общие меры ПП №1875 либо не содержит прямого доказательства установленной меры для этой закупки."
         )
 
     if "nationalRegime" in fields:
@@ -1214,8 +1275,9 @@ def validate_fields(
     _set(fields, meta, "tenderStatus", fields.get("tenderStatus") or "Загружен Seldon", "Default", "medium", "Исходный статус")
 
     purchase = job.seldon_purchase
-    # The result date is a document fact. The contract date is derived only
-    # after a result date has been found, never accepted from an LLM directly.
+    # The structured Seldon/Daily date wins over a document candidate. The
+    # contract date is derived only after this result date has been resolved,
+    # never accepted from an LLM directly.
     fields.pop("contractDate", None)
     meta.pop("contractDate", None)
     deadline_date, deadline_time, deadline_evidence = _structured_submission_deadline(job)
@@ -1228,6 +1290,17 @@ def validate_fields(
             "Seldon/Daily / дата окончания подачи",
             "high",
             deadline_evidence,
+        )
+    structured_result_date, structured_result_evidence = _structured_result_date(job)
+    if structured_result_date:
+        _set(
+            fields,
+            meta,
+            "resultDate",
+            structured_result_date,
+            "Seldon/Daily / дата окончания этапа подведения итогов",
+            "high",
+            structured_result_evidence,
         )
     explicit_result_date = _explicit_result_date(deterministic_text)
     if explicit_result_date and not fields.get("resultDate"):
@@ -1370,14 +1443,13 @@ def validate_fields(
         and document_payment_delay
         and _SME_PAYMENT_PATTERN.search(document_payment_delay[1])
     )
+    # The explicit contract/notice clause is authoritative. In particular,
+    # do not let an LLM's already converted number (for example 84) override
+    # the source's 60 calendar days or an unrelated template condition.
     payment_delay = (
         document_payment_delay
-        if document_uses_sme_term
-        else max(
-            (candidate for candidate in (llm_payment_delay, document_payment_delay) if candidate),
-            key=lambda candidate: candidate[0],
-            default=None,
-        )
+        if document_payment_delay is not None
+        else llm_payment_delay
     )
     payment_delay_source = (
         "Документы / срок оплаты для закупки только у МСП или самозанятого"
@@ -1489,12 +1561,33 @@ def validate_fields(
                 "Тип поставки исправлен с «по заявкам» на «к дате»: заявка/разнарядка не подтверждена, но есть прямая дата поставки."
             )
         else:
-            delivery_type = None
-            fields.pop("deliveryType", None)
-            meta.pop("deliveryType", None)
-            warnings.append(
-                "Тип поставки «по заявкам» не подтверждён: упоминание партии без заявки/разнарядки не является основанием."
-            )
+            delivery_days_evidence = str(meta.get("deliveryDays", {}).get("evidence") or "")
+            if fields.get("deliveryDays") and delivery_days_evidence:
+                # A false request candidate must not erase a separately proven
+                # one-time duration. This is common when a template contract
+                # mentions possible requests while the actual TЗ says
+                # "within N days after contract".
+                delivery_type = "during_period"
+                delivery_evidence = delivery_days_evidence
+                _set(
+                    fields,
+                    meta,
+                    "deliveryType",
+                    delivery_type,
+                    "Документы / прямой срок единовременной поставки",
+                    "high",
+                    delivery_days_evidence,
+                )
+                warnings.append(
+                    "Тип поставки исправлен с «по заявкам» на «в течение срока»: заявка не подтверждена, но установлен прямой срок поставки."
+                )
+            else:
+                delivery_type = None
+                fields.pop("deliveryType", None)
+                meta.pop("deliveryType", None)
+                warnings.append(
+                    "Тип поставки «по заявкам» не подтверждён: упоминание партии без заявки/разнарядки не является основанием."
+                )
     if delivery_type:
         _set(
             fields,
