@@ -290,6 +290,66 @@ def test_delivery_type_is_detected_from_document_request_rule() -> None:
     assert fields["deliveryType"] == "by_requests"
 
 
+def test_delivery_clause_in_later_contract_document_overrides_missing_llm_evidence() -> None:
+    """Regression: the resolver must not lose a parsed contract appendix."""
+    document = ParsedDocument(
+        documentIndex=1,
+        fileName="Проект договора.docx",
+        text=(
+            "Поставка Товара по Договору осуществляется отдельными партиями "
+            "на основании письменных Заказов Поставщику. Поставщик обязуется "
+            "поставить Товар, указанный в Заказе, в течение 30 (тридцати) рабочих дней "
+            "с момента направления Заказа Поставщику."
+        ),
+    )
+
+    fields, meta, _ = validate_fields(job_with_lot(""), None, "", [document])
+
+    assert fields["deliveryType"] == "by_requests"
+    assert fields["deliveryBatchDays"] == 30
+    assert "письменных Заказов" in meta["deliveryType"]["evidence"]
+    assert "deliveryDays" not in fields
+
+
+def test_delivery_schedule_table_with_multiple_dates_is_by_requests() -> None:
+    table = SpreadsheetTable(
+        fileName="График поставки.xlsx",
+        sheet="График",
+        tableRole="delivery_schedule",
+        headerLabels={"A": "Дата поставки", "B": "Количество"},
+        rows=[
+            SpreadsheetRow(row=2, cells={"A": "15.01.2027", "B": "10"}),
+            SpreadsheetRow(row=3, cells={"A": "15.03.2027", "B": "20"}),
+        ],
+    )
+    document = ParsedDocument(
+        documentIndex=1,
+        fileName="График поставки.xlsx",
+        spreadsheetTables=[table],
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), None, "", [document])
+
+    assert fields["deliveryType"] == "by_requests"
+
+
+def test_populated_row_schedule_confirms_contract_reference_to_delivery_graph() -> None:
+    """A real schedule may survive parsing as rows, without table schema."""
+    document = ParsedDocument(
+        documentIndex=1,
+        fileName="Спецификация.docx",
+        text=(
+            "Поставщик осуществляет поставку продукции в соответствии с графиком.\n"
+            "Товар А | 10 | с 01.03.2027 по 15.03.2027\n"
+            "Товар Б | 20 | с 16.06.2027 по 30.06.2027"
+        ),
+    )
+
+    fields, _, _ = validate_fields(job_with_lot(""), None, "", [document])
+
+    assert fields["deliveryType"] == "by_requests"
+
+
 def test_contract_and_warranty_security_are_extracted_but_application_is_not() -> None:
     text = """
     \u041e\u0431\u0435\u0441\u043f\u0435\u0447\u0435\u043d\u0438\u0435 \u0437\u0430\u044f\u0432\u043a\u0438: \u043d\u0435 \u0442\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f.

@@ -725,6 +725,37 @@ def test_okpd_classifier_spare_parts_do_not_trigger_repair_kit_reason() -> None:
     assert checks["repairKitCheck"]["triggered"] is False
 
 
+def test_spare_parts_placeholder_in_acceptance_act_form_does_not_trigger_reason() -> None:
+    """A blank act template is not evidence that the tender buys spare parts."""
+    text = (
+        "--- Документ 1 ---\n"
+        "fileName: Приложение №4 к ТЗ Акт приема-передачи (форма).docx\n"
+        "Комплект поставки включает запасные части, аксессуары и дополнительное оборудование.\n"
+        "--- Документ 2 ---\n"
+        "fileName: Техническое задание.docx\n"
+        "Предмет закупки: вилочный погрузчик."
+    )
+
+    reasons, checks = calculate_hard_reasons(
+        job(),
+        {"initialPrice": 2_000_000},
+        product_check(
+            total=1,
+            details=[
+                {
+                    "positionIndex": 1,
+                    "sourceProduct": "Вилочный погрузчик",
+                    "productQuery": "Вилочный погрузчик",
+                }
+            ],
+        ),
+        text,
+    )
+
+    assert REPAIR_KIT_REASON not in [reason.reason for reason in reasons]
+    assert checks["repairKitCheck"]["triggered"] is False
+
+
 def test_repair_kit_product_position_triggers_reason() -> None:
     product_name = "Комплект ЗИП для трансформатора ТМГ"
     reasons, checks = calculate_hard_reasons(

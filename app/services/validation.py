@@ -754,9 +754,15 @@ def _explicit_result_date(text: str) -> tuple[str, str] | None:
 
 
 _DIRECT_DELIVERY_REQUEST_PATTERN = re.compile(
-    r"\u043f\u043e\s+\u0437\u0430\u044f\u0432\u043a|"
-    r"\u0437\u0430\u044f\u0432\u043a\u0430\s+\u0437\u0430\u043a\u0430\u0437\u0447\u0438\u043a|"
-    r"\u043f\u043e\s+\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434",
+    # A request mechanism is evidence only when it governs delivery.  Bare
+    # mentions of an application/order elsewhere in the procurement are not
+    # enough (for example, an application form or an order-status report).
+    r"(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u043e\u0442\u0433\u0440\u0443\u0437\u043a\w*|\u0434\u043e\u0441\u0442\u0430\u0432\u043a\w*)"
+    r"[^.!?\n]{0,220}?"
+    r"(?:\u043f\u043e\s+(?:\u043f\u0438\u0441\u044c\u043c\u0435\u043d\u043d\w*\s+)?|"
+    r"\u043d\u0430\s+\u043e\u0441\u043d\u043e\u0432\u0430\u043d\u0438\u0438\s+(?:\u043f\u0438\u0441\u044c\u043c\u0435\u043d\u043d\w*\s+)?|"
+    r"\u0441\s+\u043c\u043e\u043c\u0435\u043d\u0442\u0430\s+(?:\u043f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f|\u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f)\s+)"
+    r"(?:\u0437\u0430\u044f\u0432\u043a\w*|\u0437\u0430\u043a\u0430\u0437\w*|\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434\w*)",
     re.IGNORECASE,
 )
 _CONDITIONAL_VOLUME_REQUEST_PATTERN = re.compile(
@@ -777,6 +783,13 @@ _BATCH_OR_DELIVERY_SCHEDULE_PATTERN = re.compile(
     r"\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*\s+\u043f\u043e\s+\u0433\u0440\u0430\u0444\u0438\u043a\w*|"
     r"\u0433\u0440\u0430\u0444\u0438\u043a\w*\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|"
     r"\u0441\u0440\u043e\u043a\w*\s+\u043e\u0442\u0434\u0435\u043b\u044c\u043d\w*\s+\u043f\u0430\u0440\u0442\w*",
+    re.IGNORECASE,
+)
+_DELIVERY_SCHEDULE_REFERENCE_PATTERN = re.compile(
+    r"(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*[^.!?\n]{0,100}?"
+    r"(?:\u043f\u043e|\u0432\s+\u0441\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0438\s+\u0441)\s+\u0433\u0440\u0430\u0444\u0438\u043a\w*|"
+    r"\u0441\u0440\u043e\u043a\w*\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*[^.!?\n]{0,160}?"
+    r"\u0433\u0440\u0430\u0444\u0438\u043a\w*\s+\u043e\u043f\u043b\u0430\u0442\w*\s+\u0438\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*)",
     re.IGNORECASE,
 )
 _DELIVERY_SCHEDULE_CUE_PATTERN = re.compile(
@@ -819,14 +832,26 @@ _CONDITIONAL_DELIVERY_TEMPLATE_PATTERN = re.compile(
     r"(?:спецификац\w*|заявк\w*|график\w*)",
     re.IGNORECASE,
 )
+_CONDITIONAL_REQUEST_DELIVERY_PATTERN = re.compile(
+    r"(?:\u0435\u0441\u043b\u0438|\u0432\s+\u0441\u043b\u0443\u0447\u0430\u0435)"
+    r"[^.!?\n]{0,220}?"
+    r"(?:\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u043e\u0442\u0433\u0440\u0443\u0437\u043a\w*|\u0434\u043e\u0441\u0442\u0430\u0432\u043a\w*)"
+    r"[^.!?\n]{0,160}?"
+    r"(?:\u0437\u0430\u044f\u0432\u043a\w*|\u0437\u0430\u043a\u0430\u0437\w*|\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434\w*)",
+    re.IGNORECASE,
+)
 _EXPLICIT_BATCH_DELIVERY_PATTERN = re.compile(
     r"(?:поставка|отгрузка)[^.]{0,120}?"
     r"(?:отдельн\w*\s+парт\w*|нескольк\w*\s+парт\w*|парт\w*\s+по\s+заявк)",
     re.IGNORECASE,
 )
 _BATCH_TERM_PATTERN = re.compile(
-    r"(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435|\u043d\u0435\s+\u043f\u043e\u0437\u0434\u043d\u0435\u0435)\s+\d+\s+\S{2,20}\s+"
-    r"(?:\u0441|\u043f\u043e\u0441\u043b\u0435)\s+[^.]{0,80}\u0437\u0430\u044f\u0432\u043a|"
+    r"(?:\u0432\s+\u0442\u0435\u0447\u0435\u043d\u0438\u0435|\u043d\u0435\s+\u043f\u043e\u0437\u0434\u043d\u0435\u0435)\s+\d+"
+    r"(?:\s*\([^)]{1,80}\))?\s+"
+    r"(?:(?:\u0440\u0430\u0431\u043e\u0447\w*|\u043a\u0430\u043b\u0435\u043d\u0434\u0430\u0440\u043d\w*|\u0431\u0430\u043d\u043a\u043e\u0432\u0441\u043a\w*)\s+)?"
+    r"\u0434\u043d\w*\s+"
+    r"(?:\u0441|\u043f\u043e\u0441\u043b\u0435|\u043e\u0442)\s+[^.]{0,80}"
+    r"(?:\u0437\u0430\u044f\u0432\u043a|\u0437\u0430\u043a\u0430\u0437|\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434)|"
     r"(?:\u0441\u0440\u043e\u043a\w*\s+\u043f\u043e\u0441\u0442\u0430\u0432\u043a\w*|\u043d\u0430\s+\u043a\u0430\u0436\u0434\w*)"
     r"[^.]{0,80}\u043f\u0430\u0440\u0442\w*[^.]{0,80}\d+",
     re.IGNORECASE,
@@ -843,10 +868,11 @@ _DELIVERY_ACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _REQUEST_SUBMISSION_DEADLINE_PATTERN = re.compile(
-    r"(?:\u0437\u0430\u044f\u0432\u043a\w*|\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434\u043a\w*)"
+    r"(?:\u0437\u0430\u044f\u0432\u043a\w*|\u0437\u0430\u043a\u0430\u0437\w*|\u0440\u0430\u0437\u043d\u0430\u0440\u044f\u0434\u043a\w*)"
     r"(?:\s+\w+){0,3}\s+\u0437\u0430\s*$",
     re.IGNORECASE,
 )
+_TABLE_DELIVERY_SCHEDULE_MARKER = "[[delivery_schedule_table]]"
 
 
 def _delivery_type_has_request_evidence(evidence: Any) -> bool:
@@ -857,9 +883,14 @@ def _delivery_type_has_request_evidence(evidence: Any) -> bool:
     work schedule are not evidence of repeated deliveries.
     """
     text = re.sub(r"\s+", " ", str(evidence or "")).casefold()
+    if text.startswith(_TABLE_DELIVERY_SCHEDULE_MARKER):
+        return True
     # A project contract often says "if the specification provides for a
     # schedule/requests". It is a template option, not a term of this lot.
-    if _CONDITIONAL_DELIVERY_TEMPLATE_PATTERN.search(text):
+    if (
+        _CONDITIONAL_DELIVERY_TEMPLATE_PATTERN.search(text)
+        or _CONDITIONAL_REQUEST_DELIVERY_PATTERN.search(text)
+    ):
         return False
     if (
         _DIRECT_DELIVERY_REQUEST_PATTERN.search(text)
@@ -942,6 +973,65 @@ def _delivery_schedule_from_documents(documents: list[ParsedDocument]) -> str:
             evidence = _delivery_schedule_fragment(table_text)
             if evidence:
                 return evidence
+            # A parsed spreadsheet can preserve delivery dates as cells while
+            # losing month names from the header. Its schema classifier is a
+            # stronger signal than a generic date column: two or more distinct
+            # dates in a table explicitly classified as a delivery schedule
+            # mean several planned deliveries. One date remains a one-time
+            # delivery and is deliberately ignored here.
+            dates = set(re.findall(r"\b\d{1,2}\.\d{1,2}\.\d{4}\b", table_text))
+            if table.tableRole == "delivery_schedule" and len(dates) >= 2:
+                return f"{_TABLE_DELIVERY_SCHEDULE_MARKER} {table_text[:900]}"
+    return ""
+
+
+def _delivery_request_evidence_from_documents(documents: list[ParsedDocument]) -> str:
+    """Find a direct request/batch clause in the untruncated document text.
+
+    The text prepared for the LLM may be clipped before a contract appendix.
+    Delivery classification must nevertheless use a correctly parsed direct
+    clause, and this deterministic pass has no token cost.
+    """
+    for document in documents:
+        text = re.sub(r"\s+", " ", str(document.text or "")).strip()
+        if not text:
+            continue
+        # Do not pass a whole document to the classifier: a later generic
+        # contract template may contain an "if delivery by requests" clause
+        # and must not invalidate an earlier direct condition of this lot.
+        for pattern in (
+            _DIRECT_DELIVERY_REQUEST_PATTERN,
+            _CONDITIONAL_VOLUME_REQUEST_PATTERN,
+            _EXPLICIT_BATCH_DELIVERY_PATTERN,
+        ):
+            for match in pattern.finditer(text):
+                fragment = text[max(0, match.start() - 180) : match.end() + 420]
+                if _delivery_type_has_request_evidence(fragment):
+                    return fragment[:900]
+        # Fixed multi-period schedules are handled locally for the same
+        # reason: a different template section elsewhere is irrelevant.
+        for cue in _DELIVERY_SCHEDULE_CUE_PATTERN.finditer(text):
+            fragment = text[max(0, cue.start() - 180) : cue.end() + 2_400]
+            if _delivery_schedule_fragment(fragment):
+                return fragment[:900]
+
+        # Some Excel/Word schedules are parsed as ordinary rows rather than a
+        # classified spreadsheet table. A direct contract reference to the
+        # delivery schedule plus at least two populated date rows is still
+        # reliable evidence. This deliberately does not treat a lone mention
+        # of a schedule or a blank offer form as repeated delivery.
+        schedule_reference = _DELIVERY_SCHEDULE_REFERENCE_PATTERN.search(text)
+        dated_rows = [
+            row
+            for row in str(document.text or "").splitlines()
+            if "|" in row and re.search(r"\b\d{1,2}\.\d{1,2}\.\d{4}\b", row)
+        ]
+        if schedule_reference and len(dated_rows) >= 2:
+            reference = text[
+                max(0, schedule_reference.start() - 180) : schedule_reference.end() + 360
+            ]
+            rows = " ".join(dated_rows[:3])
+            return f"{_TABLE_DELIVERY_SCHEDULE_MARKER} {reference} {rows}"[:900]
     return ""
 
 
@@ -963,6 +1053,8 @@ def _delivery_type_evidence_fragment(*values: Any) -> str:
         text = re.sub(r"\s+", " ", str(raw_value or "")).strip()
         if not text or not _delivery_type_has_request_evidence(text):
             continue
+        if text.casefold().startswith(_TABLE_DELIVERY_SCHEDULE_MARKER):
+            return text[len(_TABLE_DELIVERY_SCHEDULE_MARKER) :].strip()[:900]
         match = (
             _DIRECT_DELIVERY_REQUEST_PATTERN.search(text)
             or _CONDITIONAL_VOLUME_REQUEST_PATTERN.search(text)
@@ -998,7 +1090,10 @@ def _explicit_batch_delivery_days(text: Any) -> tuple[int, str] | None:
             continue
         if not _DELIVERY_ACTION_PATTERN.search(context):
             continue
-        if not _delivery_type_has_request_evidence(context):
+        if not (
+            _delivery_type_has_request_evidence(context)
+            or _delivery_days_are_batch_term(context)
+        ):
             continue
 
         amount = int(match.group(1))
@@ -1472,10 +1567,12 @@ def validate_fields(
     delivery_type = _normalize_delivery_type(fields.get("deliveryType"))
     delivery_evidence = meta.get("deliveryType", {}).get("evidence")
     table_delivery_schedule = _delivery_schedule_from_documents(documents)
+    document_delivery_request = _delivery_request_evidence_from_documents(documents)
     repeated_delivery_evidence = _delivery_type_evidence_fragment(
         delivery_evidence,
         meta.get("deliveryNote", {}).get("evidence"),
         fields.get("deliveryNote"),
+        document_delivery_request,
         table_delivery_schedule,
         deterministic_text,
     )
@@ -1545,8 +1642,11 @@ def validate_fields(
             delivery_evidence = str(
                 meta.get("deliveryDays", {}).get("evidence") or "Срок поставки в днях"
             )
-    if delivery_type == "by_requests" and not _delivery_type_has_request_evidence(
-        delivery_evidence
+    if (
+        delivery_type == "by_requests"
+        and not _delivery_type_has_request_evidence(delivery_evidence)
+        and not table_delivery_schedule.casefold().startswith(_TABLE_DELIVERY_SCHEDULE_MARKER)
+        and not document_delivery_request.casefold().startswith(_TABLE_DELIVERY_SCHEDULE_MARKER)
     ):
         # A bare mention of a party still does not prove repeated delivery.
         # Leave the type blank rather than converting it into a false request
@@ -1658,6 +1758,11 @@ def validate_fields(
                 )
         if not fields.get("deliveryBatchDays"):
             document_batch_days = _explicit_batch_delivery_days(deterministic_text)
+            if document_batch_days is None:
+                for document in documents:
+                    document_batch_days = _explicit_batch_delivery_days(document.text)
+                    if document_batch_days:
+                        break
             if document_batch_days:
                 days, evidence = document_batch_days
                 _set(

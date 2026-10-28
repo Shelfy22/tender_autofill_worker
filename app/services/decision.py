@@ -143,6 +143,14 @@ _REQUIRED_ZIP_SUPPLY_PATTERNS = (
     ),
 )
 _REQUIRED_ZIP_COMPONENTS_PATTERN = _REQUIRED_ZIP_SUPPLY_PATTERNS[4]
+_DOCUMENT_BLOCK_SPLIT_PATTERN = re.compile(
+    r"(?m)^--- [^\n]*?\d+ ---\n(?=fileName:)"
+)
+_ZIP_TEMPLATE_DOCUMENT_NAME_PATTERN = re.compile(
+    r"(?:\u0430\u043a\u0442\w*[^\n]{0,80}\u043f\u0440\u0438\u0435\u043c\w*[^\n]{0,80}\u043f\u0435\u0440\u0435\u0434\u0430\u0447\w*|"
+    r"\u0444\u043e\u0440\u043c\w*\s+\u0430\u043a\u0442\w*|\u043e\u0431\u0440\u0430\u0437\u0435\u0446\w*|\u0448\u0430\u0431\u043b\u043e\u043d\w*)",
+    re.IGNORECASE,
+)
 _OKPD_CODE_PATTERN = re.compile(
     r"\b(?:\u043e\u043a\u043f\u0434(?:\s*[- ]?2)?\s*[:№-]?\s*)?\d{2}\.\d{2}\.\d{2}(?:\.\d{1,3})?\b",
     re.IGNORECASE,
@@ -647,32 +655,43 @@ def _find_payment_delay_evidence(text: str) -> str | None:
 
 def _find_required_zip_supply_evidence(text: str) -> str | None:
     """Return mandatory physical ZIP included in the supply, not optional/document-only mentions."""
-    source = text or ""
-    for pattern in _REQUIRED_ZIP_SUPPLY_PATTERNS:
-        for match in pattern.finditer(source):
-            zip_term = _REQUIRED_ZIP_TERM_PATTERN.search(match.group(0))
-            if zip_term and _zip_term_is_okpd_classifier(
-                source,
-                match.start() + zip_term.start(),
-            ):
-                # An OKPD2 label can use "комплектующие (запасные части)".
-                # It is a classifier, not a required physical supply component.
-                continue
-            context = _work_context(source, match, maximum_length=1400)
-            prefix = source[max(0, match.start() - 240):match.start()]
-            same_clause_prefix = re.split(r"[.!?\n|]", prefix)[-1]
-            if _ZIP_PROHIBITED_OR_ABSENT_PATTERN.search(
-                same_clause_prefix + match.group(0)
-            ):
-                continue
-            if _ZIP_NON_MANDATORY_PATTERN.search(context):
-                continue
-            if (
-                _ZIP_DOCUMENTATION_ONLY_PATTERN.search(context)
-                and not _REQUIRED_ZIP_COMPONENTS_PATTERN.search(context)
-            ):
-                continue
-            return context[:1200]
+    raw = text or ""
+    # The deterministic combined text retains file boundaries.  A standard
+    # acceptance-act form can list a placeholder for spare parts even where
+    # the actual technical specification contains no such requirement.  It is
+    # not tender evidence and must not reject a purchase of the main product.
+    blocks = _DOCUMENT_BLOCK_SPLIT_PATTERN.split(raw)
+    for block in blocks:
+        source = block
+        name_match = re.match(r"fileName:\s*([^\n]+)", block)
+        source_name = name_match.group(1) if name_match else ""
+        if source_name and _ZIP_TEMPLATE_DOCUMENT_NAME_PATTERN.search(source_name):
+            continue
+        for pattern in _REQUIRED_ZIP_SUPPLY_PATTERNS:
+            for match in pattern.finditer(source):
+                zip_term = _REQUIRED_ZIP_TERM_PATTERN.search(match.group(0))
+                if zip_term and _zip_term_is_okpd_classifier(
+                    source,
+                    match.start() + zip_term.start(),
+                ):
+                    # An OKPD2 label can use "комплектующие (запасные части)".
+                    # It is a classifier, not a required physical supply component.
+                    continue
+                context = _work_context(source, match, maximum_length=1400)
+                prefix = source[max(0, match.start() - 240):match.start()]
+                same_clause_prefix = re.split(r"[.!?\n|]", prefix)[-1]
+                if _ZIP_PROHIBITED_OR_ABSENT_PATTERN.search(
+                    same_clause_prefix + match.group(0)
+                ):
+                    continue
+                if _ZIP_NON_MANDATORY_PATTERN.search(context):
+                    continue
+                if (
+                    _ZIP_DOCUMENTATION_ONLY_PATTERN.search(context)
+                    and not _REQUIRED_ZIP_COMPONENTS_PATTERN.search(context)
+                ):
+                    continue
+                return context[:1200]
     return None
 
 
