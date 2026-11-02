@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from app.models import LlmDecision, NormalizedJob
+from app.services.field_policy import is_decision_reason_enabled
 
 
 REASONS = [
@@ -66,6 +67,7 @@ PAYMENT_DEPENDENCY_REASON = (
     "Коммерческие условия. Оплата Покупателем после оплаты Генподрядчиком / Госзаказчиком"
 )
 ORGANIZER_CANCELLATION_REASON = "Оргвопросы. Отказ организатора от проведения тендера"
+REASONS = [reason for reason in REASONS if is_decision_reason_enabled(reason)]
 
 # These rules start with narrow keyword/context retrieval.  Their evidence is
 # supplied to the existing decision LLM for a semantic confirmation; numeric
@@ -430,6 +432,42 @@ class HardReason:
 
     def as_dict(self) -> dict[str, Any]:
         return {"reason": self.reason, "evidence": self.evidence[:1000], "priority": self.priority}
+
+
+def _documentation_unavailable_decision(
+    fields: dict[str, Any],
+    meta: dict[str, Any],
+    hard_reasons: list[HardReason],
+    documentation_reason: HardReason,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Keep unavailable documentation in the manual Seldon queue, not rejected."""
+    fields["tenderStatus"] = "Загружен Seldon"
+    fields.pop("tenderStatusReason", None)
+    fields.pop("tenderStatusNote", None)
+    meta["tenderStatus"] = {
+        "source": "Документация недоступна",
+        "confidence": "low",
+        "evidence": documentation_reason.evidence[:1200],
+    }
+    meta.pop("tenderStatusReason", None)
+    meta.pop("tenderStatusNote", None)
+    return fields, meta, {
+        "status": "Загружен Seldon",
+        "reason": None,
+        "note": "",
+        "confidence": "low",
+        "reasonOrigin": "documentation_unavailable",
+        "counterpartyRequiresWork": False,
+        "counterpartyAdvisoryOnly": True,
+        "hardReasons": [item.as_dict() for item in hard_reasons],
+        "manualReviewReasons": [],
+        "semanticHardReasonReviews": [],
+        "semanticManualReviewReasons": [],
+        "dismissedHardReasons": [],
+        "hardReasonReviews": [],
+        "hardNonAssortmentReasons": [],
+        "additionalReasons": [],
+    }
 
 
 def unwrap(value: Any) -> Any:
@@ -1097,11 +1135,12 @@ def calculate_hard_reasons(
         )
         _add(reasons, HIGH_VOLTAGE_REASON, evidence, 55)
 
-    sme_payment_term = _find_sme_payment_term(all_text)
-    if not (sme_payment_term and sme_payment_term[0] < 90):
-        payment_delay_evidence = _find_payment_delay_evidence(all_text)
-        if payment_delay_evidence:
-            _add(reasons, PAYMENT_DELAY_REASON, payment_delay_evidence, 35)
+    if is_decision_reason_enabled(PAYMENT_DELAY_REASON):
+        sme_payment_term = _find_sme_payment_term(all_text)
+        if not (sme_payment_term and sme_payment_term[0] < 90):
+            payment_delay_evidence = _find_payment_delay_evidence(all_text)
+            if payment_delay_evidence:
+                _add(reasons, PAYMENT_DELAY_REASON, payment_delay_evidence, 35)
 
     created = parse_date(_field(fields, "dateCreated")) or date.today()
     delivery = parse_date(_field(fields, "deliveryDate"))
@@ -1257,6 +1296,14 @@ def apply_final_decision(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     fields = dict(fields)
     meta = dict(meta)
+    documentation_reason = next(
+        (item for item in hard_reasons if item.reason == DOCUMENTATION_REASON),
+        None,
+    )
+    if documentation_reason is not None:
+        return _documentation_unavailable_decision(
+            fields, meta, hard_reasons, documentation_reason
+        )
     counterparty_requires_work = counterparty_lookup.get("status") != "matched"
     deterministic_market_research = any(
         item.reason == MARKET_RESEARCH_REASON for item in hard_reasons
@@ -1407,6 +1454,14 @@ def apply_final_decision(
             )
         )
         hard.sort(key=lambda item: item.priority)
+    documentation_reason = next(
+        (item for item in hard if item.reason == DOCUMENTATION_REASON),
+        None,
+    )
+    if documentation_reason is not None:
+        return _documentation_unavailable_decision(
+            fields, meta, hard, documentation_reason
+        )
     hard_non_coverage = [
         item
         for item in hard

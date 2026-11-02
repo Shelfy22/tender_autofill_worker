@@ -782,7 +782,9 @@ class CatalogSelection(BaseModel):
     correspondence: Literal["Полное соответствие", "Аналог", "Товар не найден"] = (
         "Товар не найден"
     )
-    rationale: str = ""
+    # The selection is shown to a buyer in the product-matching report. Do not
+    # silently accept an omitted or one-line diagnostic counter as its rationale.
+    rationale: str = Field(..., min_length=50, max_length=1500)
     matched_characteristic_ids: list[str] = Field(
         default_factory=list, alias="matchedCharacteristicIds"
     )
@@ -806,6 +808,14 @@ class CatalogSelection(BaseModel):
         if "rationale" not in data and "Обоснование" in data:
             data["rationale"] = data["Обоснование"]
         return data
+
+    @field_validator("rationale")
+    @classmethod
+    def strip_required_rationale(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("rationale must not be blank")
+        return value
 
     @field_validator("selected_point_id", mode="before")
     @classmethod

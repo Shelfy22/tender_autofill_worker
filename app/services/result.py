@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.models import NormalizedJob, TenderResult
+from app.services.field_policy import DISABLED_TENDER_FIELDS
 
 
 REPORT_OMITTED_FIELD_KEYS = frozenset(
@@ -36,7 +37,7 @@ REPORT_OMITTED_FIELD_KEYS = frozenset(
         "inn",
         "kpp",
     }
-)
+) | DISABLED_TENDER_FIELDS
 
 REPORT_OMITTED_HEADERS = frozenset(
     {
@@ -65,19 +66,69 @@ REPORT_OMITTED_HEADERS = frozenset(
 def _lot_divisible_report_value(value: Any) -> str:
     normalized = str(value or "").strip().casefold()
     if normalized in {"yes", "true", "1", "да", "делимый"}:
-        return "Делимый"
-    if normalized in {"no", "false", "0", "нет"}:
-        return "Неделимый"
+        return "yes"
+    if normalized in {"no", "false", "0", "нет", "неделимый"}:
+        return "no"
     return ""
 
 
-def _yes_no_display_value(value: Any) -> Any:
+def _yes_no_code_value(value: Any) -> Any:
     normalized = str(value or "").strip().casefold()
     if normalized in {"yes", "true", "1", "да"}:
-        return "Да"
+        return "yes"
     if normalized in {"no", "false", "0", "нет"}:
-        return "Нет"
+        return "no"
     return value
+
+
+# Processing rules keep readable Russian labels.  The outward Daily payload is
+# imported into a system whose dictionaries accept these stable reference codes.
+_TENDER_STATUS_CODES = {
+    "Загружен Seldon": "110",
+    "Согласовано ИИ": "120",
+    "Отказано ИИ": "130",
+}
+
+_TENDER_STATUS_REASON_CODES = {
+    "Дубль": "cp_double",
+    # The real threshold remains 1 mln rubles; the target dictionary key has a
+    # historical ls300 suffix and must nevertheless be used for the import.
+    "Коммерческие условия. НМЦК менее 1 млн руб.": "ku_nmck_ls300",
+    "Коммерческие условия. НМЦК менее фактической стоимости": "ku_nmck_lsfp",
+    "Коммерческие условия. Не проходим по сроку поставки": "cp_ku_delivery_notime",
+    "Коммерческие условия. Оплата Покупателем после оплаты Генподрядчиком / Госзаказчиком": "ku_payment_aftgosgen",
+    "Коммерческие условия. Отсрочка платежа 90 дней и более": "ku_postpay_mr120",
+    "Коммерческие условия. Поставка в удаленные территории": "cp_ku_delivery_far",
+    "Коммерческие условия. Консигнация / Хранение у Покупателя за счет Поставщика": "cp_ku_storage_bbs",
+    "Номенклатура. Лот неделимый. Не можем скомплектовать более 20% номенклатуры": "nom_nedelimlot_1s20",
+    "Номенклатура. Оборудование 35 кВ и выше": "nom_equip_mr35",
+    "Номенклатура. Частотный привод 6–10 кВ": "nom_fp_610",
+    "Номенклатура. Ремкомплект / ЗИП / Продукция по чертежу": "nom_rgzipdesign",
+    "Номенклатура. Военная приёмка": "cp_nom_accept_military",
+    "Номенклатура. Атомная приёмка": "cp_nom_accept_atomic",
+    "Номенклатура. Поставка с работами": "cp_nom_delivery_wl",
+    "Оргвопросы. На момент согласования менее 3 рабочих дней до подачи заявки": "org_term_ls3",
+    "Оргвопросы. Опрос рынка / Мониторинг / Анализ рынка / Анонс / КИМ": "cp_org_analiz",
+    "Прочее": "cp_other",
+}
+
+
+def _tender_status_code(value: Any) -> Any:
+    raw = str(value or "").strip()
+    return _TENDER_STATUS_CODES.get(raw, value)
+
+
+def _tender_status_reason_code(value: Any) -> Any:
+    raw = str(value or "").strip()
+    return _TENDER_STATUS_REASON_CODES.get(raw, value)
+
+
+def _department_code(value: Any) -> str | None:
+    """Format the target-system department dictionary value once at export."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return raw if raw.casefold().startswith("dep_") else f"Dep_{raw}"
 
 
 def _national_regime_display_value(value: Any) -> Any:
@@ -115,28 +166,37 @@ def build_result_json(
         for key, value in meta.items()
         if key not in REPORT_OMITTED_FIELD_KEYS
     }
-    result_fields["toCode"] = job.to_code
-    # Keep normalized machine values while calculating the tender, then expose
-    # business labels only in the outward payload consumed by Daily.
+    exported_to_code = _department_code(job.to_code)
+    result_fields["toCode"] = exported_to_code
+    # Keep readable values inside the processing pipeline, then expose only
+    # target-system dictionary codes in the outward Daily payload.
     lot_divisible_label = _lot_divisible_report_value(fields.get("lotDivisible"))
     if lot_divisible_label:
         result_fields["lotDivisible"] = lot_divisible_label
     if "stateDefenseOrder" in fields:
-        result_fields["stateDefenseOrder"] = _yes_no_display_value(
+        result_fields["stateDefenseOrder"] = _yes_no_code_value(
             fields.get("stateDefenseOrder")
         )
     if "nationalRegime" in fields:
         result_fields["nationalRegime"] = _national_regime_display_value(
             fields.get("nationalRegime")
         )
+    if "tenderStatus" in fields:
+        result_fields["tenderStatus"] = _tender_status_code(fields.get("tenderStatus"))
+    if "tenderStatusReason" in fields:
+        result_fields["tenderStatusReason"] = _tender_status_reason_code(
+            fields.get("tenderStatusReason")
+        )
     report_fields = {
         key: value
         for key, value in job.report_fields.items()
         if key not in REPORT_OMITTED_HEADERS
     }
+    if exported_to_code:
+        report_fields["Код ТО"] = exported_to_code
+        report_fields["toCode"] = exported_to_code
     if lot_divisible_label:
-        # Downstream XLSX generation uses the original Russian Daily headers.
-        # Keep that column in sync with the normalized decision field.
+        # Keep both original Daily aliases synchronized with the dictionary code.
         report_fields["Лот делимый"] = lot_divisible_label
         report_fields["lotDivisible"] = lot_divisible_label
     result = TenderResult(
@@ -158,7 +218,7 @@ def build_result_json(
         rowNumber=job.row_number,
         jobRecordKey=job.job_record_key,
         remainingDays=job.remaining_days,
-        toCode=job.to_code,
+        toCode=exported_to_code,
         lawCode=job.law_code,
         sectionName=job.section_name,
         filterName=job.filter_name,

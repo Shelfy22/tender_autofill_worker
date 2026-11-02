@@ -7,10 +7,11 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from app.models import ExtractedFieldsResponse, NormalizedJob, ParsedDocument
+from app.services.field_policy import remove_disabled_tender_fields
 from app.services.normalization import deduplicate_strings
 
 
-ALLOWED_FIELDS = {
+ALL_ALLOWED_FIELDS = {
     "dateCreated",
     "stateDefenseOrder", "tenderStatus", "tenderStatusNote", "tenderStatusReason",
     "tenderGroup", "resultDate", "contractDate", "deliveryType",
@@ -18,6 +19,10 @@ ALLOWED_FIELDS = {
     "deliveryNote", "customerContactPerson", "tenderSubmittedDate", "contractSecurity", "warrantySecurity",
     "warrantyMonths", "nationalRegime", "specialAccount",
 }
+# Keep the complete internal allow-list so archived-field regression tests can
+# re-enable the policy without changing the extractor contract.  Production
+# output is gated by remove_disabled_tender_fields at the end of validation.
+ALLOWED_FIELDS = set(ALL_ALLOWED_FIELDS)
 
 
 _DELIVERY_DEADLINE_EVIDENCE_PATTERN = re.compile(
@@ -1835,4 +1840,7 @@ def validate_fields(
             fields["submissionDeadlineTime"] = f"{match.group(1).zfill(2)}:{match.group(2)}"
     fields["toCode"] = job.to_code
     meta["toCode"] = {"source": "Seldon filters / Код ТО", "confidence": "high", "evidence": f"Код ТО: {job.to_code}"}
+    # The implementation above is intentionally retained for quick future
+    # restoration.  Until then, discontinued columns cannot leave validation.
+    remove_disabled_tender_fields(fields, meta)
     return fields, meta, deduplicate_strings(warnings)

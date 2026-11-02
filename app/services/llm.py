@@ -35,6 +35,7 @@ from app.models import (
     TenderPosition,
     TenderPositionsResponse,
 )
+from app.services.field_policy import DISABLED_TENDER_FIELDS, enabled_tender_fields
 
 if TYPE_CHECKING:
     from app.observability import RunObserver
@@ -240,7 +241,7 @@ def _response_schema(schema: type[T], *, strict: bool) -> dict[str, Any]:
     return generated
 
 
-FIELD_NAMES = [
+ALL_FIELD_NAMES = [
     "dateCreated",
     "stateDefenseOrder", "tenderStatus", "tenderStatusNote", "tenderStatusReason",
     "tenderGroup", "resultDate", "contractDate", "deliveryType",
@@ -249,6 +250,60 @@ FIELD_NAMES = [
     "contractSecurity", "warrantySecurity", "warrantyMonths",
     "nationalRegime", "specialAccount",
 ]
+FIELD_NAMES = enabled_tender_fields(ALL_FIELD_NAMES)
+
+DISABLED_FIELD_PROMPT = (
+    "Поля временно исключены заказчиком и не должны анализироваться, "
+    "упоминаться или возвращаться: "
+    + ", ".join(sorted(DISABLED_TENDER_FIELDS))
+    + "."
+)
+
+
+def _active_field_extraction_rules() -> str:
+    """Remove dormant field instructions from the prompt, not from source code."""
+    rules = FIELD_EXTRACTION_RULES
+    if "nationalRegime" in DISABLED_TENDER_FIELDS:
+        rules = re.sub(
+            r"(?s)nationalRegime: при прямой.*?`ban > restriction > preference`\.\n",
+            "",
+            rules,
+        )
+    if {
+        "deliveryType",
+        "deliveryDays",
+        "deliveryBatchDays",
+        "deliveryDate",
+    }.issubset(DISABLED_TENDER_FIELDS):
+        rules = re.sub(
+            r"(?s)deliveryDate и deliveryDays заполняй.*?Если срок поставки не подтверждён — value=null\.\n",
+            "",
+            rules,
+        )
+    return rules
+
+
+def _active_document_field_rules(prompt: str) -> str:
+    """Keep archived extraction guidance in code while omitting it from LLM input."""
+    if "nationalRegime" in DISABLED_TENDER_FIELDS:
+        prompt = re.sub(
+            r"(?s)- nationalRegime —.*?(?=- lotDivisible —)",
+            "",
+            prompt,
+        )
+    if {
+        "deliveryType",
+        "deliveryDays",
+        "deliveryBatchDays",
+        "deliveryDate",
+        "paymentDelayDays",
+    }.issubset(DISABLED_TENDER_FIELDS):
+        prompt = re.sub(
+            r"(?s)- deliveryType —.*?(?=resultDate —)",
+            "",
+            prompt,
+        )
+    return prompt
 
 
 FIELD_EXTRACTION_RULES = """
@@ -849,10 +904,11 @@ class LlmClient:
     def extract_fields(self, combined_text: str) -> ExtractedFieldsResponse:
         skeleton = {name: {"value": None, "confidence": "low", "source": None, "evidence": None} for name in FIELD_NAMES}
         prompt = (
-            f"{FIELD_EXTRACTION_RULES}\n\nJSON ответа: {{\"fields\": ..., \"warnings\": []}}\n"
+            f"{_active_field_extraction_rules()}\n\n{DISABLED_FIELD_PROMPT}\n\nJSON ответа: {{\"fields\": ..., \"warnings\": []}}\n"
             f"Ожидаемые поля:\n{json.dumps(skeleton, ensure_ascii=False)}\n\n"
             f"Текст для анализа:\n{combined_text}"
         )
+        prompt = _active_document_field_rules(prompt)
         return self.json_call(
             system="Ты извлекаешь структурированные данные из тендерной документации. Только JSON.",
             prompt=prompt,
@@ -1078,7 +1134,9 @@ Candidates:
         unit: DocumentAnalysisUnit,
     ) -> DocumentAnalysisResponse:
         prompt = f"""
-{DELIVERY_CLASSIFICATION_RULES}
+{DELIVERY_CLASSIFICATION_RULES if any(name in FIELD_NAMES for name in ('deliveryType', 'deliveryDays', 'deliveryBatchDays', 'deliveryDate')) else ''}
+
+{DISABLED_FIELD_PROMPT}
 
 Проанализируй один DocumentAnalysisUnit. Верни только компактный JSON.
 
@@ -1206,6 +1264,7 @@ Spreadsheet candidates, если есть:
 Текст unit:
 {unit.text}
 """.strip()
+        prompt = _active_document_field_rules(prompt)
         return self.json_call(
             system=(
                 "Ты Document Analyzer. Читаешь ровно один bounded unit и извлекаешь "
@@ -1235,7 +1294,9 @@ Spreadsheet candidates, если есть:
         legal condition instead of guessing from a full procurement document.
         """
         prompt = f"""
-{DELIVERY_CLASSIFICATION_RULES}
+{DELIVERY_CLASSIFICATION_RULES if any(name in FIELD_NAMES for name in ('deliveryType', 'deliveryDays', 'deliveryBatchDays', 'deliveryDate')) else ''}
+
+{DISABLED_FIELD_PROMPT}
 
 Проверь фрагменты закупочной документации. Верни только JSON с fieldCandidates.
 Каждый candidate обязан содержать дословный evidence (не более 500 символов) и

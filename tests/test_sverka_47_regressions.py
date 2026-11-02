@@ -5,8 +5,20 @@ source archives remain outside the repository; keeping short evidence here
 makes the business decisions reproducible in CI without shipping tender files.
 """
 
+import pytest
+
 from app.models import ExtractedFieldsResponse, FieldValue, NormalizedJob, ParsedDocument, SpreadsheetRow, SpreadsheetTable
 from app.services.validation import validate_fields
+
+
+@pytest.fixture(autouse=True)
+def enable_archived_fields_for_sverka_regressions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The historical quality cases remain executable after current disablement."""
+    import app.services.field_policy as field_policy
+
+    monkeypatch.setattr(field_policy, "DISABLED_TENDER_FIELDS", frozenset())
 
 
 def _job(*, result_date: str | None = None) -> NormalizedJob:

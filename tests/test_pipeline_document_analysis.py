@@ -44,6 +44,21 @@ class FakeSeldonClient:
         pass
 
 
+class MissingDocumentsSeldonClient(FakeSeldonClient):
+    def get_purchase_documents(self, *_: object) -> FakeSeldonDocuments:
+        class MissingDocuments(FakeSeldonDocuments):
+            def decision_context(self) -> dict[str, object]:
+                return {
+                    "apiCode": 404,
+                    "documentsFound": 0,
+                    "documentationMissing": True,
+                    "documentationUnavailable": False,
+                    "documentationNote": "Seldon не выдал документацию.",
+                }
+
+        return MissingDocuments()
+
+
 class FakeDocumentProcessor:
     downloaded_total = 100
 
@@ -66,6 +81,11 @@ class FakeDocumentProcessor:
 
     def close(self) -> None:
         pass
+
+
+class EmptyDocumentProcessor(FakeDocumentProcessor):
+    def process_all(self, *_: object) -> tuple[list[ParsedDocument], list[str]]:
+        return [], []
 
 
 class FakeIProClient:
@@ -295,6 +315,50 @@ def test_document_analysis_pipeline_uses_units_consolidator_and_no_legacy_llm(mo
     assert LAST_LLM.calls.count("audit_product_candidates") == 1
     assert "Build Fields From Document Analysis" in steps
     assert result["debug"]["llmTextLength"] == 0
+
+
+def test_missing_seldon_documents_skip_ai_and_keep_only_source_fields(monkeypatch, tmp_path) -> None:
+    import app.pipeline as pipeline_module
+
+    def make_llm(*args: object, **kwargs: object) -> FakeLlmClient:
+        global LAST_LLM
+        LAST_LLM = FakeLlmClient(*args, **kwargs)
+        return LAST_LLM
+
+    monkeypatch.setattr(pipeline_module, "SeldonClient", MissingDocumentsSeldonClient)
+    monkeypatch.setattr(pipeline_module, "DocumentProcessor", EmptyDocumentProcessor)
+    monkeypatch.setattr(pipeline_module, "IProClient", FakeIProClient)
+    monkeypatch.setattr(pipeline_module, "CatalogMatcher", FakeCatalogMatcher)
+    monkeypatch.setattr(pipeline_module, "LlmClient", make_llm)
+
+    settings = Settings(
+        postgres_dsn="postgresql://user:pass@localhost/db",
+        llm_api_key="test",
+        enable_document_analysis_pipeline=True,
+    )
+    claim = JobClaim(
+        record_key="record-404",
+        batch_id="batch-1",
+        attempt=1,
+        report_id=1,
+        seldon_id="123",
+        report_fields={"Код ТО": "ТО1", "Код ФЗ": "223", "Название": "Из Seldon"},
+        input_json={
+            "reportId": 1,
+            "seldonId": "123",
+            "toCode": "ТО1",
+            "lawCode": "223",
+        },
+    )
+
+    result = TenderPipeline(settings, tmp_path).run(claim)
+
+    assert LAST_LLM is not None
+    assert LAST_LLM.calls == []
+    assert result["fields"] == {"tenderStatus": "110", "toCode": "Dep_ТО1"}
+    assert "tenderStatusReason" not in result["fields"]
+    assert "tenderStatusNote" not in result["fields"]
+    assert result["reportFields"]["Название"] == "Из Seldon"
 
 
 class TruncatingDocumentFakeLlmClient(FakeLlmClient):

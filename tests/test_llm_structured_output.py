@@ -369,11 +369,11 @@ def test_document_analyzer_prompt_distinguishes_documents_from_works_and_zip() -
     assert "specialAccount" in prompt
     assert "ГОЗ/275-ФЗ" in prompt
     assert "nationalRegime" in prompt
-    assert "minimum_share" in prompt
-    assert "Вид защитной меры" in prompt
+    assert "minimum_share" not in prompt
+    assert "Вид защитной меры" not in prompt
     assert "lotDivisible" in prompt
-    assert "quantities across two or" in prompt
-    assert "deliveryNote — это примечание именно к deliveryType" in prompt
+    assert "quantities across two or" not in prompt
+    assert "Поля временно исключены заказчиком" in prompt
     assert "Не возвращай coverage" in prompt
 
 

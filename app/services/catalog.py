@@ -1098,6 +1098,11 @@ params кандидата — единственный источник подт
 отсутствующие значения. selectedPointId должен быть pointId из normalizedCandidates.
 Верни selectedPointId, correspondence и rationale. Если значение из документа и значение
 ETM равны, это matchedCharacteristicIds, а не conflictingCharacteristics. Выбирай не по цене.
+rationale is mandatory. Write a substantive Russian explanation of at least 50
+characters: name the product-match conclusion and at least one confirmed or
+unconfirmed key parameter. A bare coverage counter such as
+"Подтверждено характеристик: 11 из 23" is invalid and must not be returned.
+
 For every item in characteristics return its id exactly once in one of the three
 lists: matchedCharacteristicIds, missingCharacteristicIds, or
 conflictingCharacteristics. Count a characteristic as matched only when its
@@ -1131,7 +1136,7 @@ normalizedCandidates: {candidates_json}
         selection = self.llm.json_call(
             system=(
                 "Выбери pointId товара из каталога. Верни только selectedPointId, "
-                "correspondence, rationale, matchedCharacteristicIds, "
+                "correspondence, rationale (mandatory detailed explanation of at least 50 characters), matchedCharacteristicIds, "
                 "missingCharacteristicIds и conflictingCharacteristics; "
                 "не копируй catalog fields."
             ),

@@ -19,6 +19,7 @@ from app.models import (
     TenderPosition,
 )
 from app.services.product_characteristics import ensure_position_identity
+from app.services.field_policy import is_tender_field_enabled
 from app.services.document_roles import (
     COMPOSITE_ROLE,
     OTHER_ROLE,
@@ -786,6 +787,11 @@ def result_from_unit(
         update={
             "products": products,
             "characteristicSets": characteristic_sets,
+            "fieldCandidates": [
+                candidate
+                for candidate in parsed.fieldCandidates
+                if is_tender_field_enabled(candidate.fieldName.strip())
+            ],
         }
     )
 
@@ -797,7 +803,7 @@ def fields_from_consolidation(
     priority = {"high": 3, "medium": 2, "low": 1}
     for candidate in consolidation.fieldCandidates:
         name = candidate.fieldName.strip()
-        if not name:
+        if not name or not is_tender_field_enabled(name):
             continue
         current = fields.get(name)
         if current is not None and priority.get(current.confidence, 0) >= priority.get(candidate.confidence, 0):

@@ -1,3 +1,5 @@
+import pytest
+
 from app.models import (
     ExtractedFieldsResponse,
     FieldValue,
@@ -7,6 +9,14 @@ from app.models import (
     SpreadsheetTable,
 )
 from app.services.validation import validate_fields
+
+
+@pytest.fixture(autouse=True)
+def enable_archived_fields_for_legacy_regressions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the archived delivery/payment/national-regime test corpus runnable."""
+    import app.services.field_policy as field_policy
+
+    monkeypatch.setattr(field_policy, "DISABLED_TENDER_FIELDS", frozenset())
 
 
 def job_with_lot(value: str) -> NormalizedJob:

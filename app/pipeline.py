@@ -29,6 +29,7 @@ from app.services.document_analysis import (
     result_from_unit,
 )
 from app.services.commercial_conditions import build_commercial_conditions_context
+from app.services.field_policy import is_tender_field_enabled
 from app.services.documents import (
     DocumentProcessor,
     build_combined_text as build_deterministic_text,
@@ -257,6 +258,60 @@ class TenderPipeline:
                 if document.parserWarning:
                     self.warnings.append(f"{document.fileName}: {document.parserWarning}")
 
+            if document_context.get("documentationMissing") is True:
+                # A Seldon 404, an empty answer, or links from which no usable
+                # documents could be obtained is not a rejection.  Stop before
+                # all AI extraction and product matching: only source Daily /
+                # Seldon values plus the manual-review status may be exported.
+                unavailable_note = str(
+                    document_context.get("documentationNote") or ""
+                ).strip()
+                fields = {"tenderStatus": "Загружен Seldon"}
+                meta = {
+                    "tenderStatus": {
+                        "source": "Документация недоступна",
+                        "confidence": "low",
+                        "evidence": unavailable_note[:1200],
+                    }
+                }
+                decision = {
+                    "status": "Загружен Seldon",
+                    "reason": None,
+                    "note": "",
+                    "confidence": "low",
+                    "reasonOrigin": "documentation_unavailable",
+                    "counterpartyRequiresWork": False,
+                    "counterpartyAdvisoryOnly": True,
+                    "hardReasons": [],
+                    "manualReviewReasons": [],
+                    "semanticHardReasonReviews": [],
+                    "semanticManualReviewReasons": [],
+                    "dismissedHardReasons": [],
+                    "hardReasonReviews": [],
+                    "hardNonAssortmentReasons": [],
+                    "additionalReasons": [],
+                }
+                return build_result_json(
+                    job,
+                    fields=fields,
+                    meta=meta,
+                    product_check=None,
+                    decision=decision,
+                    warnings=deduplicate_strings(self.warnings),
+                    logs=self.result_logs,
+                    debug={
+                        "documentCount": len(parsed_documents),
+                        "parsedDocumentCount": sum(
+                            document.textQualityOk for document in parsed_documents
+                        ),
+                        "seldonDocumentsStatus": document_context,
+                        "toCode": job.to_code,
+                        "remainingDays": job.remaining_days,
+                        "reportId": job.report_id,
+                        "tenderDecision": decision,
+                    },
+                )
+
             deterministic_text, document_lengths, deterministic_text_warnings = self._run_stage(
                 "Prepare Deterministic Text for Regex Rules",
                 lambda: build_deterministic_text(page_text, parsed_documents, self.settings),
@@ -393,9 +448,21 @@ class TenderPipeline:
                             lambda unit=unit: analyze_unit_safely(unit),
                         )
                     )
-                commercial_context = build_commercial_conditions_context(
-                    page_text,
-                    parsed_documents,
+                commercial_conditions_enabled = any(
+                    is_tender_field_enabled(field_name)
+                    for field_name in (
+                        "nationalRegime",
+                        "paymentDelayDays",
+                        "deliveryType",
+                        "deliveryBatchDays",
+                        "deliveryDays",
+                        "deliveryDate",
+                    )
+                )
+                commercial_context = (
+                    build_commercial_conditions_context(page_text, parsed_documents)
+                    if commercial_conditions_enabled
+                    else ""
                 )
                 commercial_analyzer = getattr(llm, "analyze_commercial_conditions", None)
                 if commercial_context and callable(commercial_analyzer):

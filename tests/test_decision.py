@@ -1203,7 +1203,7 @@ def test_llm_approve_without_hard_reasons() -> None:
     assert "tenderStatusReason" not in fields
 
 
-def test_seldon_404_is_deterministic_missing_documentation_rejection() -> None:
+def test_seldon_404_is_marked_for_manual_seldon_review() -> None:
     reasons, checks = calculate_hard_reasons(
         job(),
         {},
@@ -1221,7 +1221,7 @@ def test_seldon_404_is_deterministic_missing_documentation_rejection() -> None:
     assert checks["documentationCheck"]["automaticApprovalAllowed"] is False
 
 
-def test_unavailable_documents_are_rejected_with_diagnostic_note() -> None:
+def test_unavailable_documents_are_loaded_without_rejection_reason() -> None:
     documentation_note = (
         "Seldon выдал ссылки на 2 документ(ов), но пригодный текст документации "
         "не получен. Пустые файлы: specification.xlsx."
@@ -1250,10 +1250,11 @@ def test_unavailable_documents_are_rejected_with_diagnostic_note() -> None:
         report_id=3,
     )
 
-    assert fields["tenderStatus"] == "Отказано ИИ"
-    assert fields["tenderStatusReason"] == DOCUMENTATION_REASON
-    assert documentation_note in fields["tenderStatusNote"]
-    assert decision["reason"] == DOCUMENTATION_REASON
+    assert fields["tenderStatus"] == "Загружен Seldon"
+    assert "tenderStatusReason" not in fields
+    assert "tenderStatusNote" not in fields
+    assert decision["reason"] is None
+    assert decision["reasonOrigin"] == "documentation_unavailable"
 
 
 def test_missing_products_or_coverage_cannot_be_approved() -> None:
@@ -1269,8 +1270,8 @@ def test_missing_products_or_coverage_cannot_be_approved() -> None:
         counterparty_lookup={"status": "matched"},
         llm_decision=LlmDecision(decision="approve"),
     )
-    assert fields["tenderStatus"] == "Отказано ИИ"
-    assert fields["tenderStatusReason"] == DOCUMENTATION_REASON
+    assert fields["tenderStatus"] == "Загружен Seldon"
+    assert "tenderStatusReason" not in fields
 
 
 def test_coverage_reason_is_ignored_when_rule_is_disabled() -> None:
@@ -1588,7 +1589,10 @@ def test_decision_prompt_lists_all_remote_territories() -> None:
     assert "Республика Саха (Якутия)" in prompt
 
 
-def test_payment_delay_rejects_at_ninety_days_inclusive() -> None:
+def test_payment_delay_rejects_at_ninety_days_inclusive_when_reenabled(monkeypatch) -> None:
+    import app.services.field_policy as field_policy
+
+    monkeypatch.setattr(field_policy, "DISABLED_DECISION_REASONS", frozenset())
     payment_terms = [
         "Оплата будет произведена в течение 90 дней после поставки.",
         "Оплата производится в течение 90 рабочих дней.",
@@ -1727,9 +1731,9 @@ def test_223_marketing_research_filename_overrides_missing_documentation_reason(
     )
 
     assert checks["marketResearchCheck"]["detectedInFileName"] is True
-    assert fields["tenderStatus"] == "Отказано ИИ"
-    assert fields["tenderStatusReason"] == MARKET_RESEARCH_REASON
-    assert decision["marketResearchReasonSuppressed"] is False
+    assert fields["tenderStatus"] == "Загружен Seldon"
+    assert "tenderStatusReason" not in fields
+    assert decision["reasonOrigin"] == "documentation_unavailable"
 
 
 def test_llm_cannot_restore_market_research_reason_for_223_or_44_fz() -> None:

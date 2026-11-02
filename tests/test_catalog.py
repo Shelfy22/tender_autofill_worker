@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.models import (
@@ -39,7 +41,7 @@ class SelectionLlm:
         return CatalogSelection(
             selectedPointId=self.point_id,
             correspondence="Полное соответствие",
-            rationale="Совпадают размеры и количество полок",
+            rationale="Совпадают размеры и количество полок, требования документа удовлетворены выбранным кандидатом.",
         )
 
 
@@ -49,6 +51,17 @@ class DummyObserver:
 
     def event(self, **values: object) -> None:
         self.events.append(values)
+
+
+def test_catalog_selection_requires_substantive_rationale() -> None:
+    with pytest.raises(ValidationError):
+        CatalogSelection(selectedPointId="123")
+
+    with pytest.raises(ValidationError):
+        CatalogSelection(
+            selectedPointId="123",
+            rationale="Подтверждено характеристик: 11 из 23.",
+        )
 
 
 def test_large_tender_catalog_scope_is_limited_to_first_130_positions() -> None:
@@ -370,7 +383,7 @@ def test_selection_uses_only_selected_product_price_not_all_candidate_prices() -
         CatalogSelection(
             selectedPointId="2193251",
             correspondence="Полное соответствие",
-            rationale="Выбран стеллаж требуемой комплектации",
+            rationale="Выбран стеллаж требуемой комплектации, соответствующий параметрам позиции из документа.",
         ),
         normalized,
     )
@@ -397,7 +410,7 @@ def test_duplicate_same_product_prices_use_median_and_missing_selected_price_can
         CatalogSelection(
             selectedPointId="101",
             correspondence="Полное соответствие",
-            rationale="Выбран ETM-1",
+            rationale="Выбран товар ETM-1, поскольку его параметры соответствуют требованиям позиции из документа.",
         ),
         normalized,
     )
@@ -543,7 +556,7 @@ def test_catalog_selection_rejects_analog_when_tender_forbids_it() -> None:
             return CatalogSelection(
                 selectedPointId="1",
                 correspondence="Аналог",
-                rationale="Другой артикул",
+                rationale="У кандидата другой артикул, поэтому он рассматривается только как допустимый аналог.",
             )
 
     settings = Settings(postgres_dsn="postgresql://user:pass@localhost/db")
@@ -571,6 +584,7 @@ def test_catalog_value_match_does_not_confuse_current_and_voltage() -> None:
 def test_characteristic_audit_marks_unclassified_document_specs_as_missing() -> None:
     selection = CatalogSelection(
         selectedPointId="123",
+        rationale="The candidate parameters were compared with the source requirements.",
         correspondence="Полное соответствие",
         matchedCharacteristicIds=["c1"],
     )
@@ -592,6 +606,7 @@ def test_characteristic_audit_marks_unclassified_document_specs_as_missing() -> 
 def test_characteristic_audit_ignores_false_conflict_with_equal_etm_value() -> None:
     selection = CatalogSelection(
         selectedPointId="123",
+        rationale="The candidate parameters were compared with the source requirements.",
         correspondence="Полное соответствие",
         conflictingCharacteristics=[
             {"characteristicId": "c1", "catalogValue": "500"},
@@ -615,6 +630,7 @@ def test_characteristic_audit_ignores_false_conflict_with_equal_etm_value() -> N
 def test_characteristic_audit_rejects_selected_candidate_with_direct_conflict() -> None:
     selection = CatalogSelection(
         selectedPointId="123",
+        rationale="The candidate parameters were compared with the source requirements.",
         correspondence="Полное соответствие",
         matchedCharacteristicIds=["c1"],
         conflictingCharacteristics=[

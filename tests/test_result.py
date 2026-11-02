@@ -29,7 +29,8 @@ def test_result_json_contract_for_finalizer() -> None:
     assert result["reportId"] == 1
     assert result["jobRecordKey"] == "daily:b:1:42"
     assert "legalEntity" not in result["fields"]
-    assert result["fields"]["toCode"] == "TO-1"
+    assert result["fields"]["toCode"] == "Dep_TO-1"
+    assert result["reportFields"]["Код ТО"] == "Dep_TO-1"
     assert result["reportFields"]["ID"] == "42"
     assert result["sourceTender"]["seldonId"] == 42
 
@@ -104,9 +105,9 @@ def test_result_syncs_normalized_lot_divisibility_to_daily_column() -> None:
         debug=None,
     )
 
-    assert result["fields"]["lotDivisible"] == "Делимый"
-    assert result["reportFields"]["Лот делимый"] == "Делимый"
-    assert result["reportFields"]["lotDivisible"] == "Делимый"
+    assert result["fields"]["lotDivisible"] == "yes"
+    assert result["reportFields"]["Лот делимый"] == "yes"
+    assert result["reportFields"]["lotDivisible"] == "yes"
 
 
 def test_indivisible_lot_uses_business_label_in_daily_column() -> None:
@@ -129,11 +130,11 @@ def test_indivisible_lot_uses_business_label_in_daily_column() -> None:
         debug=None,
     )
 
-    assert result["reportFields"]["Лот делимый"] == "Неделимый"
-    assert result["fields"]["lotDivisible"] == "Неделимый"
+    assert result["reportFields"]["Лот делимый"] == "no"
+    assert result["fields"]["lotDivisible"] == "no"
 
 
-def test_result_uses_russian_business_labels_for_goz_and_national_regime() -> None:
+def test_result_uses_target_system_codes_for_goz_lot_and_decision() -> None:
     job = NormalizedJob(
         job_record_key="daily:b:1:42",
         batch_id="b",
@@ -145,6 +146,9 @@ def test_result_uses_russian_business_labels_for_goz_and_national_regime() -> No
         job,
         fields={
             "stateDefenseOrder": "yes",
+            "lotDivisible": "yes",
+            "tenderStatus": "Отказано ИИ",
+            "tenderStatusReason": "Коммерческие условия. НМЦК менее 1 млн руб.",
             "nationalRegime": "ban; restriction; preference",
         },
         meta={},
@@ -155,7 +159,10 @@ def test_result_uses_russian_business_labels_for_goz_and_national_regime() -> No
         debug=None,
     )
 
-    assert result["fields"]["stateDefenseOrder"] == "Да"
+    assert result["fields"]["stateDefenseOrder"] == "yes"
+    assert result["fields"]["lotDivisible"] == "yes"
+    assert result["fields"]["tenderStatus"] == "130"
+    assert result["fields"]["tenderStatusReason"] == "ku_nmck_ls300"
     assert result["fields"]["nationalRegime"] == "запрет; ограничение; преимущество"
 
     no_result = build_result_json(
@@ -169,5 +176,72 @@ def test_result_uses_russian_business_labels_for_goz_and_national_regime() -> No
         debug=None,
     )
 
-    assert no_result["fields"]["stateDefenseOrder"] == "Нет"
+    assert no_result["fields"]["stateDefenseOrder"] == "no"
     assert no_result["fields"]["nationalRegime"] == "Нет"
+
+
+def test_result_maps_all_new_status_and_reason_dictionary_codes() -> None:
+    job = NormalizedJob(
+        job_record_key="daily:b:1:42",
+        batch_id="b",
+        report_id=1,
+        seldon_id="42",
+    )
+    cases = (
+        ("Загружен Seldon", None, "110", None),
+        ("Согласовано ИИ", None, "120", None),
+        (
+            "Отказано ИИ",
+            "Оргвопросы. Опрос рынка / Мониторинг / Анализ рынка / Анонс / КИМ",
+            "130",
+            "cp_org_analiz",
+        ),
+        (
+            "Отказано ИИ",
+            "Оргвопросы. На момент согласования менее 3 рабочих дней до подачи заявки",
+            "130",
+            "org_term_ls3",
+        ),
+        ("Загружен Seldon", "Прочее", "110", "cp_other"),
+    )
+
+    for status, reason, expected_status, expected_reason in cases:
+        fields = {"tenderStatus": status}
+        if reason:
+            fields["tenderStatusReason"] = reason
+        result = build_result_json(
+            job,
+            fields=fields,
+            meta={},
+            product_check=None,
+            decision=None,
+            warnings=[],
+            logs=[],
+            debug=None,
+        )
+        assert result["fields"]["tenderStatus"] == expected_status
+        assert result["fields"].get("tenderStatusReason") == expected_reason
+
+
+def test_result_prefixes_every_department_code_once() -> None:
+    base = {
+        "job_record_key": "daily:b:1:42",
+        "batch_id": "b",
+        "report_id": 1,
+        "seldon_id": "42",
+    }
+    for raw, expected in (("1Y", "Dep_1Y"), ("11D", "Dep_11D"), ("Dep_1F", "Dep_1F")):
+        job = NormalizedJob(**base, to_code=raw, report_fields={"Код ТО": raw})
+        result = build_result_json(
+            job,
+            fields={},
+            meta={},
+            product_check=None,
+            decision=None,
+            warnings=[],
+            logs=[],
+            debug=None,
+        )
+        assert result["toCode"] == expected
+        assert result["fields"]["toCode"] == expected
+        assert result["reportFields"]["Код ТО"] == expected
