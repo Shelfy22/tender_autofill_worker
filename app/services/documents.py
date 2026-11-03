@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 import html
 import logging
 import re
@@ -18,7 +20,7 @@ from bs4 import BeautifulSoup
 
 from app.config import Settings
 from app.models import ParsedDocument
-from app.services.parsers.archives import UnsafeArchiveError, extract_archive
+from app.services.parsers.archives import extract_archive
 from app.services.parsers.common import detect_file_type, parse_file
 from app.services.document_roles import (
     COMPOSITE_ROLE,
@@ -507,6 +509,8 @@ class DocumentProcessor:
                 http_status=http_status,
                 byte_count=size,
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
@@ -617,6 +621,8 @@ class DocumentProcessor:
                 http_status=http_status or 200,
                 byte_count=size,
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
@@ -651,6 +657,8 @@ class DocumentProcessor:
             detected_type = detect_file_type(
                 final_path, resolved_name, metadata.content_type
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             self._observe_download(
                 status="failed",
@@ -706,6 +714,8 @@ class DocumentProcessor:
                         self.http, url, destination, name
                     ),
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 logger.warning(
                     "document_download_attempt_failed",
@@ -737,6 +747,8 @@ class DocumentProcessor:
                                 name,
                             ),
                         )
+                    except SoftTimeLimitExceeded:
+                        raise
                     except Exception as insecure_exc:
                         last_error = insecure_exc
                     else:
@@ -772,6 +784,8 @@ class DocumentProcessor:
                                 url, destination, name
                             ),
                         )
+                    except SoftTimeLimitExceeded:
+                        raise
                     except Exception as curl_exc:
                         failures.append(
                             f"{display_url}: httpx={last_error}; curl={curl_exc}"
@@ -833,6 +847,8 @@ class DocumentProcessor:
                     ),
                 }
                 parsed.extend(self._process_path(path, effective_descriptor, depth=0))
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 name = str(descriptor.get("fileName") or descriptor.get("url") or "document")
                 warning = f"{name}: {exc}"
@@ -892,6 +908,8 @@ class DocumentProcessor:
                 }
                 try:
                     result.extend(self._process_path(child, child_descriptor, depth + 1))
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception as exc:
                     result.append(
                         ParsedDocument(
@@ -962,6 +980,8 @@ class DocumentProcessor:
                 element.decompose()
             text = re.sub(r"\n{3,}", "\n\n", soup.get_text("\n", strip=True)).strip()
             return html.unescape(text)[: self.settings.max_text_chars_per_file], warnings
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             warnings.append(f"HTML страницы тендера не получен: {exc}")
             return "", warnings

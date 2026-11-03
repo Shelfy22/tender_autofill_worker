@@ -59,6 +59,7 @@ REMOTE_TERRITORY_REVIEW_REASON = (
 )
 CONSIGNMENT_REASON = "Коммерческие условия. Консигнация / Хранение у Покупателя за счет Поставщика"
 PAYMENT_DELAY_REASON = "Коммерческие условия. Отсрочка платежа 90 дней и более"
+PAYMENT_DELAY_DECISION_RULE = '- Отсрочка оплаты является причиной отказа при 90 днях и более (`>= 90`). Правило применяется\n  к рабочим, календарным и дням без уточнения типа. Исключение: если прямо указан отдельный\n  срок для МСП или самозанятого, компания может участвовать через такое юрлицо; тогда применим\n  этот срок и причина отказа по общей отсрочке не подтверждается.'
 DOCUMENTATION_REASON = "Оргвопросы. Отсутствует ТЗ / Нет документации / Некорректная ссылка"
 MARKET_RESEARCH_REASON = "Оргвопросы. Опрос рынка / Мониторинг / Анализ рынка / Анонс / КИМ"
 SUPPLY_WORK_REASON = "Номенклатура. Поставка с работами"
@@ -1296,6 +1297,7 @@ def apply_final_decision(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     fields = dict(fields)
     meta = dict(meta)
+    hard_reasons = [item for item in hard_reasons if is_decision_reason_enabled(item.reason)]
     documentation_reason = next(
         (item for item in hard_reasons if item.reason == DOCUMENTATION_REASON),
         None,
@@ -1467,7 +1469,6 @@ def apply_final_decision(
         for item in hard
         if item.reason not in {ASSORTMENT_REASON, COVERAGE_REASON}
     ]
-    coverage = product_check.get("coveragePercent")
 
     # Controlled reasons cannot be reintroduced by the LLM.
     allowed_detected = []
@@ -1961,10 +1962,7 @@ def build_decision_prompt(
 - Причина «{DELIVERY_DEADLINE_REASON}» полностью детерминирована по проверенному deliveryDate
   или deliveryDays. LLM запрещено выбирать её самостоятельно.
 - Срок действия договора, оплаты, гарантии, приёмки или подачи заявок не является сроком поставки.
-- Отсрочка оплаты является причиной отказа при 90 днях и более (`>= 90`). Правило применяется
-  к рабочим, календарным и дням без уточнения типа. Исключение: если прямо указан отдельный
-  срок для МСП или самозанятого, компания может участвовать через такое юрлицо; тогда применим
-  этот срок и причина отказа по общей отсрочке не подтверждается.
+{PAYMENT_DELAY_DECISION_RULE if is_decision_reason_enabled(PAYMENT_DELAY_REASON) else ""}
 - Причина «{HIGH_VOLTAGE_REASON}» полностью детерминирована по товарным позициям; LLM запрещено выбирать её.
   Само значение «35 кВ» недостаточно: изоляторы, изоляционные изделия, арматура, крепёж,
   зажимы, комплектующие и расходные материалы не являются высоковольтным оборудованием.

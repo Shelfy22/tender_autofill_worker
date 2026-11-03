@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -195,6 +197,8 @@ def resolve_product_hierarchy(
         return positions, [], _base_debug(len(positions), False)
     try:
         response = llm.classify_product_hierarchy(positions)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         warning = (
             "Optional product hierarchy review failed; all extracted positions "

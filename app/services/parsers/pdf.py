@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from app.value_normalization import column_name as _column_name
+
+from billiard.exceptions import SoftTimeLimitExceeded
+
 from pathlib import Path
 import re
 from typing import TYPE_CHECKING
@@ -19,13 +23,6 @@ def _has_meaningful_text(value: str) -> bool:
     return len(normalized) >= 30 and len(words) >= 4
 
 
-def _column_name(index: int) -> str:
-    name = ""
-    while index >= 0:
-        index, remainder = divmod(index, 26)
-        name = chr(ord("A") + remainder) + name
-        index -= 1
-    return name
 
 
 def _pdf_table_text(page: fitz.Page, page_number: int) -> list[str]:
@@ -33,12 +30,16 @@ def _pdf_table_text(page: fitz.Page, page_number: int) -> list[str]:
         return []
     try:
         finder = page.find_tables()
+    except SoftTimeLimitExceeded:
+        raise
     except Exception:
         return []
     parts: list[str] = []
     for table_index, table in enumerate(getattr(finder, "tables", []) or [], start=1):
         try:
             rows = table.extract()
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             continue
         parts.append(f"Таблица PDF {page_number}.{table_index}")
@@ -110,6 +111,8 @@ def extract_pdf_text(
     except TimeoutError as exc:
         warnings.append(f"OCR превысил лимит времени и файл пропущен: {exc}")
         return "", "ocr_timeout", warnings
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         warnings.append(f"OCR не выполнен, файл пропущен: {type(exc).__name__}: {exc}")
         return "", "ocr_failed", warnings

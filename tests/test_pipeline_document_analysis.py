@@ -1,11 +1,16 @@
 from types import SimpleNamespace
 
+import pytest
+
 from app.config import Settings
 from app.models import (
     DecisionReason,
+    CommercialConditionsResponse,
     DocumentAnalysisResponse,
     DocumentFieldCandidate,
     DocumentReasonHit,
+    FinalProductIntegrityAssignment,
+    FinalProductIntegrityResponse,
     JobClaim,
     LlmDecision,
     ParsedDocument,
@@ -226,6 +231,15 @@ class FakeLlmClient:
             ]
         )
 
+    def validate_final_product_matches(self, matches):
+        self.calls.append("validate_final_product_matches")
+        return FinalProductIntegrityResponse(assignments=[
+            FinalProductIntegrityAssignment(
+                positionIndex=item.positionIndex, decision="keep", confidence=0.99,
+                rationale="Source confirms the product",
+            ) for item in matches
+        ])
+
 
 class TwoTextDocumentProcessor(FakeDocumentProcessor):
     def process_all(self, *_: object) -> tuple[list[ParsedDocument], list[str]]:
@@ -380,6 +394,69 @@ class ConsolidationTimeoutFakeLlmClient(FakeLlmClient):
         raise LlmWallTimeoutError("consolidation timeout")
 
 
+def _install_pipeline_fakes(monkeypatch, llm_class, document_class=FakeDocumentProcessor):
+    import app.pipeline as pipeline_module
+
+    llm = llm_class()
+    monkeypatch.setattr(pipeline_module, "SeldonClient", FakeSeldonClient)
+    monkeypatch.setattr(pipeline_module, "DocumentProcessor", document_class)
+    monkeypatch.setattr(pipeline_module, "IProClient", FakeIProClient)
+    monkeypatch.setattr(pipeline_module, "CatalogMatcher", FakeCatalogMatcher)
+    monkeypatch.setattr(pipeline_module, "LlmClient", lambda *args, **kwargs: llm)
+    return llm
+
+
+def _pipeline_claim():
+    return JobClaim(
+        record_key="required-stages", batch_id="batch", attempt=1,
+        report_fields={},
+        report_id=1, seldon_id="123", input_json={"reportId": 1, "seldonId": "123"},
+    )
+
+
+@pytest.mark.parametrize("stage", ["audit_product_candidates", "validate_final_product_matches"])
+def test_required_audit_failure_never_reaches_final_decision(monkeypatch, tmp_path, stage):
+    llm = _install_pipeline_fakes(monkeypatch, FakeLlmClient)
+
+    def fail(*args):
+        raise LlmWallTimeoutError("required audit timeout")
+
+    setattr(llm, stage, fail)
+    settings = Settings(postgres_dsn="postgresql://user:pass@localhost/db", llm_api_key="test")
+    with pytest.raises(LlmWallTimeoutError, match="required audit timeout"):
+        TenderPipeline(settings, tmp_path).run(_pipeline_claim())
+    assert "decide" not in llm.calls
+
+
+def test_commercial_review_reaches_consolidation_for_active_fields(monkeypatch, tmp_path):
+    class WarrantyDocument(FakeDocumentProcessor):
+        def process_all(self, *args):
+            return [ParsedDocument(
+                documentIndex=1, fileName="terms.docx", textQualityOk=True,
+                text="Гарантийный срок: 24 месяца. Дата подведения итогов: 12.12.2026.",
+            )], []
+
+    class CommercialLlm(FakeLlmClient):
+        def analyze_commercial_conditions(self, context):
+            assert "targets: warrantyMonths" in context
+            assert "targets: resultDate" in context
+            assert "targets: paymentDelayDays" not in context
+            self.calls.append("commercial")
+            return CommercialConditionsResponse(fieldCandidates=[
+                DocumentFieldCandidate(fieldName="warrantyMonths", value=24, evidence="24 месяца"),
+            ])
+
+        def consolidate_document_analysis(self, results):
+            review = next(item for item in results if item["unitId"] == "commercial-conditions-review")
+            assert review["fieldCandidates"][0]["value"] == 24
+            return super().consolidate_document_analysis(results)
+
+    llm = _install_pipeline_fakes(monkeypatch, CommercialLlm, WarrantyDocument)
+    settings = Settings(postgres_dsn="postgresql://user:pass@localhost/db", llm_api_key="test")
+    TenderPipeline(settings, tmp_path).run(_pipeline_claim())
+    assert llm.calls.index("commercial") < llm.calls.index("consolidate_document_analysis")
+
+
 def test_document_analysis_pipeline_retries_batched_unit_as_single_documents(monkeypatch, tmp_path) -> None:
     import app.pipeline as pipeline_module
 
@@ -471,7 +548,7 @@ def test_document_analysis_pipeline_marks_truncated_unit_incomplete(monkeypatch,
     assert any("Document Analysis completed with incomplete units" in warning for warning in result["warnings"])
 
 
-def test_document_analysis_pipeline_falls_back_when_consolidation_times_out(
+def test_document_analysis_pipeline_stops_when_consolidation_times_out(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -508,10 +585,9 @@ def test_document_analysis_pipeline_falls_back_when_consolidation_times_out(
         },
     )
 
-    result = TenderPipeline(settings, tmp_path).run(claim)
+    with pytest.raises(LlmWallTimeoutError, match="consolidation timeout"):
+        TenderPipeline(settings, tmp_path).run(claim)
 
     assert LAST_LLM is not None
     assert LAST_LLM.calls.count("consolidate_document_analysis") == 1
-    assert LAST_LLM.calls.count("decide") == 1
-    assert result["debug"]["documentAnalysis"]["consolidatedProductCount"] == 1
-    assert any("consolidated locally" in warning for warning in result["warnings"])
+    assert LAST_LLM.calls.count("decide") == 0

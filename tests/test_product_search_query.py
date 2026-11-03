@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.models import (
     CharacteristicNumeric,
     ProductCharacteristic,
@@ -531,7 +533,7 @@ def test_two_llm_stages_enrich_query_and_keep_structured_characteristics() -> No
     assert debug["enrichedCount"] == 1
 
 
-def test_characteristic_llm_failure_builds_compact_fallback_query() -> None:
+def test_characteristic_llm_failure_stops_processing() -> None:
     class FailingLlm:
         def classify_product_characteristics(self, items: list[dict]) -> ProductSemanticBatchResponse:
             raise TimeoutError("timeout")
@@ -542,13 +544,8 @@ def test_characteristic_llm_failure_builds_compact_fallback_query() -> None:
         characteristics=[ProductCharacteristic(name="Мощность", value="40 Вт")],
     )
 
-    enriched, warnings, debug = enrich_product_search_queries(FailingLlm(), [position])
-
-    assert enriched[0].productQuery == "Светильник 40Вт"
-    assert enriched[0].searchCharacteristics == ["40Вт"]
-    assert enriched[0].searchQueries[0] == "Светильник 40Вт"
-    assert warnings
-    assert debug["enrichedCount"] == 1
+    with pytest.raises(TimeoutError, match="timeout"):
+        enrich_product_search_queries(FailingLlm(), [position])
 
 
 def test_projector_fallback_uses_values_and_excludes_binary_presence() -> None:
@@ -575,9 +572,9 @@ def test_projector_fallback_uses_values_and_excludes_binary_presence() -> None:
         ],
     )
 
-    enriched, warnings, _ = enrich_product_search_queries(FailingLlm(), [position])
+    from app.services.product_search_query import _fallback_search_query
 
-    assert warnings
+    enriched = [_fallback_search_query(position)]
     assert enriched[0].productQuery == "Прожектор 500Вт линейное 3200-7500К"
     assert enriched[0].searchCharacteristics == [
         "500Вт",

@@ -822,26 +822,18 @@ def review_spreadsheet_candidate_positions(
         "validatedPositionCount": len(positions),
         "batches": [],
     }
-    try:
-        for batch in _spreadsheet_review_batches(llm.settings, spreadsheet_positions):
-            combined_debug["batchCount"] += 1
-            response = llm.review_spreadsheet_candidates(batch)
-            reviewed_batch, warnings, debug = apply_spreadsheet_candidate_review(batch, response)
-            all_warnings.extend(warnings)
-            combined_debug["batches"].append(debug)
-            batch_ids = {position.candidateId for position in batch}
-            for candidate_id in batch_ids:
-                current_by_id.pop(candidate_id, None)
-            for position in reviewed_batch:
-                if position.candidateId:
-                    current_by_id[position.candidateId] = position
-    except Exception as exc:
-        combined_debug["failed"] = True
-        combined_debug["error"] = f"{type(exc).__name__}: {exc}"
-        return positions, [
-            "Excel candidate review недоступен; deterministic Excel позиции сохранены без LLM-фильтра: "
-            f"{type(exc).__name__}: {exc}"
-        ], combined_debug
+    for batch in _spreadsheet_review_batches(llm.settings, spreadsheet_positions):
+        combined_debug["batchCount"] += 1
+        response = llm.review_spreadsheet_candidates(batch)
+        reviewed_batch, warnings, debug = apply_spreadsheet_candidate_review(batch, response)
+        all_warnings.extend(warnings)
+        combined_debug["batches"].append(debug)
+        batch_ids = {position.candidateId for position in batch}
+        for candidate_id in batch_ids:
+            current_by_id.pop(candidate_id, None)
+        for position in reviewed_batch:
+            if position.candidateId:
+                current_by_id[position.candidateId] = position
 
     ordered: list[TenderPosition] = []
     emitted: set[str] = set()
@@ -916,28 +908,7 @@ def validate_product_candidates(
         )
         return [], warnings, debug
 
-    try:
-        response = llm.audit_product_candidates(retained)
-    except Exception as exc:
-        debug.update(
-            {
-                "requiresManualReview": True,
-                "rejectedPositions": deterministic_rejections,
-                "unresolved": [
-                    {
-                        "positionIndex": None,
-                        "product": "",
-                        "reason": f"LLM-аудит недоступен: {type(exc).__name__}: {exc}",
-                    }
-                ],
-            }
-        )
-        warnings.append(
-            "Обязательный аудит товарных кандидатов не выполнен; "
-            "исходные позиции сохранены, расчёт покрытия продолжен: "
-            f"{type(exc).__name__}: {exc}"
-        )
-        return retained, warnings, debug
+    response = llm.audit_product_candidates(retained)
 
     validated, audit_warnings, audit_debug = apply_product_candidate_audit(
         retained,
@@ -1119,24 +1090,5 @@ def validate_final_product_matches(
             "unresolved": [],
             "assignments": [],
         }
-    try:
-        response = llm.validate_final_product_matches(match_items)
-    except Exception as exc:
-        warning = (
-            "Final product integrity audit was unavailable; report rows were retained: "
-            f"{type(exc).__name__}: {exc}"
-        )
-        return match_items, [warning], {
-            "reviewRequested": True,
-            "applied": False,
-            "requiresManualReview": True,
-            "originalPositionCount": len(match_items),
-            "validatedPositionCount": len(match_items),
-            "rejectedPositionCount": 0,
-            "duplicateCount": 0,
-            "rejectedPositions": [],
-            "duplicates": [],
-            "unresolved": [{"positionIndex": None, "product": "", "reason": warning}],
-            "assignments": [],
-        }
+    response = llm.validate_final_product_matches(match_items)
     return apply_final_product_integrity_audit(match_items, response)

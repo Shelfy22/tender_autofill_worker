@@ -377,6 +377,8 @@ def test_document_analyzer_prompt_distinguishes_documents_from_works_and_zip() -
     assert "Не возвращай coverage" in prompt
 
 
+@pytest.mark.archived
+@pytest.mark.usefixtures("archived_tender_fields")
 def test_commercial_conditions_prompt_handles_minimum_share_as_no() -> None:
     client = object.__new__(LlmClient)
     captured: dict[str, object] = {}

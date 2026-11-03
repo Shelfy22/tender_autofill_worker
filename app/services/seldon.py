@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.value_normalization import first_value as _first
+
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -50,12 +52,6 @@ class SeldonDocumentsResult:
         }
 
 
-def _first(mapping: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        value = mapping.get(key)
-        if value is not None and str(value).strip() != "":
-            return value
-    return None
 
 
 def _body(response: httpx.Response) -> dict[str, Any]:

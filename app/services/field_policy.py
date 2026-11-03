@@ -29,6 +29,25 @@ DISABLED_DECISION_REASONS = frozenset(
     }
 )
 
+FIELD_HEADERS = {
+    "nationalRegime": ("Национальный режим", "Национальный резим"),
+    "deliveryType": ("Условия отгрузки",),
+    "deliveryDays": ("Срок поставки (дней)", "Срок поставки(дней)"),
+    "deliveryBatchDays": ("Срок поставки партии",),
+    "deliveryDate": ("Срок поставки (дата)", "Срок поставки(дата)"),
+    "paymentDelayDays": ("Отсрочка оплаты",),
+}
+
+
+def disabled_field_headers() -> frozenset[str]:
+    return frozenset(
+        header for name in DISABLED_TENDER_FIELDS
+        for header in FIELD_HEADERS.get(name, ())
+    )
+
+
+DISABLED_FIELD_HEADERS = disabled_field_headers()
+
 
 def is_tender_field_enabled(field_name: str) -> bool:
     return field_name not in DISABLED_TENDER_FIELDS

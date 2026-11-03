@@ -2,6 +2,17 @@ from app.models import NormalizedJob
 from app.services.result import build_result_json
 
 
+def test_reason_codes_accept_both_russian_yo_spellings():
+    from app.services.result import _tender_status_reason_code
+
+    for label, expected in (
+        ("Номенклатура. Военная приемка", "cp_nom_accept_military"),
+        ("Номенклатура. Атомная приемка", "cp_nom_accept_atomic"),
+    ):
+        assert _tender_status_reason_code(label) == expected
+        assert _tender_status_reason_code(label.replace("приемка", "приёмка")) == expected
+
+
 def test_result_json_contract_for_finalizer() -> None:
     job = NormalizedJob(
         job_record_key="daily:b:1:42",
@@ -163,7 +174,7 @@ def test_result_uses_target_system_codes_for_goz_lot_and_decision() -> None:
     assert result["fields"]["lotDivisible"] == "yes"
     assert result["fields"]["tenderStatus"] == "130"
     assert result["fields"]["tenderStatusReason"] == "ku_nmck_ls300"
-    assert result["fields"]["nationalRegime"] == "запрет; ограничение; преимущество"
+    assert "nationalRegime" not in result["fields"]
 
     no_result = build_result_json(
         job,
@@ -177,7 +188,7 @@ def test_result_uses_target_system_codes_for_goz_lot_and_decision() -> None:
     )
 
     assert no_result["fields"]["stateDefenseOrder"] == "no"
-    assert no_result["fields"]["nationalRegime"] == "Нет"
+    assert "nationalRegime" not in no_result["fields"]
 
 
 def test_result_maps_all_new_status_and_reason_dictionary_codes() -> None:

@@ -1642,7 +1642,7 @@ def test_sme_payment_term_prevents_ninety_day_payment_rejection() -> None:
     assert PAYMENT_DELAY_REASON not in _reason_names(reasons)
 
 
-def test_decision_prompt_uses_ninety_day_payment_threshold() -> None:
+def test_decision_prompt_omits_disabled_payment_threshold() -> None:
     prompt = build_decision_prompt(
         fields={},
         hard_reasons=[],
@@ -1652,8 +1652,8 @@ def test_decision_prompt_uses_ninety_day_payment_threshold() -> None:
         maximum_text_chars=10_000,
     )
 
-    assert "при 90 днях и более (`>= 90`)" in prompt
-    assert "к рабочим, календарным и дням без уточнения типа" in prompt
+    assert "при 90 днях и более (`>= 90`)" not in prompt
+    assert PAYMENT_DELAY_REASON not in prompt
 
 
 def test_market_research_rejects_only_commercial_tenders() -> None:

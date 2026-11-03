@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 import json
 import logging
 import time
@@ -11,9 +13,9 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.logging import stage
-from app.models import DocumentAnalysisResult, JobClaim, NormalizedJob, ParsedDocument, TenderPositionsResponse, TenderResult
+from app.models import DocumentAnalysisResult, JobClaim, NormalizedJob, ParsedDocument, TenderPositionsResponse
 from app.observability import RunObserver
-from app.services.catalog import CatalogMatcher, limit_catalog_positions
+from app.services.catalog import CatalogMatcher
 from app.services.coverage import summarize_product_coverage
 from app.services.customer import IProClient
 from app.services.decision import (
@@ -21,15 +23,9 @@ from app.services.decision import (
     build_decision_prompt,
     calculate_hard_reasons,
 )
-from app.services.document_analysis import (
-    build_document_analysis_units,
-    compact_document_analysis_results,
-    fallback_document_consolidation,
-    fields_from_consolidation,
-    result_from_unit,
-)
+from app.services.analysis_pipeline import analyze_document_units, consolidate_analysis
+from app.services.document_analysis import build_document_analysis_units, fields_from_consolidation
 from app.services.commercial_conditions import build_commercial_conditions_context
-from app.services.field_policy import is_tender_field_enabled
 from app.services.documents import (
     DocumentProcessor,
     build_combined_text as build_deterministic_text,
@@ -38,16 +34,8 @@ from app.services.documents import (
 )
 from app.services.llm import LlmClient, LlmResponseTruncatedError, LlmWallTimeoutError
 from app.services.normalization import deduplicate_strings, normalize_job_payload
-from app.services.product_validation import (
-    review_spreadsheet_candidate_positions,
-    validate_final_product_matches,
-    validate_product_candidates,
-)
-from app.services.product_characteristics import (
-    associate_characteristic_sets,
-    finalize_position_characteristics,
-)
-from app.services.product_search_query import enrich_product_search_queries
+from app.services.product_validation import review_spreadsheet_candidate_positions
+from app.services.product_pipeline import process_products
 from app.services.product_matching_export import build_product_matching_workbook
 from app.services.table_schema import (
     classify_spreadsheet_tables,
@@ -144,6 +132,8 @@ class TenderPipeline:
         with stage(logger, name):
             try:
                 result = function()
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 duration = round(time.monotonic() - started, 3)
                 if self.observer:
@@ -386,186 +376,46 @@ class TenderPipeline:
                     ),
                 )
                 self.warnings.extend(unit_warnings)
-                document_analysis_results: list[DocumentAnalysisResult] = []
-                incomplete_document_unit_ids: list[str] = []
-
-                def incomplete_result(unit: Any, warning: str) -> DocumentAnalysisResult:
-                    self.warnings.append(warning)
-                    incomplete_document_unit_ids.append(unit.unitId)
-                    return DocumentAnalysisResult(
-                        unitId=unit.unitId,
-                        inputSha256=unit.inputSha256,
-                        sourceType=unit.sourceType,
-                        fileName=unit.fileName,
-                        partIndex=unit.partIndex,
-                        partTotal=unit.partTotal,
-                        analysisIncomplete=True,
-                        warnings=[warning],
-                    )
-
-                def analyze_unit_safely(unit: Any) -> list[DocumentAnalysisResult]:
-                    try:
-                        return [result_from_unit(unit, llm.analyze_document_unit(unit))]
-                    except LlmResponseTruncatedError as exc:
-                        warning = (
-                            f"Document Analysis unit {unit.unitId} "
-                            f"({unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}) "
-                            f"returned a truncated LLM response and was marked incomplete: {exc}"
-                        )
-                        return [incomplete_result(unit, warning)]
-                    except (ValidationError, LlmWallTimeoutError) as exc:
-                        child_units = list(getattr(unit, "batchedDocumentUnits", []) or [])
-                        if not child_units:
-                            warning = (
-                                f"Document Analysis unit {unit.unitId} "
-                                f"({unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}) "
-                                f"failed with {type(exc).__name__} and was marked incomplete; "
-                                "deterministic extraction remains authoritative."
-                            )
-                            return [incomplete_result(unit, warning)]
-                        warning = (
-                            f"Document Analysis batched unit {unit.unitId} "
-                            f"({unit.fileName or unit.sourceType}) failed with {type(exc).__name__}; "
-                            f"retrying {len(child_units)} documents individually."
-                        )
-                        self.warnings.append(warning)
-                        retry_results: list[DocumentAnalysisResult] = []
-                        for child_unit in child_units:
-                            retry_results.extend(
-                                self._run_stage(
-                                    f"Analyze Document Unit Retry: "
-                                    f"{child_unit.fileName or child_unit.sourceType} "
-                                    f"{child_unit.partIndex}/{child_unit.partTotal}",
-                                    lambda child_unit=child_unit: analyze_unit_safely(child_unit),
-                                )
-                            )
-                        return retry_results
-
-                for unit in document_analysis_units:
-                    document_analysis_results.extend(
-                        self._run_stage(
-                            f"Analyze Document Unit: {unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}",
-                            lambda unit=unit: analyze_unit_safely(unit),
-                        )
-                    )
-                commercial_conditions_enabled = any(
-                    is_tender_field_enabled(field_name)
-                    for field_name in (
-                        "nationalRegime",
-                        "paymentDelayDays",
-                        "deliveryType",
-                        "deliveryBatchDays",
-                        "deliveryDays",
-                        "deliveryDate",
-                    )
+                document_analysis_results, incomplete_document_unit_ids = analyze_document_units(
+                    llm, document_analysis_units, self.warnings, run_stage=self._run_stage,
                 )
-                commercial_context = (
-                    build_commercial_conditions_context(page_text, parsed_documents)
-                    if commercial_conditions_enabled
-                    else ""
-                )
+                commercial_context = build_commercial_conditions_context(page_text, parsed_documents)
                 commercial_analyzer = getattr(llm, "analyze_commercial_conditions", None)
                 if commercial_context and callable(commercial_analyzer):
-                    try:
-                        commercial_response = self._run_stage(
-                            "Analyze Commercial Conditions",
-                            lambda: commercial_analyzer(commercial_context),
-                        )
-                        commercial_candidates = [
-                            candidate.model_copy(
-                                update={
-                                    "sourceReference": {
-                                        **candidate.sourceReference,
-                                        "review": "commercial_conditions",
-                                    }
+                    commercial_response = self._run_stage(
+                        "Analyze Commercial Conditions",
+                        lambda: commercial_analyzer(commercial_context),
+                    )
+                    commercial_candidates = [
+                        candidate.model_copy(
+                            update={
+                                "sourceReference": {
+                                    **candidate.sourceReference,
+                                    "review": "commercial_conditions",
                                 }
-                            )
-                            for candidate in commercial_response.fieldCandidates
-                        ]
-                        document_analysis_results.append(
-                            DocumentAnalysisResult(
-                                unitId="commercial-conditions-review",
-                                sourceType="document",
-                                fileName="commercial-conditions-review",
-                                documentKind="commercial_conditions_review",
-                                fieldCandidates=commercial_candidates,
-                                warnings=commercial_response.warnings,
-                            )
+                            }
                         )
-                    except (ValidationError, LlmResponseTruncatedError, LlmWallTimeoutError) as exc:
-                        self.warnings.append(
-                            "Commercial conditions review failed; document field candidates "
-                            f"remain available: {type(exc).__name__}: {exc}"
+                        for candidate in commercial_response.fieldCandidates
+                    ]
+                    document_analysis_results.append(
+                        DocumentAnalysisResult(
+                            unitId="commercial-conditions-review",
+                            sourceType="document",
+                            fileName="commercial-conditions-review",
+                            documentKind="commercial_conditions_review",
+                            fieldCandidates=commercial_candidates,
+                            warnings=commercial_response.warnings,
                         )
-                consolidation_payload, consolidation_dedup_debug = self._run_stage(
-                    "Deduplicate Document Analysis Products",
-                    lambda: compact_document_analysis_results(document_analysis_results),
-                )
-                try:
-                    document_consolidation = self._run_stage(
-                        "Consolidate Tender Analysis",
-                        lambda: llm.consolidate_document_analysis(
-                            consolidation_payload
-                        ),
-                    )
-                except (
-                    ValidationError,
-                    LlmResponseTruncatedError,
-                    LlmWallTimeoutError,
-                ) as exc:
-                    warning = (
-                        "Tender Analysis LLM consolidation failed; compact structured "
-                        f"results were consolidated locally: {type(exc).__name__}: {exc}"
-                    )
-                    self.warnings.append(warning)
-                    document_consolidation = fallback_document_consolidation(
-                        consolidation_payload,
-                        warning,
-                    )
-                if incomplete_document_unit_ids:
-                    incomplete_ids = list(document_consolidation.incompleteUnitIds)
-                    for unit_id in incomplete_document_unit_ids:
-                        if unit_id not in incomplete_ids:
-                            incomplete_ids.append(unit_id)
-                    consolidation_warnings = list(document_consolidation.warnings)
-                    warning = (
-                        "Document Analysis completed with incomplete units: "
-                        + ", ".join(incomplete_document_unit_ids)
-                    )
-                    if warning not in consolidation_warnings:
-                        consolidation_warnings.append(warning)
-                    document_consolidation = document_consolidation.model_copy(
-                        update={
-                            "incompleteUnitIds": incomplete_ids,
-                            "warnings": consolidation_warnings,
-                        }
                     )
                 (
-                    associated_products,
-                    unresolved_characteristic_sets,
-                    association_warnings,
+                    document_consolidation,
+                    consolidation_dedup_debug,
                     characteristic_association_debug,
-                ) = self._run_stage(
-                    "Associate Product Characteristics",
-                    lambda: associate_characteristic_sets(
-                        document_consolidation.products,
-                        document_consolidation.characteristicSets,
-                    ),
+                ) = consolidate_analysis(
+                    llm, document_analysis_results, incomplete_document_unit_ids,
+                    self.warnings, run_stage=self._run_stage,
                 )
-                self.warnings.extend(association_warnings)
-                document_consolidation = document_consolidation.model_copy(
-                    update={
-                        "products": associated_products,
-                        "characteristicSets": unresolved_characteristic_sets,
-                        "warnings": list(
-                            dict.fromkeys(
-                                list(document_consolidation.warnings)
-                                + association_warnings
-                            )
-                        ),
-                    }
-                )
-                self.warnings.extend(document_consolidation.warnings)
+                unresolved_characteristic_sets = document_consolidation.characteristicSets
                 extracted_fields = self._run_stage(
                     "Build Fields From Document Analysis",
                     lambda: fields_from_consolidation(document_consolidation),
@@ -647,51 +497,18 @@ class TenderPipeline:
                 ),
             )
             self.warnings.extend(position_warnings)
-            positions, characteristic_warnings, characteristic_finalize_debug = self._run_stage(
-                "Validate Product Characteristic Associations",
-                lambda: finalize_position_characteristics(positions),
+            processed = process_products(
+                llm, catalog, self.settings, positions, self.warnings,
+                run_stage=self._run_stage,
+                incomplete_unit_ids=(document_consolidation.incompleteUnitIds
+                                     if document_consolidation is not None else None),
             )
-            self.warnings.extend(characteristic_warnings)
-
-            catalog_positions, catalog_limit_warnings = limit_catalog_positions(
-                positions,
-                self.settings.catalog_match_max_positions,
-            )
-            self.warnings.extend(catalog_limit_warnings)
-            catalog_positions, validation_warnings, validation_debug = self._run_stage(
-                "Validate Product Candidates",
-                lambda: validate_product_candidates(llm, catalog_positions),
-            )
-            self.warnings.extend(validation_warnings)
-            validation_debug["sourcePositionCount"] = len(positions)
-            validation_debug["catalogPositionLimit"] = self.settings.catalog_match_max_positions
-            if document_consolidation is not None:
-                validation_debug["consolidationIncompleteUnitIds"] = list(
-                    document_consolidation.incompleteUnitIds
-                )
-                validation_debug["requiresManualReview"] = bool(
-                    validation_debug.get("requiresManualReview")
-                    or document_consolidation.incompleteUnitIds
-                )
-            catalog_positions, search_query_warnings, search_query_debug = self._run_stage(
-                "Build Semantic Product Search Queries",
-                lambda: enrich_product_search_queries(
-                    llm,
-                    catalog_positions,
-                    batch_size=self.settings.product_characteristic_batch_size,
-                ),
-            )
-            self.warnings.extend(search_query_warnings)
-            match_items, catalog_warnings = self._run_stage(
-                "Поиск товаров в каталоге/Qdrant",
-                lambda: catalog.match_all(catalog_positions),
-            )
-            self.warnings.extend(catalog_warnings)
-            match_items, final_validation_warnings, final_validation_debug = self._run_stage(
-                "Validate Final Product Rows",
-                lambda: validate_final_product_matches(llm, match_items),
-            )
-            self.warnings.extend(final_validation_warnings)
+            positions = processed.positions
+            match_items = processed.matches
+            characteristic_finalize_debug = processed.characteristics
+            validation_debug = processed.validation
+            search_query_debug = processed.search
+            final_validation_debug = processed.final_validation
             product_check = self._run_stage(
                 "Summarize Product Coverage",
                 lambda: summarize_product_coverage(
@@ -800,6 +617,8 @@ class TenderPipeline:
                                 filename=filename,
                                 content=workbook,
                             ).remote_path
+                        except SoftTimeLimitExceeded:
+                            raise
                         except Exception as exc:
                             raise RuntimeError(type(exc).__name__) from exc
 
@@ -813,6 +632,8 @@ class TenderPipeline:
                             ),
                         }
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception as exc:
                     report_export["errorType"] = type(exc).__name__
                     self.warnings.append(

@@ -1,34 +1,23 @@
 from __future__ import annotations
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
 
 from app.config import Settings
-from app.models import DocumentAnalysisResult, ParsedDocument, TenderPositionsResponse
-from app.services.catalog import CatalogMatcher, limit_catalog_positions
+from app.models import ParsedDocument, TenderPositionsResponse
+from app.services.catalog import CatalogMatcher
 from app.services.coverage import summarize_product_coverage
-from app.services.document_analysis import (
-    build_document_analysis_units,
-    compact_document_analysis_results,
-    fallback_document_consolidation,
-    result_from_unit,
-)
+from app.services.analysis_pipeline import analyze_document_units, consolidate_analysis
+from app.services.document_analysis import build_document_analysis_units
 from app.services.documents import DocumentProcessor, build_combined_text, safe_filename
-from app.services.llm import LlmClient, LlmResponseTruncatedError, LlmWallTimeoutError
-from app.services.product_characteristics import (
-    associate_characteristic_sets,
-    finalize_position_characteristics,
-)
-from app.services.product_search_query import enrich_product_search_queries
-from app.services.product_validation import (
-    validate_final_product_matches,
-    validate_product_candidates,
-)
+from app.services.llm import LlmClient
+from app.services.product_pipeline import process_products
 from app.services.products import extract_deterministic_positions, merge_positions
 from app.services.table_schema import (
     classify_spreadsheet_tables,
@@ -71,6 +60,8 @@ def run_product_matching_from_files(
                 descriptor = {"index": index, "fileName": file_name, "url": ""}
                 try:
                     parsed_documents.extend(processor._process_path(destination, descriptor, depth=0))
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception as exc:
                     warnings.append(f"{file_name}: {exc}")
                     parsed_documents.append(
@@ -128,99 +119,11 @@ def run_product_matching_from_files(
             )
             warnings.extend(unit_warnings)
 
-            analysis_results: list[DocumentAnalysisResult] = []
-            incomplete_unit_ids: list[str] = []
-
-            def incomplete_result(unit: Any, warning: str) -> DocumentAnalysisResult:
-                incomplete_unit_ids.append(unit.unitId)
-                warnings.append(warning)
-                return DocumentAnalysisResult(
-                    unitId=unit.unitId,
-                    inputSha256=unit.inputSha256,
-                    sourceType=unit.sourceType,
-                    fileName=unit.fileName,
-                    partIndex=unit.partIndex,
-                    partTotal=unit.partTotal,
-                    analysisIncomplete=True,
-                    warnings=[warning],
-                )
-
-            def analyze_unit_safely(unit: Any) -> list[DocumentAnalysisResult]:
-                try:
-                    response = llm.analyze_document_unit(unit)
-                    return [result_from_unit(unit, response)]
-                except LlmResponseTruncatedError as exc:
-                    warning = f"{unit.fileName or unit.sourceType} {unit.partIndex}/{unit.partTotal}: {exc}"
-                    return [incomplete_result(unit, warning)]
-                except (ValidationError, LlmWallTimeoutError) as exc:
-                    child_units = list(getattr(unit, "batchedDocumentUnits", []) or [])
-                    if not child_units:
-                        warning = (
-                            f"{unit.fileName or unit.sourceType} "
-                            f"{unit.partIndex}/{unit.partTotal}: "
-                            f"{type(exc).__name__}; unit marked incomplete and "
-                            "deterministic positions preserved."
-                        )
-                        return [incomplete_result(unit, warning)]
-                    warnings.append(
-                        f"{unit.fileName or unit.sourceType}: batched analysis failed with "
-                        f"{type(exc).__name__}; retrying {len(child_units)} documents individually."
-                    )
-                    retry_results: list[DocumentAnalysisResult] = []
-                    for child_unit in child_units:
-                        retry_results.extend(analyze_unit_safely(child_unit))
-                    return retry_results
-
-            for unit in units:
-                analysis_results.extend(analyze_unit_safely(unit))
-
-            consolidation_payload, consolidation_dedup_debug = (
-                compact_document_analysis_results(analysis_results)
+            analysis_results, incomplete_unit_ids = analyze_document_units(llm, units, warnings)
+            consolidation, consolidation_dedup_debug, characteristic_association_debug = consolidate_analysis(
+                llm, analysis_results, incomplete_unit_ids, warnings,
             )
-            try:
-                consolidation = llm.consolidate_document_analysis(
-                    consolidation_payload
-                )
-            except (
-                ValidationError,
-                LlmResponseTruncatedError,
-                LlmWallTimeoutError,
-            ) as exc:
-                warning = (
-                    "LLM consolidation failed; structured results were consolidated "
-                    f"locally: {type(exc).__name__}: {exc}"
-                )
-                warnings.append(warning)
-                consolidation = fallback_document_consolidation(
-                    consolidation_payload,
-                    warning,
-                )
-            warnings.extend(consolidation.warnings)
-            for unit_id in incomplete_unit_ids:
-                if unit_id not in consolidation.incompleteUnitIds:
-                    consolidation.incompleteUnitIds.append(unit_id)
-
-            (
-                associated_products,
-                unresolved_characteristic_sets,
-                association_warnings,
-                characteristic_association_debug,
-            ) = associate_characteristic_sets(
-                consolidation.products,
-                consolidation.characteristicSets,
-            )
-            warnings.extend(association_warnings)
-            consolidation = consolidation.model_copy(
-                update={
-                    "products": associated_products,
-                    "characteristicSets": unresolved_characteristic_sets,
-                    "warnings": list(
-                        dict.fromkeys(
-                            list(consolidation.warnings) + association_warnings
-                        )
-                    ),
-                }
-            )
+            unresolved_characteristic_sets = consolidation.characteristicSets
 
             positions, position_warnings = merge_positions(
                 deterministic_positions,
@@ -232,43 +135,13 @@ def run_product_matching_from_files(
                 settings.max_tender_positions,
             )
             warnings.extend(position_warnings)
-            (
-                positions,
-                characteristic_warnings,
-                characteristic_finalize_debug,
-            ) = finalize_position_characteristics(positions)
-            warnings.extend(characteristic_warnings)
-
-            catalog_positions, catalog_limit_warnings = limit_catalog_positions(
-                positions,
-                settings.catalog_match_max_positions,
-            )
-            warnings.extend(catalog_limit_warnings)
-            catalog_positions, validation_warnings, validation_debug = validate_product_candidates(
-                llm,
-                catalog_positions,
-            )
-            warnings.extend(validation_warnings)
-            validation_debug["sourcePositionCount"] = len(positions)
-            validation_debug["catalogPositionLimit"] = settings.catalog_match_max_positions
-            (
-                catalog_positions,
-                search_query_warnings,
-                search_query_debug,
-            ) = enrich_product_search_queries(
-                llm,
-                catalog_positions,
-                batch_size=settings.product_characteristic_batch_size,
-            )
-            warnings.extend(search_query_warnings)
-            match_items, catalog_warnings = catalog.match_all(catalog_positions)
-            warnings.extend(catalog_warnings)
-            (
-                match_items,
-                final_validation_warnings,
-                final_validation_debug,
-            ) = validate_final_product_matches(llm, match_items)
-            warnings.extend(final_validation_warnings)
+            processed = process_products(llm, catalog, settings, positions, warnings)
+            positions = processed.positions
+            match_items = processed.matches
+            characteristic_finalize_debug = processed.characteristics
+            validation_debug = processed.validation
+            search_query_debug = processed.search
+            final_validation_debug = processed.final_validation
             product_check = summarize_product_coverage(
                 match_items,
                 supply_value_threshold_enabled=False,

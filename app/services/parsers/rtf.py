@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.value_normalization import column_name as _column_name
+
 import codecs
 import re
 from pathlib import Path
@@ -19,13 +21,6 @@ _CONTROL_TEXT = {
 }
 
 
-def _column_name(index: int) -> str:
-    name = ""
-    while index >= 0:
-        index, remainder = divmod(index, 26)
-        name = chr(ord("A") + remainder) + name
-        index -= 1
-    return name
 
 
 def _codec(codepage: int, fallback: str) -> str:

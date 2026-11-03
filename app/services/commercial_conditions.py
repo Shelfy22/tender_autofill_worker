@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from app.models import ParsedDocument, SpreadsheetTable
+from app.services.field_policy import is_tender_field_enabled
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,16 @@ _FIELD_PATTERNS: dict[str, tuple[_Anchor, ...]] = {
         _Anchor(re.compile(r"итог\w*\s+закупк\w*", re.I), False),
     ),
 }
+
+
+def active_commercial_fields() -> tuple[str, ...]:
+    """Select retrieval goals before scanning any document text."""
+    delivery_fields = ("deliveryType", "deliveryDays", "deliveryBatchDays", "deliveryDate")
+    return tuple(
+        name for name in _FIELD_PATTERNS
+        if (any(is_tender_field_enabled(field) for field in delivery_fields)
+            if name == "delivery" else is_tender_field_enabled(name))
+    )
 
 
 def _compact(value: str) -> str:
@@ -193,10 +204,11 @@ def build_commercial_conditions_context(
     # A repeated table in one file must not hide evidence in the other tender
     # documents.  We retain several alternatives per source, but no more.
     candidate_limit = max(max_fragments_per_field * 5, 20)
+    active_patterns = {name: _FIELD_PATTERNS[name] for name in active_commercial_fields()}
     source_candidate_counts: dict[tuple[str, str], int] = defaultdict(int)
     for source, raw_text in _source_blocks(page_text, documents):
         text = str(raw_text or "")
-        for label, anchors in _FIELD_PATTERNS.items():
+        for label, anchors in active_patterns.items():
             for anchor in anchors:
                 for match in anchor.pattern.finditer(text):
                     source_key = (label, source.casefold())
@@ -227,7 +239,7 @@ def build_commercial_conditions_context(
         offsets: dict[str, int] = defaultdict(int)
         while len(fragments) < max_fragments:
             added = False
-            for label in _FIELD_PATTERNS:
+            for label in active_patterns:
                 if selected_per_field[label] >= max_fragments_per_field:
                     continue
                 field_candidates = candidates[label][strong]

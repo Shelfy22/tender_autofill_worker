@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
+from app.value_normalization import normalize_currency
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -387,10 +389,7 @@ class TenderPosition(BaseModel):
     @field_validator("documentCurrency", mode="before")
     @classmethod
     def normalize_document_currency(cls, value: Any) -> str | None:
-        text = str(value or "").strip().upper()
-        if not text:
-            return None
-        return "RUB" if text in {"RUR", "РУБ", "РУБ.", "₽"} else text
+        return normalize_currency(value)
 
 
 class TenderPositionsResponse(BaseModel):
@@ -868,10 +867,7 @@ class ProductMatchItem(BaseModel):
     @field_validator("documentCurrency", mode="before")
     @classmethod
     def normalize_document_currency(cls, value: Any) -> str | None:
-        text = str(value or "").strip().upper()
-        if not text:
-            return None
-        return "RUB" if text in {"RUR", "РУБ", "РУБ.", "₽"} else text
+        return normalize_currency(value)
 
 
 class DecisionReason(BaseModel):

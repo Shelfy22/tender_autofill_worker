@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 import base64
 import copy
 import hashlib
@@ -35,7 +37,12 @@ from app.models import (
     TenderPosition,
     TenderPositionsResponse,
 )
-from app.services.field_policy import DISABLED_TENDER_FIELDS, enabled_tender_fields
+from app.services.field_policy import DISABLED_TENDER_FIELDS, enabled_tender_fields, is_tender_field_enabled
+from app.services.field_prompts import (
+    active_extraction_rules, document_rule, active_commercial_rules, active_consolidation_rules,
+    commercial_field_names,
+    EXTRACTION_BASE, EXTRACTION_DELIVERY, EXTRACTION_NATIONAL, DOCUMENT_FIELDS,
+)
 
 if TYPE_CHECKING:
     from app.observability import RunObserver
@@ -207,10 +214,8 @@ def _strict_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 def _response_schema(schema: type[T], *, strict: bool) -> dict[str, Any]:
     generated = schema.model_json_schema()
-    if not strict:
-        return generated
-
-    generated = _strict_json_schema(generated)
+    if strict:
+        generated = _strict_json_schema(generated)
     if schema is ExtractedFieldsResponse:
         # Dynamic dictionary keys are incompatible with strict schemas. The worker
         # has a fixed field contract, so expose those keys explicitly to the model.
@@ -232,12 +237,19 @@ def _response_schema(schema: type[T], *, strict: bool) -> dict[str, Any]:
                 {
                     "type": "object",
                     "properties": {
-                        name: {"$ref": "#/$defs/FieldValue"} for name in FIELD_NAMES
+                        name: {"$ref": "#/$defs/FieldValue"} for name in enabled_tender_fields(ALL_FIELD_NAMES)
                     },
-                    "required": list(FIELD_NAMES),
+                    "required": enabled_tender_fields(ALL_FIELD_NAMES),
                     "additionalProperties": False,
                 }
             )
+    candidate_schema = generated.get("$defs", {}).get("DocumentFieldCandidate", {})
+    field_name_schema = candidate_schema.get("properties", {}).get("fieldName")
+    if isinstance(field_name_schema, dict):
+        field_name_schema["enum"] = (
+            commercial_field_names() if schema is CommercialConditionsResponse
+            else enabled_tender_fields(ALL_FIELD_NAMES)
+        )
     return generated
 
 
@@ -252,106 +264,26 @@ ALL_FIELD_NAMES = [
 ]
 FIELD_NAMES = enabled_tender_fields(ALL_FIELD_NAMES)
 
-DISABLED_FIELD_PROMPT = (
-    "Поля временно исключены заказчиком и не должны анализироваться, "
-    "упоминаться или возвращаться: "
-    + ", ".join(sorted(DISABLED_TENDER_FIELDS))
-    + "."
-)
+def disabled_field_prompt() -> str:
+    disabled = sorted(name for name in ALL_FIELD_NAMES if not is_tender_field_enabled(name))
+    return ('Поля временно исключены заказчиком и не должны анализироваться, упоминаться или возвращаться: ' + ", ".join(disabled) + ".") if disabled else ""
+
+
+DISABLED_FIELD_PROMPT = disabled_field_prompt()
 
 
 def _active_field_extraction_rules() -> str:
-    """Remove dormant field instructions from the prompt, not from source code."""
-    rules = FIELD_EXTRACTION_RULES
-    if "nationalRegime" in DISABLED_TENDER_FIELDS:
-        rules = re.sub(
-            r"(?s)nationalRegime: при прямой.*?`ban > restriction > preference`\.\n",
-            "",
-            rules,
-        )
-    if {
-        "deliveryType",
-        "deliveryDays",
-        "deliveryBatchDays",
-        "deliveryDate",
-    }.issubset(DISABLED_TENDER_FIELDS):
-        rules = re.sub(
-            r"(?s)deliveryDate и deliveryDays заполняй.*?Если срок поставки не подтверждён — value=null\.\n",
-            "",
-            rules,
-        )
-    return rules
+    return active_extraction_rules()
 
 
 def _active_document_field_rules(prompt: str) -> str:
-    """Keep archived extraction guidance in code while omitting it from LLM input."""
-    if "nationalRegime" in DISABLED_TENDER_FIELDS:
-        prompt = re.sub(
-            r"(?s)- nationalRegime —.*?(?=- lotDivisible —)",
-            "",
-            prompt,
-        )
-    if {
-        "deliveryType",
-        "deliveryDays",
-        "deliveryBatchDays",
-        "deliveryDate",
-        "paymentDelayDays",
-    }.issubset(DISABLED_TENDER_FIELDS):
-        prompt = re.sub(
-            r"(?s)- deliveryType —.*?(?=resultDate —)",
-            "",
-            prompt,
-        )
+    for name, block in DOCUMENT_FIELDS.items():
+        if not is_tender_field_enabled(name):
+            prompt = prompt.replace(block, "")
     return prompt
 
 
-FIELD_EXTRACTION_RULES = """
-Ты извлекаешь поля для автозаполнения карточки тендера на сайте ЭТМ.
-Верни только валидный JSON без markdown. Не придумывай значения. Если поле не найдено — value=null.
-Для каждого поля верни {value, confidence: low|medium|high, source, evidence}.
-Даты YYYY-MM-DD, время HH:mm. Денежные значения — строка с суммой и валютой.
-tenderStatus на извлечении по умолчанию «Загружен Seldon»; окончательное решение выполняется отдельно.
-stateDefenseOrder=yes только при прямом ГОЗ / «государственном оборонном заказе» / 275-ФЗ.
-Казначейское сопровождение, субсидия, идентификатор государственного контракта (соглашения),
-счёт целевых средств или отдельный счёт без связи с ГОЗ/275-ФЗ не являются признаками ГОЗ.
-Типовой текст о национальном режиме по ПП №1875 («а также закупок в рамках государственного
-оборонного заказа…») описывает сферу действия постановления, а не эту закупку: для него ставь no.
-specialAccount=yes только при прямом требовании специального банковского счёта участника именно
-для обеспечения заявки. Счёт поставщика для целевых средств, казначейский или отдельный счёт
-по договору не является спецсчётом; иначе no.
-contractSecurity: return only an explicitly stated amount or percentage for
-security of performance of the contract/agreement; otherwise null.
-warrantySecurity: return only an explicitly stated amount or percentage for
-security of warranty obligations; otherwise null.
-lotDivisible только при прямой формулировке делимости/неделимости.
-deliveryDate и deliveryDays заполняй только по прямому сроку поставки/доставки товара:
-«срок поставки», «поставить до/не позднее», «доставка до», «в течение N дней».
-Если поставка идёт партиями, по заявкам, графику или разнарядке, срок одной партии
-возвращай только в deliveryBatchDays, а deliveryDays оставляй null.
-Если срок партии не назван, оставь deliveryBatchDays=null: значение для карточки заполнит код.
-Не вычисляй deliveryDays как разность календарных дат «с ДД.ММ.ГГГГ по ДД.ММ.ГГГГ»:
-это период поставки, а не установленный срок в днях. Если негарантированный объём
-поставляется только после письменного запроса/уведомления Заказчика, это `by_requests`;
-если число дней после такого запроса не названо — оба поля deliveryDays и deliveryBatchDays=null.
-Если поставка единовременна в течение срока действия договора и дата окончания этого срока прямо
-указана в том же условии, верни её как deliveryDate и приведи в evidence обе части условия.
-Не используй для deliveryDate/deliveryDays срок оплаты, гарантии, приёмки или окончания подачи заявок.
-Если срок поставки не подтверждён — value=null.
-resultDate ищи только в документах по прямой формулировке «Дата подведения итогов (закупки)»;
-не подставляй дату протокола, дату окончания подачи или иной срок. contractDate всегда оставляй null:
-он рассчитывается кодом как resultDate + 20 календарных дней.
-Код ТО приходит программно и не извлекается из документации.
-Приоритет: договор/ТЗ/спецификация, затем Seldon/страница.
-nationalRegime: при прямой «минимальной обязательной доле закупок товаров российского
-происхождения» по ПП №1875 верни `minimum_share`; при отсутствии подтверждённой меры
-верни null, не создавай `not_found` и не подменяй её преимуществом. Таблица товаров с
-колонкой «Вид защитной меры» приоритетнее общего раздела: перечень «запрет / ограничение /
-преимущество» без строки позиции сам по себе не подтверждает ни одной меры. Но отдельная
-таблица «Применение национального режима» с колонкой «Установлены заказчиком: Да/Нет» —
-самостоятельное прямое доказательство: учитывай только меры с «Да/Установлено», игнорируй
-«Не установлено/не применяется» и выбирай одну старшую меру `ban > restriction > preference`.
-""".strip()
+FIELD_EXTRACTION_RULES = "\n".join((EXTRACTION_BASE, EXTRACTION_DELIVERY, EXTRACTION_NATIONAL))
 
 
 DELIVERY_CLASSIFICATION_RULES = """
@@ -720,7 +652,7 @@ class LlmClient:
         model_chain: list[str] | None = None,
         max_attempts_override: int | None = None,
     ) -> T:
-        schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+        schema_json = json.dumps(_response_schema(schema, strict=False), ensure_ascii=False)
         request_timeout = self.settings.timeout_for(operation) or self.settings.llm_timeout_seconds
         reasoning_effort = self._reasoning_effort(operation)
         thinking_hint = "/no_think\n" if reasoning_effort == "none" else ""
@@ -768,6 +700,8 @@ class LlmClient:
                         ),
                     ),
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 last_error = exc
                 self._observe_llm(
@@ -821,6 +755,8 @@ class LlmClient:
                     validation_value = {"products": validation_value, "warnings": []}
                     products_shape_normalized = True
                 validated = schema.model_validate(validation_value)
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 last_error = exc
                 self._observe_parse(
@@ -902,13 +838,12 @@ class LlmClient:
         raise RuntimeError("LLM model chain is empty")
 
     def extract_fields(self, combined_text: str) -> ExtractedFieldsResponse:
-        skeleton = {name: {"value": None, "confidence": "low", "source": None, "evidence": None} for name in FIELD_NAMES}
+        skeleton = {name: {"value": None, "confidence": "low", "source": None, "evidence": None} for name in enabled_tender_fields(ALL_FIELD_NAMES)}
         prompt = (
-            f"{_active_field_extraction_rules()}\n\n{DISABLED_FIELD_PROMPT}\n\nJSON ответа: {{\"fields\": ..., \"warnings\": []}}\n"
+            f"{active_extraction_rules()}\n\n{disabled_field_prompt()}\n\nJSON ответа: {{\"fields\": ..., \"warnings\": []}}\n"
             f"Ожидаемые поля:\n{json.dumps(skeleton, ensure_ascii=False)}\n\n"
             f"Текст для анализа:\n{combined_text}"
         )
-        prompt = _active_document_field_rules(prompt)
         return self.json_call(
             system="Ты извлекаешь структурированные данные из тендерной документации. Только JSON.",
             prompt=prompt,
@@ -1134,9 +1069,9 @@ Candidates:
         unit: DocumentAnalysisUnit,
     ) -> DocumentAnalysisResponse:
         prompt = f"""
-{DELIVERY_CLASSIFICATION_RULES if any(name in FIELD_NAMES for name in ('deliveryType', 'deliveryDays', 'deliveryBatchDays', 'deliveryDate')) else ''}
+{DELIVERY_CLASSIFICATION_RULES if any(name in enabled_tender_fields(ALL_FIELD_NAMES) for name in ('deliveryType', 'deliveryDays', 'deliveryBatchDays', 'deliveryDate')) else ''}
 
-{DISABLED_FIELD_PROMPT}
+{disabled_field_prompt()}
 
 Проанализируй один DocumentAnalysisUnit. Верни только компактный JSON.
 
@@ -1176,50 +1111,15 @@ Candidates:
 - specialAccount — верни только `yes` при прямом требовании специального банковского
   счёта участника для обеспечения заявки. Казначейский/целевой/отдельный счёт по договору
   не является спецсчётом; не возвращай `no` из-за отсутствия фразы в unit;
-- nationalRegime — верни только установленный вид национального режима по ПП 1875:
-  одну старшую меру `ban`, `restriction` или `preference` в порядке приоритета
-  `ban > restriction > preference`, либо
-  `minimum_share` для минимальной обязательной доли закупок товаров российского
-  происхождения. `minimum_share` не является преимуществом. Если мера не
-  подтверждена, не возвращай поле; не создавай `none`/`not_found`. Если в товарной
-  таблице есть колонка «Вид защитной меры» (или эквивалент) и строка позиции, её
-  значение приоритетнее общего текста. Отдельная таблица «Применение национального режима»
-  с колонкой «Установлены заказчиком: Да/Нет» также является прямым доказательством:
-  учитывай только строки с «Да/Установлено», а «Не установлено/не применяется» исключай.
-  Перечень «запрет / ограничение / преимущество» без строки товара или такой таблицы —
-  это описание возможных мер, не candidate;
+{document_rule("nationalRegime")}
 - lotDivisible — верни `yes` или `no` только при прямой формулировке о делимости
   лота, подаче на часть лота либо запрете деления лота; не делай вывод из молчания.
-- deliveryType — `single_date`, `during_period` или `by_requests`. «Не позднее
-  ДД.ММ.ГГГГ» / «до ДД.ММ.ГГГГ» — это single_date и deliveryDate, если нет
-  повторяющихся партий/заявок/графика поставки. `by_requests` — при прямой
-  формулировке «по заявкам», «по заявке Заказчика», «по разнарядкам» либо при
-  негарантированном объёме, поставляемом по письменному запросу/уведомлению Заказчика, а также
-  «поставка партиями», «отдельными партиями», «поставка по графику», «график
-  поставки» или «сроки отдельных партий». Такие признаки имеют приоритет над
-  общей датой окончания и сроком в днях. Исключения: «одной/единой партией» и
-  «график работы склада» не означают `by_requests`. Единовременная поставка в
-  днях без этих признаков — during_period. Не подменяй один тип другим;
-- deliveryBatchDays — если поставка партиями, по заявкам, графику или разнарядке:
-  число дней на одну партию после заявки. При нескольких сроках выбери минимальный,
-  а остальные сроки и применимость укажи в deliveryNote. Не записывай его в deliveryDays;
-- deliveryDays — число дней общего прямого срока поставки только для единовременной поставки;
-  не вычисляй его из промежутка между двумя датами поставки;
-- deliveryDate — конечная дата поставки. Если единовременная поставка должна быть выполнена в течение срока действия договора и этот срок прямо ограничен датой, верни эту дату с evidence всего условия; иначе не подставляй дату окончания договора;
-- paymentDelayDays — число дней отсрочки/срока оплаты после поставки. Учитывай также
-  «в срок не более N дней», «заказчик оплачивает», «оплата осуществляется/выплачивается»
-  и «расчёты производятся». Не путай со сроком поставки/гарантии. При нескольких
-  вариантах для МСП/самозанятого и иных поставщиков выбирай срок МСП/самозанятого
-  только если закупка прямо проводится исключительно среди таких участников. Иначе это
-  исключение: выбери общий наибольший срок и сохрани все условия в evidence. Нормализация
-  применит правило `ceil(дни × 1.4)`;
-- deliveryNote — это примечание именно к deliveryType, а не самостоятельный тип
-  отгрузки. Сохрани короткие фактические детали: от чего отсчитывается срок,
-  заявки/график/разнарядки, размер партии, разгрузка, особое условие оплаты или
-  «Уточнить ...». Не возвращай только единицу срока («рабочие дни», «календарные
-  дни», «банковские дни») без числа и другого условия: в таком случае null.
-  Не пиши сюда только общую фразу «Поставка партиями/по заявкам», если в unit есть
-  более конкретный факт.
+{document_rule("deliveryType")}
+{document_rule("deliveryBatchDays")}
+{document_rule("deliveryDays")}
+{document_rule("deliveryDate")}
+{document_rule("paymentDelayDays")}
+{document_rule("deliveryNote")}
 resultDate — обязательно ищи в документации, извещении и проекте договора по
 формулировкам «Дата подведения итогов (закупки/этапа)», «Подведение итогов» и
 «дата рассмотрения, оценки и сопоставления заявок (подведения итогов)»; возвращай
@@ -1264,7 +1164,6 @@ Spreadsheet candidates, если есть:
 Текст unit:
 {unit.text}
 """.strip()
-        prompt = _active_document_field_rules(prompt)
         return self.json_call(
             system=(
                 "Ты Document Analyzer. Читаешь ровно один bounded unit и извлекаешь "
@@ -1294,9 +1193,9 @@ Spreadsheet candidates, если есть:
         legal condition instead of guessing from a full procurement document.
         """
         prompt = f"""
-{DELIVERY_CLASSIFICATION_RULES if any(name in FIELD_NAMES for name in ('deliveryType', 'deliveryDays', 'deliveryBatchDays', 'deliveryDate')) else ''}
+{DELIVERY_CLASSIFICATION_RULES if any(name in enabled_tender_fields(ALL_FIELD_NAMES) for name in ('deliveryType', 'deliveryDays', 'deliveryBatchDays', 'deliveryDate')) else ''}
 
-{DISABLED_FIELD_PROMPT}
+{disabled_field_prompt()}
 
 Проверь фрагменты закупочной документации. Верни только JSON с fieldCandidates.
 Каждый candidate обязан содержать дословный evidence (не более 500 символов) и
@@ -1305,66 +1204,7 @@ sourceReference с полем source из строки `[source: ...]`. Если
 
 Допустимы только эти fieldName:
 
-1. nationalRegime. Ищи национальный режим, ПП РФ № 1875 и таблицы его приложений.
-Верни одну старшую именно УСТАНОВЛЕННУЮ меру: `ban`, `restriction` или `preference`
-по приоритету `ban > restriction > preference`, либо `minimum_share`, если прямо установлена
-минимальная обязательная доля закупок товаров российского происхождения.
-`minimum_share` не является преимуществом и в итоговой карточке нормализуется в
-`no` («Нет»). Не включай «не установлен», «нет» и меру, которая только описана как
-возможная. Строка товарной таблицы с колонкой «Вид защитной меры» (либо
-эквивалентной) имеет приоритет над общим разделом. Отдельная таблица «Применение
-национального режима» с колонкой «Установлены заказчиком: Да/Нет» также подтверждает
-меру: учитывай только «Да/Установлено», исключай «Не установлено/не применяется». Если
-общий раздел лишь перечисляет «запрет / ограничение / преимущество», но не связывает меру
-с товаром или не содержит такой таблицы, не возвращай ни одну из них. При отсутствии
-подтверждения не возвращай candidate — пустое поле
-означает «не найдено».
-
-2. paymentDelayDays. Это срок оплаты после поставки/приёмки/накладной/УПД, в
-исходных днях, БЕЗ пересчёта. Признавай формулировки «отсрочка платежа»,
-«оплата производится/осуществляется/выплачивается», «заказчик оплачивает»,
-«расчёты производятся», «в срок не более N дней», «в течение N дней». Не принимай
-срок поставки, гарантии, действия договора или устранения дефектов за срок оплаты.
-Когда предусмотрены варианты для МСП/самозанятого и иных поставщиков, верни срок для
-МСП/самозанятого только при прямом ограничении этой закупки такими участниками. В открытой
-закупке это исключение: верни общий наибольший исходный срок. В evidence сохрани все
-варианты и условия.
-
-3. deliveryType, deliveryBatchDays, deliveryDays, deliveryDate, deliveryNote.
-Используй только эти значения deliveryType: `single_date`, `during_period`,
-`by_requests`.
-- `не позднее ДД.ММ.ГГГГ`, «до ДД.ММ.ГГГГ» или иной прямой конечный срок без
-  заявок/партий: `single_date` и deliveryDate;
-- поставка по заявкам, по заявке Заказчика, по разнарядкам, партиями,
-  отдельными партиями, по графику поставки либо со сроками отдельных партий:
-  `by_requests`; эти признаки приоритетнее общей конечной даты или срока
-  действия договора. Негарантированный объём, поставляемый по письменному
-  запросу/уведомлению Заказчика, также `by_requests`. «Одной/единой партией» и «график работы склада» не
-  являются `by_requests`; если признаков повторной поставки нет и указана
-  одна конечная дата, это `single_date` и deliveryDate;
-- срок одной партии после заявки: только deliveryBatchDays; при нескольких
-  сроках выбери минимальный и в deliveryNote перечисли вариативность;
-- единая поставка «в течение N дней» без заявок/партий: `during_period` и
-  deliveryDays;
-- не вычисляй deliveryDays или deliveryBatchDays как разность дат начала и окончания
-  периода; число заполняй только если оно прямо установлено как срок поставки/партии;
-- не записывай дату окончания договора как deliveryDate, если она не названа
-  сроком/условием поставки.
-deliveryNote — краткое фактическое условие: от чего отсчитывается срок,
-вариативность сроков, заявки/график/разнарядки. Не дублируй туда тип поставки и
-не возвращай только единицу срока («рабочие дни», «календарные дни», «банковские
-дни») без числа и другого условия: в таком случае null.
-
-4. warrantyMonths. Верни минимальный гарантийный срок на товар в месяцах:
-12 месяцев = 12, 5 лет = 60. Подходят «гарантия», «гарантийный срок»,
-«гарантийные обязательства», в том числе значение из таблицы. Не путай его со
-сроком ремонта/устранения дефектов, техподдержкой или послегарантийным
-обслуживанием.
-
-5. resultDate. Это дата подведения итогов закупки/этапа, либо дата рассмотрения,
-оценки и сопоставления заявок, если в тексте прямо указано «(подведение итогов)».
-Верни ISO-дата `YYYY-MM-DD`. Не принимай дату подачи заявок, аукциона, договора
-или поставки.
+{active_commercial_rules()}
 
 При конфликте используй только наиболее конкретное условие с его evidence.
 Если есть несколько одинаково применимых условий, не выбирай наугад: верни их
@@ -1417,20 +1257,6 @@ deliveryNote — краткое фактическое условие: от че
 - отсутствие характеристик у товара допустимо: не удалять товар и не делать анализ incomplete;
 - удалить мусорные товары: адреса, числа, заголовки, характеристики, служебные строки;
 - сохранить quantity conflict как warning/incomplete, а не молча суммировать;
-- объединить reasonHits и fieldCandidates;
-- для nationalRegime сохрани одну старшую подтверждённую установленную меру в порядке
-  `ban > restriction > preference`, либо `minimum_share` для минимальной обязательной
-  доли; статусы «не установлен/нет» не включай. Значение из строки товарной таблицы с
-  колонкой «Вид защитной меры» приоритетнее общего правового раздела, перечисляющего
-  все возможные меры без связи с позицией. Таблица «Применение национального режима» с
-  «Установлены заказчиком: Да/Нет» — самостоятельное прямое доказательство: брать только
-  строки «Да/Установлено»;
-- среди fieldCandidates коммерческих условий выбирай только значения с evidence.
-  Для paymentDelayDays отдельный срок для МСП/самозанятого выбирай только при явном
-  ограничении закупки такими участниками; иначе выбери максимальный явно установленный
-  общий срок. Для
-  deliveryBatchDays при нескольких сроках — минимальный; не подменяй LLM-кандидат
-  числом/датой из несвязанного поля;
 - не считать coverage, Qdrant selection, final status или причины по каталогу.
 
 DocumentAnalysisResults:
@@ -1961,6 +1787,8 @@ Input positions:
                     extra_body=extra_body,
                 ),
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             self._observe_llm(
                 operation="ocr_pdf",

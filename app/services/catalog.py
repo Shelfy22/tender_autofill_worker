@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.value_normalization import normalize_currency as _normalize_currency
+
 import json
 import re
 import statistics
@@ -10,6 +12,8 @@ from urllib.parse import quote
 import httpx
 
 from app.config import Settings
+from app.services.llm_errors import RequiredLlmStageError
+from billiard.exceptions import SoftTimeLimitExceeded
 from app.models import CatalogSelection, ProductMatch, ProductMatchItem, TenderPosition
 from app.services.llm import LlmClient
 
@@ -85,11 +89,6 @@ def _first_value(
     return None, ""
 
 
-def _normalize_currency(value: Any) -> str | None:
-    text = str(value or "").strip().upper()
-    if not text:
-        return None
-    return "RUB" if text in {"RUR", "РУБ", "РУБ.", "₽"} else text
 
 
 def _normalize_available(value: Any) -> bool | None:
@@ -700,6 +699,10 @@ class CatalogMatcher:
             }
             try:
                 match = self._match(product)
+            except RequiredLlmStageError:
+                raise
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 match = NOT_FOUND.model_copy(deep=True)
                 match.rationale = f"Ошибка поиска: {exc}"
@@ -807,6 +810,8 @@ class CatalogMatcher:
             else:
                 raise RuntimeError("Ollama не вернул embedding")
             return vector
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             error = exc
             raise
@@ -861,6 +866,8 @@ class CatalogMatcher:
                 vector = self._embedding(query)
                 query_candidates = self._query_qdrant(vector)
                 successful_query_count += 1
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 last_query_error = exc
                 continue
@@ -980,6 +987,8 @@ class CatalogMatcher:
                     }
                 )
             return candidates
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             error = exc
             raise
@@ -1018,6 +1027,8 @@ class CatalogMatcher:
         try:
             response = self.http.post(url, headers=headers, json=json_body)
             return response
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             error = exc
             raise
@@ -1133,19 +1144,24 @@ class or an essential requirement is truly incompatible after this semantic revi
 Позиция: {json.dumps(request, ensure_ascii=False)}
 normalizedCandidates: {candidates_json}
 """.strip()
-        selection = self.llm.json_call(
-            system=(
-                "Выбери pointId товара из каталога. Верни только selectedPointId, "
-                "correspondence, rationale (mandatory detailed explanation of at least 50 characters), matchedCharacteristicIds, "
-                "missingCharacteristicIds и conflictingCharacteristics; "
-                "не копируй catalog fields."
-            ),
-            prompt=prompt,
-            schema=CatalogSelection,
-            operation="catalog_product_selection",
-            audit_details=self._position_context,
-            model_chain=self.settings.models_for_catalog_selection(),
-        )
+        try:
+            selection = self.llm.json_call(
+                system=(
+                    "Выбери pointId товара из каталога. Верни только selectedPointId, "
+                    "correspondence, rationale (mandatory detailed explanation of at least 50 characters), matchedCharacteristicIds, "
+                    "missingCharacteristicIds и conflictingCharacteristics; "
+                    "не копируй catalog fields."
+                ),
+                prompt=prompt,
+                schema=CatalogSelection,
+                operation="catalog_product_selection",
+                audit_details=self._position_context,
+                model_chain=self.settings.models_for_catalog_selection(),
+            )
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception as exc:
+            raise RequiredLlmStageError("catalog_product_selection failed") from exc
         selection = _finalize_characteristic_audit(selection, characteristics, shortlisted)
         selected = next(
             (

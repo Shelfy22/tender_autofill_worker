@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 import re
 from typing import Any, Literal
 
@@ -153,6 +155,8 @@ class IProClient:
             response = self.client.get("orgByBir", params={"inn": inn})
             response.raise_for_status()
             data = response.json()
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             reason = f"IPro API не выполнил проверку по ИНН {inn}: {exc}"
             http_status = getattr(getattr(exc, "response", None), "status_code", None)

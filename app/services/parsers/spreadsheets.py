@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 import codecs
 import csv
 import io
@@ -121,6 +123,8 @@ def _xlsx_tables(
                                 for column, value in cells.items()
                             )
                         )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception as exc:
                     message = (
                         f"Лист {sheet.title}, строка {row_number}: "
@@ -146,6 +150,8 @@ def _xlsx_tables(
                         parserWarnings=sheet_warnings,
                     )
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 warnings.append(
                     f"Лист {sheet.title}: структурная таблица не создана: "

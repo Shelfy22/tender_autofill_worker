@@ -364,25 +364,18 @@ def classify_spreadsheet_tables(
             break
         debug["reviewed"] += 1
         reviewed += 1
-        try:
-            schema = llm.classify_spreadsheet_table_schema(
-                build_table_schema_profile(
-                    table,
-                    max_cell_chars=max_cell_chars,
-                    max_chars=max_profile_chars,
-                )
-            )
-            updated, skipped_reason = apply_table_schema(
+        schema = llm.classify_spreadsheet_table_schema(
+            build_table_schema_profile(
                 table,
-                schema,
-                min_confidence=float(settings.table_schema_min_confidence),
+                max_cell_chars=max_cell_chars,
+                max_chars=max_profile_chars,
             )
-        except Exception as exc:
-            warnings.append(
-                f"Table schema audit unavailable for {table.fileName}/{table.sheet}: "
-                f"{type(exc).__name__}; retained parser headers."
-            )
-            continue
+        )
+        updated, skipped_reason = apply_table_schema(
+            table,
+            schema,
+            min_confidence=float(settings.table_schema_min_confidence),
+        )
         result[index] = updated
         debug["tables"].append(
             {

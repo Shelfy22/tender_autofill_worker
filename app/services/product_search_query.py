@@ -939,26 +939,7 @@ def enrich_product_search_queries(
             "semantic": "pending",
             "sku": "pending",
         }
-        try:
-            semantic_response = llm.classify_product_characteristics(semantic_input)
-        except Exception as exc:
-            debug_item.update(
-                {
-                    "semantic": "failed",
-                    "sku": "skipped",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            batch_debug.append(debug_item)
-            warnings.append(
-                "Семантическая классификация характеристик недоступна; применён компактный "
-                f"детерминированный fallback для позиций {indexes[0]}-{indexes[-1]}: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            for index in indexes:
-                result[index - 1] = _fallback_search_query(positions[index - 1])
-                enriched_count += 1
-            continue
+        semantic_response = llm.classify_product_characteristics(semantic_input)
 
         semantic_by_index = {item.position_index: item for item in semantic_response.results}
         normalized_by_index: dict[int, list[dict[str, Any]]] = {}
@@ -1013,22 +994,7 @@ def enrich_product_search_queries(
             debug_item["sku"] = "skipped"
             batch_debug.append(debug_item)
             continue
-        try:
-            sku_response = llm.classify_sku_importance(sku_input)
-        except Exception as exc:
-            debug_item.update({"sku": "failed", "error": f"{type(exc).__name__}: {exc}"})
-            batch_debug.append(debug_item)
-            warnings.append(
-                "Классификация SKU-важности недоступна; применён компактный "
-                "детерминированный fallback для "
-                f"позиций {sku_input[0]['position_index']}-{sku_input[-1]['position_index']}: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            for item in sku_input:
-                index = item["position_index"]
-                result[index - 1] = _fallback_search_query(positions[index - 1])
-                enriched_count += 1
-            continue
+        sku_response = llm.classify_sku_importance(sku_input)
 
         sku_by_index = {item.position_index: item for item in sku_response.results}
         for item in sku_input:

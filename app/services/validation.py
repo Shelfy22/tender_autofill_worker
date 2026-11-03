@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from app.models import ExtractedFieldsResponse, NormalizedJob, ParsedDocument
-from app.services.field_policy import remove_disabled_tender_fields
+from app.services.field_policy import is_tender_field_enabled, remove_disabled_tender_fields
 from app.services.normalization import deduplicate_strings
 
 
@@ -1248,37 +1248,13 @@ def _set(
     fields: dict[str, Any], meta: dict[str, Any], key: str, value: Any,
     source: str, confidence: str, evidence: str,
 ) -> None:
-    if value is None or str(value).strip() == "":
+    if not is_tender_field_enabled(key) or value is None or str(value).strip() == "":
         return
     fields[key] = value
     meta[key] = {"source": source, "confidence": confidence, "evidence": evidence[:900]}
 
 
-def validate_fields(
-    job: NormalizedJob,
-    extracted: ExtractedFieldsResponse | None,
-    deterministic_text: str,
-    documents: list[ParsedDocument],
-) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
-    fields: dict[str, Any] = {}
-    meta: dict[str, Any] = {}
-    warnings: list[str] = []
-    if extracted:
-        warnings.extend(extracted.warnings)
-        for key, raw in extracted.fields.items():
-            if key not in ALLOWED_FIELDS:
-                continue
-            if hasattr(raw, "value"):
-                value = raw.value
-                source, confidence, evidence = raw.source or "AI Agent", raw.confidence, raw.evidence or ""
-            else:
-                value, source, confidence, evidence = raw, "AI Agent", "low", ""
-            if value is not None and str(value).strip() != "":
-                fields[key] = value
-                meta[key] = {"source": source, "confidence": confidence, "evidence": evidence}
-    else:
-        warnings.append("LLM extraction не выполнен; применены deterministic fallbacks.")
-
+def _resolve_national_regime(fields, meta, warnings, deterministic_text, documents) -> None:
     table_national_regime = _national_regime_from_product_tables(documents)
     application_national_regime: tuple[str, str, str] | None = None
     if table_national_regime is not None:
@@ -1343,189 +1319,8 @@ def validate_fields(
         else:
             fields["nationalRegime"] = national_regime
 
-    # Only the contract and warranty security columns remain in the report.
-    # Accept them only when a document states a numeric amount or percentage.
-    # Application security is deliberately excluded.
-    explicit_security = _explicit_security_fields(deterministic_text)
-    for key in ("contractSecurity", "warrantySecurity"):
-        if not fields.get(key) and key in explicit_security:
-            value, evidence = explicit_security[key]
-            _set(
-                fields,
-                meta,
-                key,
-                value,
-                "Документы / прямое условие обеспечения",
-                "high",
-                evidence,
-            )
-        value = str(fields.get(key) or "").strip()
-        if value and (
-            _NON_NUMERIC_SECURITY_VALUE_PATTERN.search(value)
-            or not _SECURITY_VALUE_PATTERN.search(value)
-        ):
-            fields.pop(key, None)
-            meta.pop(key, None)
 
-    # These values arrive in the Daily/Seldon row. They must never be chosen
-    # by the document LLM, though the deadline and initial price remain needed
-    # internally for deterministic checks.
-    _set(fields, meta, "tenderUrlSource", job.tender_url, "Input tenderUrl", "high", job.tender_url or "")
-    _set(fields, meta, "dateCreated", fields.get("dateCreated") or date.today().isoformat(), "Workflow", "medium", "Дата запуска workflow")
-    _set(fields, meta, "tenderStatus", fields.get("tenderStatus") or "Загружен Seldon", "Default", "medium", "Исходный статус")
-
-    purchase = job.seldon_purchase
-    # The structured Seldon/Daily date wins over a document candidate. The
-    # contract date is derived only after this result date has been resolved,
-    # never accepted from an LLM directly.
-    fields.pop("contractDate", None)
-    meta.pop("contractDate", None)
-    deadline_date, deadline_time, deadline_evidence = _structured_submission_deadline(job)
-    if deadline_date:
-        _set(
-            fields,
-            meta,
-            "submissionDeadlineDate",
-            deadline_date,
-            "Seldon/Daily / дата окончания подачи",
-            "high",
-            deadline_evidence,
-        )
-    structured_result_date, structured_result_evidence = _structured_result_date(job)
-    if structured_result_date:
-        _set(
-            fields,
-            meta,
-            "resultDate",
-            structured_result_date,
-            "Seldon/Daily / дата окончания этапа подведения итогов",
-            "high",
-            structured_result_evidence,
-        )
-    explicit_result_date = _explicit_result_date(deterministic_text)
-    if explicit_result_date and not fields.get("resultDate"):
-        result_date, result_evidence = explicit_result_date
-        _set(
-            fields,
-            meta,
-            "resultDate",
-            result_date,
-            "Документы / дата подведения итогов",
-            "high",
-            result_evidence,
-        )
-    result_date = _normalize_date(fields.get("resultDate")) if fields.get("resultDate") else None
-    if isinstance(result_date, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", result_date):
-        fields["resultDate"] = result_date
-        contract_date = date.fromisoformat(result_date) + timedelta(days=20)
-        _set(
-            fields,
-            meta,
-            "contractDate",
-            contract_date.isoformat(),
-            "Расчёт / дата подведения итогов + 20 календарных дней",
-            "high",
-            f"{result_date} + 20 календарных дней",
-        )
-    if deadline_time:
-        _set(
-            fields,
-            meta,
-            "submissionDeadlineTime",
-            deadline_time,
-            "Seldon/Daily / дата окончания подачи",
-            "high",
-            deadline_evidence,
-        )
-    initial_price = next(
-        (
-            value
-            for value in (
-                purchase.get("purchasePrice"),
-                purchase.get("initialPrice"),
-                purchase.get("price"),
-                job.report_fields.get("Начальная цена"),
-            )
-            if value is not None and str(value).strip() != ""
-        ),
-        None,
-    )
-    if initial_price is not None:
-        _set(
-            fields,
-            meta,
-            "initialPrice",
-            initial_price,
-            "Seldon structured data",
-            "high",
-            str(initial_price),
-        )
-
-    report_lot_divisible = job.report_fields.get("Лот делимый")
-    if report_lot_divisible is None:
-        report_lot_divisible = job.report_fields.get("lotDivisible")
-    report_lot_text = str(report_lot_divisible or "").strip().lower().replace("ё", "е")
-    if report_lot_text in {"да", "yes", "true", "1", "делимый", "делим"}:
-        _set(
-            fields,
-            meta,
-            "lotDivisible",
-            "yes",
-            "Daily / колонка «Лот делимый»",
-            "high",
-            f"Лот делимый: {report_lot_divisible}",
-        )
-    elif report_lot_text in {"нет", "no", "false", "0", "неделимый", "неделим"}:
-        _set(
-            fields,
-            meta,
-            "lotDivisible",
-            "no",
-            "Daily / колонка «Лот делимый»",
-            "high",
-            f"Лот делимый: {report_lot_divisible}",
-        )
-
-    goz_evidence = _direct_goz_evidence(deterministic_text)
-    previous_goz = fields.get("stateDefenseOrder")
-    if str(previous_goz or "").casefold() in {"yes", "да", "true", "1"} and not goz_evidence:
-        warnings.append(
-            "stateDefenseOrder=да отклонён: казначейское сопровождение, субсидия, "
-            "идентификатор госконтракта или счёт целевых средств не доказывают ГОЗ."
-        )
-    _set(
-        fields,
-        meta,
-        "stateDefenseOrder",
-        "yes" if goz_evidence else "no",
-        "Документы / прямой признак ГОЗ",
-        "high" if goz_evidence else "medium",
-        goz_evidence or "Нет прямого упоминания ГОЗ или 275-ФЗ",
-    )
-
-    special_account_required = _has_required_special_account(deterministic_text)
-    previous_special_account = fields.get("specialAccount")
-    if (
-        str(previous_special_account or "").casefold() in {"yes", "да", "true", "1"}
-        and not special_account_required
-    ):
-        warnings.append(
-            "specialAccount=да отклонён: не найдено прямого требования спецсчёта "
-            "для обеспечения заявки."
-        )
-    _set(
-        fields,
-        meta,
-        "specialAccount",
-        "yes" if special_account_required else "no",
-        "Документы / спецсчёт для обеспечения заявки",
-        "high" if special_account_required else "medium",
-        (
-            "Прямое требование спецсчёта для обеспечения заявки"
-            if special_account_required
-            else "Нет прямого требования спецсчёта для обеспечения заявки"
-        ),
-    )
+def _resolve_payment_delay(fields, meta, deterministic_text) -> None:
     # The SME/self-employed payment term is selected only when this tender is
     # explicitly restricted to those bidders.  In an open tender it is merely
     # an exception; the card retains the longest general payment term.
@@ -1569,6 +1364,9 @@ def validate_fields(
             "high",
             evidence,
         )
+
+
+def _resolve_delivery(fields, meta, warnings, deterministic_text, documents) -> None:
     delivery_type = _normalize_delivery_type(fields.get("deliveryType"))
     delivery_evidence = meta.get("deliveryType", {}).get("evidence")
     table_delivery_schedule = _delivery_schedule_from_documents(documents)
@@ -1802,6 +1600,225 @@ def validate_fields(
 
     # "Рабочие дни" alone is merely the unit of a term, not a delivery
     # condition, so it should not be shown as a note to the employee.
+
+
+def validate_fields(
+    job: NormalizedJob,
+    extracted: ExtractedFieldsResponse | None,
+    deterministic_text: str,
+    documents: list[ParsedDocument],
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    fields: dict[str, Any] = {}
+    meta: dict[str, Any] = {}
+    warnings: list[str] = []
+    if extracted:
+        warnings.extend(extracted.warnings)
+        for key, raw in extracted.fields.items():
+            if key not in ALLOWED_FIELDS or not is_tender_field_enabled(key):
+                continue
+            if hasattr(raw, "value"):
+                value = raw.value
+                source, confidence, evidence = raw.source or "AI Agent", raw.confidence, raw.evidence or ""
+            else:
+                value, source, confidence, evidence = raw, "AI Agent", "low", ""
+            if value is not None and str(value).strip() != "":
+                fields[key] = value
+                meta[key] = {"source": source, "confidence": confidence, "evidence": evidence}
+    else:
+        warnings.append("LLM extraction не выполнен; применены deterministic fallbacks.")
+
+    if is_tender_field_enabled("nationalRegime"):
+        _resolve_national_regime(fields, meta, warnings, deterministic_text, documents)
+
+    # Only the contract and warranty security columns remain in the report.
+    # Accept them only when a document states a numeric amount or percentage.
+    # Application security is deliberately excluded.
+    explicit_security = _explicit_security_fields(deterministic_text)
+    for key in ("contractSecurity", "warrantySecurity"):
+        if not fields.get(key) and key in explicit_security:
+            value, evidence = explicit_security[key]
+            _set(
+                fields,
+                meta,
+                key,
+                value,
+                "Документы / прямое условие обеспечения",
+                "high",
+                evidence,
+            )
+        value = str(fields.get(key) or "").strip()
+        if value and (
+            _NON_NUMERIC_SECURITY_VALUE_PATTERN.search(value)
+            or not _SECURITY_VALUE_PATTERN.search(value)
+        ):
+            fields.pop(key, None)
+            meta.pop(key, None)
+
+    # These values arrive in the Daily/Seldon row. They must never be chosen
+    # by the document LLM, though the deadline and initial price remain needed
+    # internally for deterministic checks.
+    _set(fields, meta, "tenderUrlSource", job.tender_url, "Input tenderUrl", "high", job.tender_url or "")
+    _set(fields, meta, "dateCreated", fields.get("dateCreated") or date.today().isoformat(), "Workflow", "medium", "Дата запуска workflow")
+    _set(fields, meta, "tenderStatus", fields.get("tenderStatus") or "Загружен Seldon", "Default", "medium", "Исходный статус")
+
+    purchase = job.seldon_purchase
+    # The structured Seldon/Daily date wins over a document candidate. The
+    # contract date is derived only after this result date has been resolved,
+    # never accepted from an LLM directly.
+    fields.pop("contractDate", None)
+    meta.pop("contractDate", None)
+    deadline_date, deadline_time, deadline_evidence = _structured_submission_deadline(job)
+    if deadline_date:
+        _set(
+            fields,
+            meta,
+            "submissionDeadlineDate",
+            deadline_date,
+            "Seldon/Daily / дата окончания подачи",
+            "high",
+            deadline_evidence,
+        )
+    structured_result_date, structured_result_evidence = _structured_result_date(job)
+    if structured_result_date:
+        _set(
+            fields,
+            meta,
+            "resultDate",
+            structured_result_date,
+            "Seldon/Daily / дата окончания этапа подведения итогов",
+            "high",
+            structured_result_evidence,
+        )
+    explicit_result_date = _explicit_result_date(deterministic_text)
+    if explicit_result_date and not fields.get("resultDate"):
+        result_date, result_evidence = explicit_result_date
+        _set(
+            fields,
+            meta,
+            "resultDate",
+            result_date,
+            "Документы / дата подведения итогов",
+            "high",
+            result_evidence,
+        )
+    result_date = _normalize_date(fields.get("resultDate")) if fields.get("resultDate") else None
+    if isinstance(result_date, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", result_date):
+        fields["resultDate"] = result_date
+        contract_date = date.fromisoformat(result_date) + timedelta(days=20)
+        _set(
+            fields,
+            meta,
+            "contractDate",
+            contract_date.isoformat(),
+            "Расчёт / дата подведения итогов + 20 календарных дней",
+            "high",
+            f"{result_date} + 20 календарных дней",
+        )
+    if deadline_time:
+        _set(
+            fields,
+            meta,
+            "submissionDeadlineTime",
+            deadline_time,
+            "Seldon/Daily / дата окончания подачи",
+            "high",
+            deadline_evidence,
+        )
+    initial_price = next(
+        (
+            value
+            for value in (
+                purchase.get("purchasePrice"),
+                purchase.get("initialPrice"),
+                purchase.get("price"),
+                job.report_fields.get("Начальная цена"),
+            )
+            if value is not None and str(value).strip() != ""
+        ),
+        None,
+    )
+    if initial_price is not None:
+        _set(
+            fields,
+            meta,
+            "initialPrice",
+            initial_price,
+            "Seldon structured data",
+            "high",
+            str(initial_price),
+        )
+
+    report_lot_divisible = job.report_fields.get("Лот делимый")
+    if report_lot_divisible is None:
+        report_lot_divisible = job.report_fields.get("lotDivisible")
+    report_lot_text = str(report_lot_divisible or "").strip().lower().replace("ё", "е")
+    if report_lot_text in {"да", "yes", "true", "1", "делимый", "делим"}:
+        _set(
+            fields,
+            meta,
+            "lotDivisible",
+            "yes",
+            "Daily / колонка «Лот делимый»",
+            "high",
+            f"Лот делимый: {report_lot_divisible}",
+        )
+    elif report_lot_text in {"нет", "no", "false", "0", "неделимый", "неделим"}:
+        _set(
+            fields,
+            meta,
+            "lotDivisible",
+            "no",
+            "Daily / колонка «Лот делимый»",
+            "high",
+            f"Лот делимый: {report_lot_divisible}",
+        )
+
+    goz_evidence = _direct_goz_evidence(deterministic_text)
+    previous_goz = fields.get("stateDefenseOrder")
+    if str(previous_goz or "").casefold() in {"yes", "да", "true", "1"} and not goz_evidence:
+        warnings.append(
+            "stateDefenseOrder=да отклонён: казначейское сопровождение, субсидия, "
+            "идентификатор госконтракта или счёт целевых средств не доказывают ГОЗ."
+        )
+    _set(
+        fields,
+        meta,
+        "stateDefenseOrder",
+        "yes" if goz_evidence else "no",
+        "Документы / прямой признак ГОЗ",
+        "high" if goz_evidence else "medium",
+        goz_evidence or "Нет прямого упоминания ГОЗ или 275-ФЗ",
+    )
+
+    special_account_required = _has_required_special_account(deterministic_text)
+    previous_special_account = fields.get("specialAccount")
+    if (
+        str(previous_special_account or "").casefold() in {"yes", "да", "true", "1"}
+        and not special_account_required
+    ):
+        warnings.append(
+            "specialAccount=да отклонён: не найдено прямого требования спецсчёта "
+            "для обеспечения заявки."
+        )
+    _set(
+        fields,
+        meta,
+        "specialAccount",
+        "yes" if special_account_required else "no",
+        "Документы / спецсчёт для обеспечения заявки",
+        "high" if special_account_required else "medium",
+        (
+            "Прямое требование спецсчёта для обеспечения заявки"
+            if special_account_required
+            else "Нет прямого требования спецсчёта для обеспечения заявки"
+        ),
+    )
+    if is_tender_field_enabled("paymentDelayDays"):
+        _resolve_payment_delay(fields, meta, deterministic_text)
+
+    if any(is_tender_field_enabled(name) for name in ("deliveryType", "deliveryDays", "deliveryBatchDays", "deliveryDate")):
+        _resolve_delivery(fields, meta, warnings, deterministic_text, documents)
+
     if _is_weak_delivery_note(fields.get("deliveryNote")):
         fields.pop("deliveryNote", None)
         meta.pop("deliveryNote", None)

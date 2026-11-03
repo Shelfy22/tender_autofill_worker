@@ -1,3 +1,5 @@
+import pytest
+
 from types import SimpleNamespace
 
 from app.models import (
@@ -677,14 +679,8 @@ def test_llm_audit_failure_blocks_automatic_decision_without_dropping_positions(
             raise RuntimeError("provider unavailable")
 
     positions = [_position("Кабель силовой", quantity=10, unit="м")]
-    validated, warnings, debug = validate_product_candidates(
-        BrokenLlm(),  # type: ignore[arg-type]
-        positions,
-    )
-
-    assert validated == positions
-    assert debug["requiresManualReview"] is True
-    assert any("расчёт покрытия продолжен" in item for item in warnings)
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        validate_product_candidates(BrokenLlm(), positions)
 
 
 def test_duplicate_model_in_characteristics_is_merged_only_across_tables() -> None:

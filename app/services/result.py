@@ -4,7 +4,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.models import NormalizedJob, TenderResult
-from app.services.field_policy import DISABLED_TENDER_FIELDS
+from app.services.field_policy import (
+    disabled_field_headers,
+    is_tender_field_enabled,
+    remove_disabled_tender_fields,
+)
 
 
 REPORT_OMITTED_FIELD_KEYS = frozenset(
@@ -37,7 +41,7 @@ REPORT_OMITTED_FIELD_KEYS = frozenset(
         "inn",
         "kpp",
     }
-) | DISABLED_TENDER_FIELDS
+)
 
 REPORT_OMITTED_HEADERS = frozenset(
     {
@@ -120,7 +124,12 @@ def _tender_status_code(value: Any) -> Any:
 
 def _tender_status_reason_code(value: Any) -> Any:
     raw = str(value or "").strip()
-    return _TENDER_STATUS_REASON_CODES.get(raw, value)
+    normalized = raw.casefold().replace("ё", "е")
+    return next(
+        (code for label, code in _TENDER_STATUS_REASON_CODES.items()
+         if label.casefold().replace("ё", "е") == normalized),
+        value,
+    )
 
 
 def _department_code(value: Any) -> str | None:
@@ -177,7 +186,7 @@ def build_result_json(
         result_fields["stateDefenseOrder"] = _yes_no_code_value(
             fields.get("stateDefenseOrder")
         )
-    if "nationalRegime" in fields:
+    if "nationalRegime" in fields and is_tender_field_enabled("nationalRegime"):
         result_fields["nationalRegime"] = _national_regime_display_value(
             fields.get("nationalRegime")
         )
@@ -187,10 +196,13 @@ def build_result_json(
         result_fields["tenderStatusReason"] = _tender_status_reason_code(
             fields.get("tenderStatusReason")
         )
+    remove_disabled_tender_fields(result_fields, result_meta)
     report_fields = {
         key: value
         for key, value in job.report_fields.items()
         if key not in REPORT_OMITTED_HEADERS
+        and key not in disabled_field_headers()
+        and is_tender_field_enabled(key)
     }
     if exported_to_code:
         report_fields["Код ТО"] = exported_to_code

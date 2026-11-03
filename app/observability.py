@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 import logging
 import socket
 import threading
-import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -46,6 +47,8 @@ class RunObserver:
             return
         try:
             function()
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             self.enabled = False
             logger.warning(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 import hashlib
 import json
 import re
@@ -19,7 +21,7 @@ from app.models import (
     TenderPosition,
 )
 from app.services.product_characteristics import ensure_position_identity
-from app.services.field_policy import is_tender_field_enabled
+from app.services.field_policy import is_tender_field_enabled, is_decision_reason_enabled
 from app.services.document_roles import (
     COMPOSITE_ROLE,
     OTHER_ROLE,
@@ -230,6 +232,14 @@ def compact_document_analysis_results(
     )
     for _, result in ordered_results:
         payload = result.model_dump(mode="json")
+        payload["fieldCandidates"] = [
+            item for item in payload.get("fieldCandidates", [])
+            if is_tender_field_enabled(item["fieldName"].strip())
+        ]
+        payload["reasonHits"] = [
+            item for item in payload.get("reasonHits", [])
+            if is_decision_reason_enabled(item["reason"])
+        ]
         unique_products: list[dict[str, Any]] = []
         candidates = sorted(
             enumerate(payload.get("products", [])),
@@ -325,6 +335,8 @@ def fallback_document_consolidation(
     for characteristic_set in characteristic_sets:
         try:
             parsed_set = DocumentCharacteristicSet.model_validate(characteristic_set)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             continue
         hint = _normalized_product_identity(parsed_set.productHint)
@@ -791,6 +803,10 @@ def result_from_unit(
                 candidate
                 for candidate in parsed.fieldCandidates
                 if is_tender_field_enabled(candidate.fieldName.strip())
+            ],
+            "reasonHits": [
+                reason for reason in parsed.reasonHits
+                if is_decision_reason_enabled(reason.reason)
             ],
         }
     )
