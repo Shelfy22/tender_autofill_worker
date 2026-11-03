@@ -1,256 +1,58 @@
-# Наблюдаемость полного Python Tender Worker
+# Наблюдаемость Tender Autofill Service
 
-Grafana и Prometheus в `docker-compose.yml` этого проекта не запускаются. Используются уже развёрнутые на сервере экземпляры.
+## Durable audit
 
-## 1. Что сохраняется
+При `OBSERVABILITY_ENABLED=true` сервис записывает историю каждой попытки Celery в PostgreSQL. Миграция `migrations/001_observability.sql` не изменяет `tender_autofill_batches` и `tender_autofill_jobs`.
 
-Миграция `migrations/001_observability.sql` добавляет в ту же PostgreSQL две audit-таблицы и одну маленькую таблицу агрегированных counters:
+| Таблица | Содержимое |
+|---|---|
+| `tender_autofill_job_runs` | Одна запись на попытку: статус, время, этап, RSS, счётчики LLM/документов/каталога, ошибка и краткий итог. |
+| `tender_autofill_job_events` | Упорядоченная timeline этапов и внешних вызовов. |
+| `tender_autofill_metric_counters` | Накопительные счётчики для Prometheus без сканирования всей timeline. |
 
-- `tender_autofill_job_runs` — одна строка на одну попытку tender;
-- `tender_autofill_job_events` — timeline стадий и внешних вызовов.
-- `tender_autofill_metric_counters` — all-time counters для быстрого Prometheus scrape без полного сканирования timeline.
+Binary, тексты документов, LLM prompts и credentials в audit не записываются.
 
-Существующие `tender_autofill_batches` и `tender_autofill_jobs` миграция не изменяет. Binary, тексты документов, LLM prompts и credentials в audit не записываются.
+## Установка
 
-Run хранит `run_id` (Celery task ID), `record_key`, batch/Seldon/attempt, container hostname, status, текущую стадию, heartbeat, длительность, peak RSS и точные counters. Event хранит начало/конец стадии либо один внешний вызов с operation/model/request ID/tokens/duration/error.
+Примените SQL к той же PostgreSQL, которую использует n8n:
 
-Если worker убит OOM/SIGKILL, финального event не будет, но останутся `status=running`, последняя `current_stage` и просроченный `heartbeat_at`. При новой попытке предыдущий незавершённый run этого `record_key` помечается `interrupted`.
-
-## 2. Применение миграции
-
-Сначала сделать backup PostgreSQL. Затем:
-
-```bash
-docker compose build tender-api tender-worker
-docker compose run --rm --no-deps tender-api python -m app.migrate
+```powershell
+Get-Content -Raw migrations/001_observability.sql | psql $env:POSTGRES_DSN
 ```
-
-Команда идемпотентна: используется `CREATE TABLE/INDEX IF NOT EXISTS`. Проверка:
-
-```sql
-SELECT to_regclass('public.tender_autofill_job_runs');
-SELECT to_regclass('public.tender_autofill_job_events');
-SELECT to_regclass('public.tender_autofill_metric_counters');
-```
-
-В `.env`:
 
 ```dotenv
 OBSERVABILITY_ENABLED=true
 OBSERVABILITY_HEARTBEAT_SECONDS=30
 ```
 
-После миграции:
+Если audit временно недоступен, worker отключает observability для текущего запуска и продолжает тендер. Soft timeout при этом всё равно остаётся фатальным.
 
-```bash
-docker compose up -d --build --scale tender-worker=5
-```
+## API
 
-## 3. API просмотра execution
+Все маршруты, кроме health/metrics по вашей сетевой политике, используют `X-API-Key`:
 
-С тем же `X-API-Key`, что использует n8n:
+| Route | Назначение |
+|---|---|
+| `GET /observability/jobs/{record_key}/runs?limit=20` | История попыток job. |
+| `GET /observability/runs/{run_id}` | Run и timeline событий. |
+| `GET /metrics` | Prometheus: dispatch/reject, runs, LLM, embedding, Qdrant, downloads. |
+| `GET /health` | API, PostgreSQL и Redis. |
 
-```bash
-curl -H "X-API-Key: $TENDER_API_KEY" \
-  http://server:8000/observability/jobs/RECORD_KEY/runs
-```
+`/metrics` остаётся доступным при отключённой observability, но без агрегированных PostgreSQL counters. Ошибка чтения метрик не ломает API.
 
-Timeline конкретной попытки:
+## Диагностика
 
-```bash
-curl -H "X-API-Key: $TENDER_API_KEY" \
-  http://server:8000/observability/runs/CELERY_TASK_ID
-```
+| Симптом | Где смотреть |
+|---|---|
+| `processing` завис | Последний heartbeat/run, затем stale SQL Controller. |
+| `failed` | `error_type`, `error_message`, последний failed stage, `attempt`. |
+| Частичная документация | `result_json.debug.documentAnalysis.incompleteUnitIds` и `warnings`. |
+| Нет XLSX | `debug.productMatchingReport`, warning и storage adapter. |
+| Медленная/дорогая LLM | Tokens и model/status в events/counters. |
+| Нет товарных кандидатов | Qdrant/embedding counters, events и `productCheck`. |
 
-## 4. Подключение существующего Prometheus
+Шаблоны Grafana: `observability/grafana/tender-autofill-overview.json` и `observability/grafana/tender-autofill-execution.json`. Пример scrape — `observability/prometheus-scrape.example.yml`.
 
-Добавить job из `observability/prometheus-scrape.example.yml` в конфигурацию существующего Prometheus.
+## Retention
 
-Если Prometheus находится в общей Docker network:
-
-```yaml
-targets: ["tender-api:8000"]
-```
-
-Если он находится вне network проекта:
-
-```yaml
-targets: ["python-server.example:8000"]
-```
-
-После reload проверить Targets и запрос:
-
-```promql
-up{job="tender-autofill-python"}
-```
-
-Основные метрики:
-
-```promql
-tender_autofill_worker_runs{status="running"}
-tender_autofill_worker_runs{status="stale"}
-tender_autofill_worker_total{metric="llm_requests"}
-tender_autofill_worker_total{metric="llm_total_tokens"}
-tender_autofill_worker_total{metric="qdrant_queries"}
-tender_autofill_worker_total{metric="qdrant_http_requests"}
-tender_autofill_worker_total{metric="embedding_queries"}
-tender_autofill_llm_requests_by_model_total
-tender_autofill_llm_tokens_by_model_total
-```
-
-`stale` входит в `running`, но означает, что heartbeat процесса не обновлялся
-минимум `max(120 секунд, 4 × OBSERVABILITY_HEARTBEAT_SECONDS)`. Так виден hard OOM
-или аварийно уничтоженный контейнер, даже если процесс не успел записать ошибку.
-
-Это gauges, восстановленные из PostgreSQL при каждом scrape. Рестарт `tender-api` не обнуляет статистику, а disposable Celery children не требуют Prometheus multiprocess directory.
-
-## 5. Grafana Overview через существующий Prometheus
-
-1. `Dashboards -> New -> Import`.
-2. Загрузить `observability/grafana/tender-autofill-overview.json`.
-3. Выбрать существующий Prometheus datasource.
-4. Сохранить dashboard.
-
-Dashboard показывает running/completed/errors, LLM calls, Qdrant logical/HTTP calls, embeddings и download bytes.
-
-## 6. Grafana Execution через PostgreSQL
-
-Prometheus намеренно не получает `recordKey`/`run_id` в labels: это вызвало бы высокую cardinality. Подробный execution dashboard читает audit-таблицы напрямую из PostgreSQL.
-
-Рекомендуется отдельный read-only пользователь, с реальным именем базы и новым паролем:
-
-```sql
-CREATE ROLE tender_grafana LOGIN PASSWORD 'replace-with-strong-password';
-GRANT CONNECT ON DATABASE your_database TO tender_grafana;
-GRANT USAGE ON SCHEMA public TO tender_grafana;
-GRANT SELECT ON tender_autofill_job_runs TO tender_grafana;
-GRANT SELECT ON tender_autofill_job_events TO tender_grafana;
-GRANT SELECT ON tender_autofill_metric_counters TO tender_grafana;
-```
-
-В существующей Grafana:
-
-1. `Connections -> Data sources -> Add data source -> PostgreSQL`.
-2. Указать текущий PostgreSQL host/database, пользователя `tender_grafana` и SSL mode сервера.
-3. `Save & test`.
-4. Импортировать `observability/grafana/tender-autofill-execution.json`.
-5. Выбрать созданный PostgreSQL datasource.
-
-Первая таблица показывает последние execution. Вверху dashboard выбираются `recordKey`, затем
-`run_id/attempt`; остальные панели показывают заголовок выбранной попытки, counters, полный
-timeline, длительность стадий и отдельные LLM calls.
-
-## 7. SQL для собственных панелей
-
-LLM calls за диапазон Grafana:
-
-```sql
-SELECT
-  $__timeGroupAlias(event_time, '1h'),
-  model,
-  COUNT(*) AS calls
-FROM tender_autofill_job_events
-WHERE $__timeFilter(event_time)
-  AND service = 'llm'
-  AND event_type = 'external_call'
-GROUP BY 1, model
-ORDER BY 1;
-```
-
-Tokens по моделям:
-
-```sql
-SELECT
-  model,
-  SUM(prompt_tokens) AS prompt_tokens,
-  SUM(completion_tokens) AS completion_tokens
-FROM tender_autofill_job_events
-WHERE $__timeFilter(event_time)
-  AND service = 'llm'
-GROUP BY model
-ORDER BY SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) DESC;
-```
-
-Qdrant logical против HTTP:
-
-```sql
-SELECT service, operation, status, COUNT(*) AS calls, SUM(result_count) AS results
-FROM tender_autofill_job_events
-WHERE $__timeFilter(event_time)
-  AND service IN ('qdrant', 'qdrant_http')
-GROUP BY service, operation, status
-ORDER BY service, operation, status;
-```
-
-Попытки скачивания документов для выбранного execution:
-
-```sql
-SELECT
-  event_time,
-  status,
-  http_status,
-  duration_seconds,
-  byte_count,
-  details->>'transport' AS transport,
-  details->>'originalFileName' AS original_file_name,
-  details->>'resolvedFileName' AS resolved_file_name,
-  details->>'detectedType' AS detected_type,
-  details->>'contentType' AS content_type,
-  details->>'url' AS url_without_query,
-  error_type,
-  error_message
-FROM tender_autofill_job_events
-WHERE run_id = '<RUN_ID>'
-  AND service = 'document_http'
-  AND event_type = 'external_call'
-ORDER BY event_time, event_id;
-```
-
-Для каждого URL сохраняется отдельная попытка `httpx`, `httpx_insecure` или
-`curl_insecure`. Query string URL, содержимое документов и credentials в timeline
-не записываются.
-
-Зависшие/OOM candidates:
-
-```sql
-SELECT
-  run_id, record_key, attempt, worker_name, current_stage,
-  heartbeat_at, NOW() - heartbeat_at AS heartbeat_age, peak_memory_rss_mb
-FROM tender_autofill_job_runs
-WHERE status = 'running'
-  AND heartbeat_at < NOW() - INTERVAL '2 minutes'
-ORDER BY heartbeat_at;
-```
-
-Последние execution:
-
-```sql
-SELECT
-  started_at, record_key, attempt, status, current_stage, duration_seconds,
-  llm_requests, qdrant_queries, peak_memory_rss_mb, error_message
-FROM tender_autofill_job_runs
-WHERE $__timeFilter(started_at)
-ORDER BY started_at DESC
-LIMIT 500;
-```
-
-## 8. Значение fallback counter
-
-Один вызов OpenRouter из Python считается одним `llm_requests`, даже если OpenRouter внутри перебирал providers/models. `llm_fallbacks` увеличивается, когда фактическая `response.model` отличается от primary model. Сохраняются primary, фактическая модель и request ID. Внутреннее число provider attempts OpenRouter не сообщает в обычном Chat Completions response; его можно дополнительно сверять в кабинете/OpenRouter generation API.
-
-## 9. Retention
-
-Timeline со временем растёт. Удаление намеренно не автоматизировано: срок хранения должен
-быть согласован с вашей эксплуатацией. Например, после backup можно хранить events 180 дней,
-а runs один год:
-
-```sql
-DELETE FROM tender_autofill_job_events
-WHERE event_time < NOW() - INTERVAL '180 days';
-
-DELETE FROM tender_autofill_job_runs
-WHERE finished_at < NOW() - INTERVAL '365 days'
-  AND status IN ('completed', 'failed', 'interrupted');
-```
-
-`tender_autofill_metric_counters` не удалять: это накопительные значения для Prometheus.
+Audit-таблицы растут на каждую попытку и этап. Retention следует вводить отдельной согласованной SQL-задачей; нельзя удалять runs, пока они нужны для расследования инцидентов или связанной timeline.

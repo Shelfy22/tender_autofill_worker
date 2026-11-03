@@ -1,215 +1,95 @@
-# Архитектура Python Tender Autofill Service
+# Архитектура Tender Autofill Service
 
-## Решение
+## Назначение
 
-Используется FastAPI + Celery + Redis + PostgreSQL.
+Сервис получает уже созданное n8n задание тендера, разбирает данные Seldon и приложенные документы, подбирает товарные позиции и записывает совместимый с Finalizer `result_json`. PostgreSQL остаётся источником истины для входа, статуса и результата; Python не создаёт отдельную базу и не заменяет n8n Finalizer.
 
-Celery выбран потому, что для этой нагрузки критичны готовые process isolation controls:
-
-- prefork worker process;
-- `worker_concurrency` и deployment с `--concurrency=1`;
-- `worker_max_tasks_per_child=1` для уничтожения дочернего процесса после каждого tender;
-- soft/hard task time limits;
-- Redis broker;
-- сигналы и стандартные метрики.
-
-Dramatiq легче, но lifecycle child process и hard time limits потребовали бы дополнительного supervisor-кода. RQ проще, но слабее для управляемого prefork lifecycle. Отдельный самописный queue runner здесь неоправдан.
-
-## Поток данных
-
-```text
-n8n Dispatcher
-  -> PostgreSQL jobs=queued
-
-n8n Controller
-  -> atomic queued -> dispatching
-  -> Aggregate claimed items
-  -> POST /jobs/batch (быстрый 202)
-       -> validate jobRecordKey/batchId
-       -> publish record_key to Redis/Celery
-
-Celery worker container (concurrency=1)
-  -> fetch input_json from PostgreSQL
-  -> atomic dispatching -> processing, attempt+1
-  -> one TemporaryDirectory per tender
-  -> execute pipeline
-  -> processing -> completed + compatible result_json
-  -> on catchable failure: processing -> failed
-  -> process exits after one task
-
-n8n Controller
-  -> owns retry/requeue
-  -> existing Finalizer reads result_json
+```mermaid
+flowchart LR
+    D[n8n Dispatcher] --> DB[(PostgreSQL)]
+    C[n8n Controller] -->|queued → dispatching| DB
+    C -->|POST /jobs/batch| API[tender-api]
+    API --> R[(tender-redis)]
+    R --> W[tender-worker]
+    W -->|completed / failed| DB
+    F[n8n Finalizer] -->|result_json| DB
+    PM[n8n автоподбор, опционально] --> API
+    API --> PMW[tender-product-matching]
 ```
 
-В Redis передаётся только `record_key`/`batch_id`, не документы и не полный binary payload. PostgreSQL остаётся источником job input/status/result. Документы существуют только в isolated temporary directory текущего tender.
+В Redis передаётся только ключ Celery-задачи. Полный `input_json`, документы и результат остаются в PostgreSQL.
 
-## Границы ответственности
+## Ответственность компонентов
 
-### n8n
+| Компонент | Ответственность |
+|---|---|
+| Dispatcher | Нормализует CSV/Seldon-строки, создаёт `batch` и `queued` jobs. |
+| Controller | Владеет окном параллельности, retry и stale recovery, переводит job в `dispatching`. |
+| tender-api | Проверяет API key и статус job, публикует задачу, отвечает `202`. |
+| tender-worker | Атомарно делает `dispatching → processing`, выполняет pipeline, пишет `completed/result_json` или `failed/error_message`. |
+| tender-redis | Изолированный Redis-брокер Celery, не Redis/BullMQ n8n. |
+| Finalizer | Читает PostgreSQL, создаёт CSV и завершает batch. |
+| tender-product-matching | Отдельная вспомогательная очередь загрузки документов и XLSX автоподбора; в Daily-потоке не участвует. |
 
-- Dispatcher и запись исходных jobs;
-- claim окна `queued -> dispatching`;
-- retry policy, max attempts и stale recovery;
-- terminal batch detection;
-- CSV/email Finalizer.
+Celery не делает самостоятельных retry. Повторяет job только Controller через PostgreSQL.
 
-### Python API
+## Pipeline тендера
 
-- принимает до `API_MAX_BATCH_JOBS` claimed jobs;
-- проверяет формат и наличие job в `dispatching`;
-- публикует задачи;
-- отвечает 202, не ждёт processing.
+1. Worker получает Seldon-данные, ссылки и доступные структурированные позиции.
+2. Загрузчик безопасно скачивает и разбирает документы, архивы, PDF и Office-файлы.
+3. Детерминированный разбор находит таблицы и позиции; table-schema audit отделяет спецификации от форм и шаблонов.
+4. LLM анализирует отдельные документы или ограниченные группы, возвращая позиции, характеристики, кандидаты полей, причины и evidence.
+5. Обязательная консолидация связывает результаты документов, дедуплицирует позиции и строит общий набор доказательств.
+6. Валидация соединяет кандидатные значения, Seldon и детерминированные правила.
+7. Общий товарный pipeline проверяет характеристики, формирует запросы, ищет кандидаты каталога/Qdrant и выполняет аудит до и после поиска.
+8. Детерминированные причины и финальная LLM формируют решение, после чего `result.py` строит наружный JSON.
 
-### Python worker
+Общий `analysis_pipeline` и `product_pipeline` используют и основной worker, и отдельный сервис автоподбора: правила не должны расходиться между ними.
 
-- атомарно claim `dispatching -> processing`;
-- увеличивает попытку;
-- выполняет один tender;
-- пишет `completed/result_json` или `failed/error_message`;
-- не выполняет retry.
+## Ошибки, таймауты и полнота
 
-## Идемпотентность и гонки
+Успешная обработка не требует успеха каждого отдельного документа. Если LLM-анализ unit не удался, batch сначала разбирается по одному документу; неуспешный документ получает `analysisIncomplete`, а остальные продолжают давать доказательства. Это видно в `warnings` и `debug.documentAnalysis.incompleteUnitIds`.
 
-PostgreSQL status transition — финальный idempotency gate. Дубликат сообщения Redis не запустит второй processing, потому что только один worker сможет выполнить `UPDATE ... WHERE status='dispatching' RETURNING`.
+Консолидация документного анализа, обязательные товарные аудиты, финальное решение и запись результата — фатальные этапы. Их ошибка переводит job в `failed`: сервис не выдаёт частично заполненный успешный тендер. Общий soft timeout Celery также всегда завершает задачу ошибкой, не превращаясь в warning.
 
-Если API опубликовал задачу, но worker не стартовал, Controller вернёт stale `dispatching` в queued. Старое сообщение после этого не сможет claim job. Если процесс погиб после claim, stale `processing` восстановит Controller.
+По умолчанию основной worker имеет soft/hard limits 25/28 минут. Они должны оставаться меньше stale timeout Controller. Каждый контейнер работает с `prefork`, `concurrency=1`, `prefetch=1`, `max-tasks-per-child=1`: один дочерний процесс обрабатывает один тендер, контейнеры масштабируются горизонтально.
 
-Celery application retry отключён. `acks_late=false`: OOM не создаёт независимый бесконечный broker retry; восстановление выполняется PostgreSQL Controller.
+## Policy выключенных полей
 
-## Process/memory isolation
+В `app/services/field_policy.py` временно выключены:
 
-- один worker container: `--concurrency=1 --pool=prefork`;
-- один child: один tender (`--max-tasks-per-child=1`);
-- Compose scaling: `docker compose up -d --scale tender-worker=5`;
-- optional container memory limits на deployment level;
-- soft/hard task limits;
-- subprocess limits для LibreOffice/7z;
-- HTTP connect/read timeout;
-- per-stage elapsed logging и RSS memory.
+- национальный режим;
+- условия отгрузки и все сроки поставки;
+- отсрочка оплаты;
+- причина отказа по отсрочке 90 дней и более.
 
-Defaults: soft 25 минут, hard 28 минут. Это намеренно меньше существующего n8n stale-processing
-порога 30 минут; увеличивать Python timeout без одновременного изменения Controller нельзя.
+Это policy switch: правила, промпты и archived regression tests остаются в репозитории. Выключенные поля исключаются из промптов, консолидации, валидации и наружного `result_json`.
 
-`TemporaryDirectory` удаляется в normal/error path. Если child уничтожен hard timeout/OOM и `finally`
-невозможен, новый prefork child до получения следующей задачи удаляет только service-owned `tender-*`
-directories из `TEMP_ROOT`. После restart container выполняется та же очистка.
+## Внешний результат
 
-Если нужен один OS process без Celery parent на tender, потребуется Kubernetes/nomad job-per-tender или отдельный spawning supervisor. Для Docker Compose Celery parent + disposable prefork child даёт требуемую изоляцию при меньшей сложности.
+`result_json` содержит `fields`, `meta`, `productCheck`, `decision`, `warnings`, `logs`, `debug`, `reportFields` и идентификаторы тендера. Он является контрактом с n8n Finalizer.
 
-## Структура проекта
+Перед сохранением Python не дублирует исходные Seldon-колонки даты подачи, ссылки и цен, не отдаёт выключенные и контрагентские колонки, приводит `Код ТО` к `Dep_<код>`, а статусы и известные причины — к кодам справочника целевой системы. Любое изменение ключей должно проверяться вместе с Finalizer.
+
+## Кодовая структура
 
 ```text
 app/
-  api.py                 FastAPI routes
-  celery_app.py          Celery configuration
-  config.py              environment settings
-  db.py                  PostgreSQL repository/status transitions
-  logging.py             structured context/stage timing/RSS
-  models.py              Pydantic API/LLM/result contracts
-  tasks.py               Celery task boundary and temp lifecycle
-  pipeline.py            orchestration only
+  api.py                       HTTP API, health, metrics
+  tasks.py                     Celery boundary и статусы jobs
+  pipeline.py                  orchestration основного тендера
+  db.py                        PostgreSQL transitions
+  observability.py             run/event audit и heartbeat
   services/
-    normalization.py
-    seldon.py
-    documents.py
-    customer.py
-    catalog.py
-    coverage.py
-    decision.py
-    result.py
-    llm.py
-    parsers/
-      common.py
-      archives.py
-      pdf.py
-      word.py
-      spreadsheets.py
+    analysis_pipeline.py       разбор документов и консолидация
+    field_policy.py            switches полей/причин
+    field_prompts.py           сохранённые правила LLM
+    product_pipeline.py        общий подбор товара
+    product_extraction.py      извлечение позиций
+    product_reconciliation.py  дедупликация и сверка
+    result.py                  внешний JSON и справочные коды
 tests/
+  archived/                    регрессии выключенных полей
 ```
 
-## Limits
-
-Настраиваются environment variables:
-
-- размер одного download и общий размер downloads;
-- max document count;
-- archive depth/count/uncompressed bytes/compression ratio;
-- max text per file и combined LLM chars;
-- HTTP, conversion и task timeouts;
-- max API batch jobs;
-- max LLM output tokens.
-
-Защита archive extraction проверяет canonical destination path, количество members, declared/uncompressed size, compression ratio и запрещает links/path traversal. Nested archive depth ограничен.
-
-## API
-
-### `POST /jobs/batch`
-
-Input:
-
-```json
-{
-  "jobs": [
-    {
-      "jobRecordKey": "daily:form-...:1:123",
-      "batchId": "form-...",
-      "reportId": 1,
-      "seldonId": "123",
-      "reportFields": {},
-      "toCode": "..."
-    }
-  ]
-}
-```
-
-Response `202 Accepted`:
-
-```json
-{
-  "status": "accepted",
-  "accepted": 1,
-  "rejected": 0,
-  "jobs": [{"jobRecordKey":"...","taskId":"..."}]
-}
-```
-
-### `GET /health`
-
-Проверяет процесс, PostgreSQL и Redis.
-
-### `GET /metrics`
-
-Prometheus metrics для API accepts/rejects. Длительности и outcome worker доступны в structured logs;
-для их централизованного Prometheus-сбора нужен log collector/OpenTelemetry или Pushgateway.
-
-## LLM
-
-Все LLM calls идут через OpenAI-compatible client с JSON structured output, отдельными Pydantic schemas и timeout. Mapping попыток задаётся:
-
-```text
-LLM_MODEL_ATTEMPT_1
-LLM_MODEL_ATTEMPT_2
-LLM_MODEL_ATTEMPT_3
-```
-
-Defaults отражают экспортированный workflow, а не неподтверждённый список GPT. Истинный attempt берётся из атомарного PostgreSQL claim.
-
-## Catalog adapter
-
-`CatalogMatcher` имеет два режима:
-
-- `http` — рекомендуемый контракт внутреннего catalog search endpoint;
-- `qdrant` — прямой HTTP REST search во внешнем Qdrant после Ollama embedding. Сервис Qdrant в Compose и Python SDK не используются. Современный `/points/query` имеет fallback на `/points/search` для старой версии сервера.
-
-Поскольку exported workflow не содержит соединённой product matching цепочки и payload schema Qdrant, адаптер не должен угадывать payload keys. До задания `CATALOG_*` он возвращает controlled `Товар не найден` и warning. Это сохраняет безопасность, но не является подтверждённым эквивалентом каталожного этапа.
-
-## Изменение Controller
-
-Ноды до `Подготовить jobs для Tender Worker` сохраняются. `Запустить свободные Tender Worker` заменяется:
-
-1. Aggregate всех items в `{jobs: [...]}`;
-2. HTTP Request POST `${TENDER_PYTHON_URL}/jobs/batch`;
-3. timeout 30s, response JSON, не ждать processing.
-
-Точный n8n body приведён в `N8N_INTEGRATION.md`.
+Подробный lifecycle приведён в `PROCESS_FLOW.md`; настройка Controller — в `N8N_INTEGRATION.md`; аудит запусков — в `OBSERVABILITY.md`.

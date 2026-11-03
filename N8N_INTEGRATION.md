@@ -1,69 +1,28 @@
-# Интеграция Python Worker с n8n Controller
+# Интеграция n8n Controller с Python Tender Autofill Service
 
-Готовая импортируемая версия находится в:
+## Граница
 
-```text
-reference/Daily Tender Controller + Finalizer.json
-```
-
-Имя после импорта:
-
-```text
-Daily Tender Controller + Finalizer — Python HTTP TEST 1
-```
-
-Workflow специально экспортирован с `active=false` и без исходных `id/versionId`,
-поэтому его можно сначала импортировать рядом с production Controller и проверить
-вручную. Старый workflow автоматически не изменяется.
-
-## 1. Что изменено
-
-Dispatcher и весь Finalizer сохранены. Сохранены также:
-
-- stale recovery для `dispatching/processing`;
-- единственный business retry `failed` до трёх попыток;
-- атомарный PostgreSQL claim через `FOR UPDATE SKIP LOCKED`;
-- получение готового batch, формирование CSV и завершение batch.
-
-Удалён только вызов `Execute Sub-workflow`. Новая цепочка:
-
-```text
-Postgres — занять 1 слот (первый тест)
-  -> Подготовить jobs для Tender Worker
-  -> Собрать HTTP batch для Python
-  -> HTTP — dispatch Tender jobs в Python
-  -> Проверить ответ Python API
-```
-
-Начальный SQL-параметр:
-
-```javascript
-={{ [1] }}
-```
-
-Поэтому одновременно может быть только один `dispatching + processing` job.
-
-## 2. Environment n8n
-
-HTTP node обращается по внутренней сети `ai-net`:
-
-```text
-http://tender-api:8000/jobs/batch
-```
-
-Секрет не записан в workflow. Добавьте во все сервисы `n8n-main` и `n8n-worker-*`:
+n8n сохраняет Dispatcher, Controller, PostgreSQL-очередь и Finalizer. Controller заменяет тяжёлый `Execute Sub-workflow` быстрым HTTP-вызовом Python. API не принимает полный тендер: он получает ключи уже созданных PostgreSQL jobs.
 
 ```dotenv
-TENDER_PYTHON_API_KEY=<то же значение, что API_KEY в tender_autofill_worker/.env>
+TENDER_PYTHON_URL=http://tender-api:8000
+TENDER_PYTHON_API_KEY=<значение API_KEY у Python>
+TENDER_MAX_ACTIVE=10
 ```
 
-После изменения n8n Compose пересоздайте его сервисы. Если n8n запрещает `$env`
-в expressions, создайте Header Auth credential с header `X-API-Key` и выберите его
-в HTTP node вместо expression.
+Используйте внутренний Docker DNS/API address, а не `localhost` другого контейнера. Секрет храните в environment/credentials n8n, не в workflow export.
 
-## 3. HTTP-контракт
+## Нода HTTP Request
 
-HTTP Request выполняет один быстрый POST с raw JSON:
+Controller оставляет прежними stale/retry SQL и шаг `queued → dispatching`, затем агрегирует claimed records и вызывает:
+
+| Параметр | Значение |
+|---|---|
+| Method | `POST` |
+| URL | `{{$env.TENDER_PYTHON_URL}}/jobs/batch` |
+| Header | `X-API-Key: {{$env.TENDER_PYTHON_API_KEY}}` |
+| Body | JSON |
+| Timeout | 30 секунд: API ждёт только постановку Celery-задачи. |
 
 ```json
 {
@@ -77,235 +36,42 @@ HTTP Request выполняет один быстрый POST с raw JSON:
       "seldonPurchase": {},
       "asyncDispatch": true,
       "maxTenderActive": 1,
-      "controllerDispatchAt": "2026-08-13T...Z"
+      "controllerDispatchAt": "2026-11-03T00:00:00Z"
     }
   ]
 }
 ```
 
-Python API отвечает `202 Accepted` сразу после публикации в отдельный Redis:
+Собирайте `jobs` из claimed items без строковой сериализации вложенных объектов: `reportFields` и `seldonPurchase` остаются JSON-объектами. Успешный ответ — HTTP `202` и JSON с `accepted`, `rejected`, `jobs`, `rejectedJobs`. При `partially_accepted` не отправляйте заново весь массив: принятые задачи уже опубликованы. Логируйте `rejectedJobs` и оставьте следующий цикл Controller разбираться с очередью. При ошибке HTTP не переводите job в `completed`/`failed` из n8n.
 
-```json
-{
-  "status": "accepted",
-  "accepted": 1,
-  "rejected": 0,
-  "jobs": [
-    {
-      "jobRecordKey": "daily:...",
-      "taskId": "uuid"
-    }
-  ],
-  "rejectedJobs": []
-}
+## Finalizer
+
+Finalizer читает `tender_autofill_jobs.result_json`, не делает HTTP-вызов к Python. Исходные Seldon/CSV поля «Дата окончания приёма заявок», «Ссылка на тендер», «Начальная цена», «Конечная цена» не надо выбирать из JSON Python.
+
+Python уже кодирует наружные значения:
+
+- `110` Загружен Seldon, `120` Согласовано ИИ, `130` Отказано ИИ;
+- `Код ТО` как `Dep_<код>`;
+- ГосОборонЗаказ и Лот делимый как `yes`/`no`;
+- известные причины статуса как коды словаря.
+
+Не добавляйте в SQL отчёта выключенные/удалённые поля: национальный режим, отгрузку и сроки, отсрочку оплаты, контрагентские поля, обеспечение и worker-служебные столбцы.
+
+## Проверка развёртывания
+
+1. Проверьте `GET /health` из контейнера n8n.
+2. Запустите один известный тендер и проследите `queued → dispatching → processing → completed`.
+3. Сверьте `result_json` и CSV Finalizer.
+4. Проверьте недоступный API и фатальную ошибку LLM: job не должен исчезнуть, Controller должен суметь повторить его по своей политике.
+5. Только затем включайте расписание и увеличивайте `TENDER_MAX_ACTIVE` вместе с числом `tender-worker`.
+
+## Дополнительный workflow автоподбора
+
+`n8n/Tender Product Matching Async.json` использует отдельный API:
+
+```dotenv
+TENDER_PRODUCT_MATCHING_URL=http://tender-api:8000/product-matching/jobs
+TENDER_PYTHON_API_KEY=<API_KEY>
 ```
 
-Нода `Проверить ответ Python API` завершает n8n execution ошибкой, если API не
-принял весь отправленный batch. Она не создаёт дополнительный business retry.
-
-## 4. Безопасный первый запуск одного tender
-
-1. Импортируйте новый workflow, но не активируйте его.
-2. Проверьте PostgreSQL credential во всех Postgres nodes.
-3. Убедитесь, что старый Controller пока активен только если в очереди нет тестовых
-   jobs. Перед тестом деактивируйте старый Controller, иначе он тоже может сделать claim.
-4. Dispatcher должен создать batch с хотя бы одним `queued`, `input_valid=true` job.
-5. Нажмите `Execute workflow` вручную один раз.
-6. Убедитесь, что HTTP response содержит `accepted=1`, `rejected=0`.
-7. Не запускайте Controller второй раз до завершения проверки. Поскольку workflow
-   не активирован, следующий queued job автоматически не стартует.
-
-В worker logs должно появиться:
-
-```bash
-cd /opt/stack/tender_autofill_worker
-docker compose logs -f --since=5m tender-worker
-```
-
-Ожидаемые события: task received, переход `dispatching -> processing`, стадии
-pipeline, затем `job_completed` либо диагностируемый `job_failed`.
-
-## 5. Проверка PostgreSQL job и result_json
-
-Подставьте реальный `record_key`:
-
-```sql
-SELECT
-  record_key,
-  batch_id,
-  status,
-  attempt,
-  worker_execution_id,
-  started_at,
-  finished_at,
-  error_message,
-  jsonb_typeof(result_json) AS result_type,
-  result_json ? 'fields' AS has_fields,
-  result_json ? 'meta' AS has_meta,
-  result_json ? 'productCheck' AS has_product_check,
-  result_json ? 'decision' AS has_decision,
-  result_json ? 'warnings' AS has_warnings,
-  result_json ? 'logs' AS has_logs,
-  result_json ? 'debug' AS has_debug,
-  result_json ? 'reportId' AS has_report_id,
-  result_json ? 'seldonId' AS has_seldon_id,
-  result_json ? 'batchId' AS has_batch_id,
-  result_json ? 'jobRecordKey' AS has_job_record_key,
-  result_json ? 'reportFields' AS has_report_fields
-FROM tender_autofill_jobs
-WHERE record_key = '<RECORD_KEY>';
-```
-
-Для успешного job ожидается `status=completed`, `result_type=object`, все флаги
-`has_* = true`, а `jobRecordKey` внутри JSON должен совпадать с колонкой:
-
-```sql
-SELECT
-  record_key,
-  result_json->>'jobRecordKey' AS json_record_key,
-  batch_id,
-  result_json->>'batchId' AS json_batch_id,
-  seldon_id,
-  result_json->>'seldonId' AS json_seldon_id,
-  report_id,
-  result_json->>'reportId' AS json_report_id
-FROM tender_autofill_jobs
-WHERE record_key = '<RECORD_KEY>';
-```
-
-Это именно поля, которые дальше читает существующий Finalizer.
-
-## 6. Проверка Seldon, документов, LLM, Ollama и Qdrant
-
-Заголовок попытки и counters:
-
-```sql
-SELECT
-  run_id,
-  record_key,
-  attempt,
-  worker_name,
-  status,
-  current_stage,
-  duration_seconds,
-  peak_memory_rss_mb,
-  documents_requested,
-  documents_parsed,
-  download_bytes,
-  llm_requests,
-  llm_successes,
-  llm_failures,
-  llm_fallbacks,
-  embedding_queries,
-  embedding_http_requests,
-  qdrant_queries,
-  qdrant_http_requests,
-  qdrant_results,
-  error_type,
-  error_message
-FROM tender_autofill_job_runs
-WHERE record_key = '<RECORD_KEY>'
-ORDER BY started_at DESC;
-```
-
-Полный timeline выбранной попытки:
-
-```sql
-SELECT
-  event_time,
-  event_type,
-  stage,
-  status,
-  service,
-  operation,
-  primary_model,
-  model AS actual_model,
-  http_status,
-  duration_seconds,
-  memory_rss_mb,
-  prompt_tokens,
-  completion_tokens,
-  result_count,
-  error_type,
-  error_message,
-  details
-FROM tender_autofill_job_events
-WHERE run_id = '<RUN_ID>'
-ORDER BY event_time, event_id;
-```
-
-Проверка по смыслу:
-
-- Seldon и documents видны как успешные pipeline stages;
-- `documents_requested/parsed/download_bytes` подтверждают работу документов;
-- `service=llm` содержит каждый OpenRouter call и фактическую модель;
-- `service=ollama_http` и `service=embedding` подтверждают embeddings;
-- `service=qdrant_http` показывает реальные REST calls;
-- `service=qdrant` показывает logical product queries и количество результатов.
-
-## 7. Проверка совместимости Finalizer
-
-Finalizer не требует изменений: он по-прежнему читает `result_json` из
-`tender_autofill_jobs`. После завершения всех jobs тестового batch вручную выполните
-Controller ещё раз либо активируйте проверенную версию. Проверьте:
-
-```sql
-SELECT
-  batch_id,
-  status,
-  expected_count,
-  completed_count,
-  failed_count,
-  finished_at
-FROM tender_autofill_batches
-WHERE batch_id = '<BATCH_ID>';
-```
-
-В execution Finalizer должны успешно пройти ноды:
-
-```text
-Postgres — получить jobs batch
-  -> Собрать Daily Batch Summary из PostgreSQL
-  -> Сформировать CSV по типам тендеров
-  -> Создать CSV binary
-```
-
-Сравните сформированную строку CSV с `reportFields`, `fields.tenderStatus`,
-`fields.tenderStatusReason` и `fields.tenderStatusNote` тестового `result_json`.
-
-## 8. Переход с одного job на пять
-
-Только после успешного end-to-end теста откройте ноду:
-
-```text
-Postgres — занять 1 слот (первый тест)
-```
-
-и замените Query Parameters:
-
-```javascript
-={{ [1] }}
-```
-
-на:
-
-```javascript
-={{ [5] }}
-```
-
-При желании переименуйте ноду в `Postgres — занять свободные слоты до 5`.
-Пять Docker workers уже запущены с `concurrency=1`, поэтому Controller и физическая
-параллельность совпадут. После этого активируйте новый workflow. Старую версию
-Controller оставьте деактивированной.
-
-## 9. Retry ownership
-
-Business retry остаётся только в ноде:
-
-```text
-Postgres — повторить failed до 3 попыток
-```
-
-Celery task имеет `max_retries=0`, HTTP node не выполняет application retry. Python
-атомарно увеличивает `attempt` при `dispatching -> processing` и выбирает модель
-по реальному значению attempt.
+Он отправляет файлы multipart, получает `jobId`, затем опрашивает status/download endpoint. Эта ветка не вмешивается в Daily Controller и Finalizer.
