@@ -10,6 +10,7 @@ from app.services.document_analysis import (
     build_document_analysis_units,
     compact_document_analysis_results,
     fallback_document_consolidation,
+    prepare_consolidation_payload,
 )
 
 
@@ -419,6 +420,69 @@ def test_document_analysis_merges_technical_characteristics_into_price_position(
     assert len(products) == 1
     assert products[0]["sourceReference"]["sectionRole"] == "technical_specification"
     assert products[0]["characteristics"][0]["value"] == "40 Вт"
+
+
+def test_consolidation_payload_removes_secondary_diagnostics_but_keeps_positions() -> None:
+    results = [
+        DocumentAnalysisResult(
+            unitId="unit-1",
+            fileName="spec.xlsx",
+            products=[
+                TenderPosition(
+                    candidateId="one",
+                    positionKey="one",
+                    product="Cable 3x2.5",
+                    quantity=10,
+                    unit="m",
+                    evidence="E" * 2_000,
+                    requirements="R" * 3_000,
+                    sourceReference={
+                        "fileName": "spec.xlsx",
+                        "sheet": "Sheet1",
+                        "row": 10,
+                        "productHeader": "very long optional heading",
+                    },
+                    sourceReferences=[{"fileName": "copy.xlsx", "row": 20}],
+                    sourceCells={"specification": "S" * 3_000},
+                    reconciliationFacts=[
+                        {
+                            "factId": "fact",
+                            "type": "size_breakdown_equals_total",
+                            "totalQuantity": 10,
+                            "detailQuantitySum": 10,
+                        }
+                    ],
+                    characteristics=[
+                        {"name": "Cross section", "value": "2.5 mm2", "evidence": "A" * 1_000},
+                        {"name": "Cross section", "value": "2.5 mm2", "evidence": "duplicate"},
+                    ],
+                )
+            ],
+            fieldCandidates=[
+                {"fieldName": "warrantyMonths", "value": "12", "evidence": "first"},
+                {"fieldName": "warrantyMonths", "value": "12", "evidence": "first"},
+            ],
+        )
+    ]
+
+    compact, _ = compact_document_analysis_results(results)
+    payload, debug = prepare_consolidation_payload(compact)
+
+    product = payload[0]["products"][0]
+    assert product["candidateId"] == "one"
+    assert product["positionKey"] == "one"
+    assert product["product"] == "Cable 3x2.5"
+    assert product["quantity"] == 10
+    assert product["sourceReference"]["fileName"] == "spec.xlsx"
+    assert len(product["characteristics"]) == 1
+    assert len(product["evidence"]) == 500
+    assert len(product["requirements"]) == 800
+    assert "sourceReferences" not in product
+    assert "sourceCells" not in product
+    assert "reconciliationFacts" not in product
+    assert len(payload[0]["fieldCandidates"]) == 1
+    assert debug["consolidationPayloadCharsAfter"] < debug["consolidationPayloadCharsBefore"]
+    assert debug["consolidationCharacteristicDuplicatesRemoved"] == 1
 
 
 def test_fallback_consolidation_attaches_characteristics_from_separate_document() -> None:

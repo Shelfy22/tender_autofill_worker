@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from app.models import DocumentAnalysisResult, DocumentAnalysisUnit
 from app.services.document_analysis import (
     compact_document_analysis_results,
+    prepare_consolidation_payload,
     result_from_unit,
 )
 from app.services.llm import LlmMalformedResponseError, LlmResponseTruncatedError
@@ -86,10 +87,15 @@ def consolidate_analysis(
     run_stage: Callable = direct_stage,
 ):
     """Consolidation and its validation must succeed before tender processing continues."""
-    payload, dedup_debug = run_stage(
+    compact_payload, dedup_debug = run_stage(
         "Deduplicate Document Analysis Products",
         lambda: compact_document_analysis_results(results),
     )
+    payload, payload_debug = run_stage(
+        "Compact Document Analysis Consolidation Payload",
+        lambda: prepare_consolidation_payload(compact_payload),
+    )
+    dedup_debug.update(payload_debug)
     consolidation = run_stage(
         "Consolidate Tender Analysis", lambda: llm.consolidate_document_analysis(payload),
     )

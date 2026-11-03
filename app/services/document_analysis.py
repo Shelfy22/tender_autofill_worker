@@ -292,6 +292,239 @@ def compact_document_analysis_results(
     }
 
 
+_CONSOLIDATION_SOURCE_KEYS = (
+    "fileName",
+    "sheet",
+    "table",
+    "row",
+    "page",
+    "lotNumber",
+    "positionNumber",
+    "sectionRole",
+    "productColumn",
+    "quantityColumn",
+    "unitColumn",
+    "extractionMethod",
+)
+
+
+def _short_text(value: Any, maximum: int) -> str:
+    return str(value or "").strip()[:maximum]
+
+
+def _compact_source_reference(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value[key]
+        for key in _CONSOLIDATION_SOURCE_KEYS
+        if value.get(key) not in (None, "")
+    }
+
+
+def _compact_characteristics(values: Any) -> tuple[list[dict[str, Any]], int]:
+    compact: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    removed = 0
+    for item in values if isinstance(values, list) else []:
+        if not isinstance(item, dict):
+            removed += 1
+            continue
+        name = _short_text(item.get("name"), 160)
+        value = _short_text(item.get("value"), 500)
+        key = (_normalized_product_identity(name), _normalized_product_identity(value))
+        if not value or key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        compact.append(
+            {
+                "name": name,
+                "value": value,
+                "evidence": _short_text(item.get("evidence"), 280),
+                "sourceReference": _compact_source_reference(item.get("sourceReference")),
+                "confidence": item.get("confidence") or "medium",
+                "targetPositionKey": _short_text(item.get("targetPositionKey"), 160),
+            }
+        )
+    return compact, removed
+
+
+def _compact_consolidation_product(value: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    characteristics, removed_characteristics = _compact_characteristics(value.get("characteristics"))
+    compact = {
+        key: value[key]
+        for key in (
+            "candidateId",
+            "positionKey",
+            "lotNumber",
+            "positionNumber",
+            "product",
+            "productQuery",
+            "model",
+            "brand",
+            "article",
+            "quantity",
+            "unit",
+            "analogsAllowed",
+            "documentUnitPriceRub",
+            "documentLineTotalRub",
+            "documentCurrency",
+        )
+        if value.get(key) not in (None, "")
+    }
+    compact.update(
+        {
+            "evidence": _short_text(value.get("evidence"), 500),
+            "requirements": _short_text(value.get("requirements"), 800),
+            "documentPriceEvidence": _short_text(value.get("documentPriceEvidence"), 280),
+            "sourceReference": _compact_source_reference(value.get("sourceReference")),
+            "characteristics": characteristics,
+        }
+    )
+    return compact, removed_characteristics
+
+
+def _compact_characteristic_set(value: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    characteristics, removed_characteristics = _compact_characteristics(value.get("characteristics"))
+    compact = {
+        key: _short_text(value.get(key), 300)
+        for key in (
+            "productHint",
+            "brand",
+            "article",
+            "model",
+            "lotNumber",
+            "positionNumber",
+            "targetPositionKey",
+        )
+        if value.get(key) not in (None, "")
+    }
+    compact.update(
+        {
+            "associationConfidence": value.get("associationConfidence") or 0,
+            "associationMethod": _short_text(value.get("associationMethod"), 80) or "unresolved",
+            "characteristics": characteristics,
+            "evidence": _short_text(value.get("evidence"), 500),
+            "sourceReference": _compact_source_reference(value.get("sourceReference")),
+        }
+    )
+    return compact, removed_characteristics
+
+
+def prepare_consolidation_payload(
+    results: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Keep every position while removing repeated diagnostic JSON before the LLM.
+
+    The consolidator needs product identity, quantities, provenance and technical
+    characteristics. It does not need catalog/search fields, duplicated source
+    references, reconciliation debug facts, unit hashes or repeated warnings.
+    This reduction is deterministic and occurs only in the LLM input: the full
+    parsed results remain available to the rest of the pipeline.
+    """
+    before_chars = len(json.dumps(results, ensure_ascii=False, separators=(",", ":")))
+    prepared: list[dict[str, Any]] = []
+    characteristic_duplicates = 0
+    field_candidate_duplicates = 0
+    reason_duplicates = 0
+    seen_fields: set[tuple[str, str, str, str]] = set()
+    seen_reasons: set[tuple[str, str, str]] = set()
+
+    for result in results:
+        products: list[dict[str, Any]] = []
+        for product in result.get("products") or []:
+            if not isinstance(product, dict):
+                continue
+            item, removed = _compact_consolidation_product(product)
+            products.append(item)
+            characteristic_duplicates += removed
+
+        characteristic_sets: list[dict[str, Any]] = []
+        for characteristic_set in result.get("characteristicSets") or []:
+            if not isinstance(characteristic_set, dict):
+                continue
+            item, removed = _compact_characteristic_set(characteristic_set)
+            characteristic_sets.append(item)
+            characteristic_duplicates += removed
+
+        field_candidates: list[dict[str, Any]] = []
+        for candidate in result.get("fieldCandidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            field_name = _short_text(candidate.get("fieldName"), 80)
+            raw_value = candidate.get("value")
+            value = _short_text(raw_value, 300) if isinstance(raw_value, str) else raw_value
+            value_identity = _short_text(raw_value, 300)
+            evidence = _short_text(candidate.get("evidence"), 500)
+            source = _compact_source_reference(candidate.get("sourceReference"))
+            key = (
+                field_name,
+                value_identity,
+                evidence,
+                json.dumps(source, ensure_ascii=False, sort_keys=True),
+            )
+            if not field_name or raw_value in (None, "") or key in seen_fields:
+                field_candidate_duplicates += 1
+                continue
+            seen_fields.add(key)
+            field_candidates.append(
+                {
+                    "fieldName": field_name,
+                    "value": value,
+                    "evidence": evidence,
+                    "sourceReference": source,
+                    "confidence": candidate.get("confidence") or "medium",
+                }
+            )
+
+        reason_hits: list[dict[str, Any]] = []
+        for reason in result.get("reasonHits") or []:
+            if not isinstance(reason, dict):
+                continue
+            name = _short_text(reason.get("reason"), 300)
+            evidence = _short_text(reason.get("evidence"), 500)
+            source = _compact_source_reference(reason.get("sourceReference"))
+            key = (name, evidence, json.dumps(source, ensure_ascii=False, sort_keys=True))
+            if not name or key in seen_reasons:
+                reason_duplicates += 1
+                continue
+            seen_reasons.add(key)
+            reason_hits.append(
+                {
+                    "reason": name,
+                    "evidence": evidence,
+                    "sourceReference": source,
+                    "confidence": reason.get("confidence") or "low",
+                }
+            )
+
+        prepared.append(
+            {
+                "unitId": _short_text(result.get("unitId"), 180),
+                "sourceType": _short_text(result.get("sourceType"), 40),
+                "fileName": _short_text(result.get("fileName"), 300),
+                "partIndex": result.get("partIndex") or 1,
+                "partTotal": result.get("partTotal") or 1,
+                "analysisIncomplete": result.get("analysisIncomplete") is True,
+                "products": products,
+                "characteristicSets": characteristic_sets,
+                "fieldCandidates": field_candidates,
+                "reasonHits": reason_hits,
+            }
+        )
+
+    after_chars = len(json.dumps(prepared, ensure_ascii=False, separators=(",", ":")))
+    return prepared, {
+        "consolidationPayloadCharsBefore": before_chars,
+        "consolidationPayloadCharsAfter": after_chars,
+        "consolidationPayloadCharsRemoved": max(0, before_chars - after_chars),
+        "consolidationCharacteristicDuplicatesRemoved": characteristic_duplicates,
+        "consolidationFieldCandidateDuplicatesRemoved": field_candidate_duplicates,
+        "consolidationReasonDuplicatesRemoved": reason_duplicates,
+    }
+
+
 def fallback_document_consolidation(
     results: list[dict[str, Any]],
     warning: str,

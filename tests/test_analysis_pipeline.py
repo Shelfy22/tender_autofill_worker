@@ -50,3 +50,4 @@ def test_successful_consolidation_preserves_incomplete_document_metadata():
     consolidated, debug, _ = consolidate_analysis(llm, [], ["broken"], [])
     assert consolidated.incompleteUnitIds == ["broken"]
     assert debug["inputProductCount"] == 0
+    assert debug["consolidationPayloadCharsAfter"] <= debug["consolidationPayloadCharsBefore"]
