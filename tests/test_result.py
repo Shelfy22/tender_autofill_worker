@@ -213,6 +213,12 @@ def test_result_maps_all_new_status_and_reason_dictionary_codes() -> None:
             "130",
             "org_term_ls3",
         ),
+        (
+            "Отказано ИИ",
+            "Оргвопросы. Отказ организатора от проведения тендера",
+            "130",
+            "cp_org_tender_no",
+        ),
         ("Загружен Seldon", "Прочее", "110", "cp_other"),
     )
 

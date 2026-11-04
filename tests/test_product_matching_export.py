@@ -56,14 +56,16 @@ def test_build_product_matching_workbook_contains_expected_columns_and_values() 
     assert sheet["B2"].value == "Кабель ВВГнг 3x2.5"
     assert sheet["E2"].value == "A-1"
     assert sheet["H2"].value == "Кабель силовой"
-    assert sheet["O2"].value == "spec.xlsx / Лист1 / row 7"
-    assert sheet["P2"].value == "pos_test"
-    assert sheet["Q2"].value == "Сечение: 2,5 мм2 [same_row, 0.98]"
-    assert sheet["R1"].value == "Характеристики выбранного товара ETM"
-    assert sheet["S2"].value == "Кабель ВВГнг 3x2,5"
-    assert sheet["T2"].value == "3x2,5"
-    assert sheet["U2"].value == "electrical_lighting"
-    assert sheet["V2"].value == "Кабель ВВГнг\nКабель ВВГнг 3x2,5"
+    assert "Соответствие" not in [cell.value for cell in sheet[1]]
+    assert sheet["M2"].value == "Совпали тип и сечение"
+    assert sheet["N2"].value == "spec.xlsx / Лист1 / row 7"
+    assert sheet["O2"].value == "pos_test"
+    assert sheet["P2"].value == "Сечение: 2,5 мм2 [same_row, 0.98]"
+    assert sheet["Q1"].value == "Характеристики выбранного товара ETM"
+    assert sheet["R2"].value == "Кабель ВВГнг 3x2,5"
+    assert sheet["S2"].value == "3x2,5"
+    assert sheet["T2"].value == "electrical_lighting"
+    assert sheet["U2"].value == "Кабель ВВГнг\nКабель ВВГнг 3x2,5"
 
 
 def test_export_shows_params_only_for_selected_catalog_product() -> None:
@@ -79,9 +81,9 @@ def test_export_shows_params_only_for_selected_catalog_product() -> None:
     )
 
     sheet = load_workbook(BytesIO(workbook_bytes)).active
-    assert sheet["R2"].value == "Число жил: 3\nСечение: 2,5 мм2"
-    assert sheet["R3"].value is None
-    assert sheet.max_column == 23
+    assert sheet["Q2"].value == "Число жил: 3\nСечение: 2,5 мм2"
+    assert sheet["Q3"].value is None
+    assert sheet.max_column == 22
 
 
 def test_export_replaces_semicolons_with_colons_in_all_text_cells() -> None:
@@ -103,7 +105,7 @@ def test_export_replaces_semicolons_with_colons_in_all_text_cells() -> None:
     sheet = load_workbook(BytesIO(workbook_bytes)).active
 
     assert sheet["B2"].value == "cable: 3x2.5"
-    assert sheet["Q2"].value == "core: material: copper: tinned"
-    assert sheet["T2"].value == "core: copper"
-    assert sheet["V2"].value == "cable: power"
+    assert sheet["P2"].value == "core: material: copper: tinned"
+    assert sheet["S2"].value == "core: copper"
+    assert sheet["U2"].value == "cable: power"
     assert all(";" not in str(cell.value) for row in sheet.iter_rows() for cell in row)

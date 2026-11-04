@@ -21,7 +21,6 @@ HEADERS = [
     "Медианная цена",
     "Валюта",
     "Сумма позиции",
-    "Соответствие",
     "Обоснование",
     "Источник",
     "Position key",
@@ -168,7 +167,6 @@ def build_product_matching_workbook(
                     _value(detail.get("medianUnitPriceRub")),
                     _value(detail.get("priceCurrency") or result.get("Валюта")),
                     _value(detail.get("positionTotalPriceRub")),
-                    _value(result.get("Соответствие") or ""),
                     _value(result.get("Обоснование") or ""),
                     _source_label(detail),
                     _value(detail.get("positionKey")),
@@ -189,8 +187,8 @@ def build_product_matching_workbook(
     worksheet.freeze_panes = "A2"
     worksheet.auto_filter.ref = worksheet.dimensions
     widths = [
-        8, 48, 14, 12, 16, 34, 16, 52, 24, 16, 10, 16, 22, 72, 40,
-        24, 65, 65, 65, 36, 28, 65, 60,
+        8, 48, 14, 12, 16, 34, 16, 52, 24, 16, 10, 16, 72, 40, 24,
+        65, 65, 65, 36, 28, 65, 60,
     ]
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(index)].width = width
