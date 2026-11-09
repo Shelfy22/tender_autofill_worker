@@ -219,6 +219,12 @@ def test_result_maps_all_new_status_and_reason_dictionary_codes() -> None:
             "230",
             "cp_org_tender_no",
         ),
+        (
+            "Отказано ИИ",
+            "Номенклатура. Ремкомплект / ЗИП / Продукция по чертежу",
+            "230",
+            "nom_rqzipdesign",
+        ),
         ("Загружен Seldon", "Прочее", "110", "cp_other"),
     )
 
