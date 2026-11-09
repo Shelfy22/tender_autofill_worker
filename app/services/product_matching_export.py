@@ -6,6 +6,7 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
 HEADERS = [
@@ -21,17 +22,14 @@ HEADERS = [
     "Медианная цена",
     "Валюта",
     "Сумма позиции",
-    "Обоснование",
-    "Источник",
-    "Position key",
     "Характеристики из документов",
     "Характеристики выбранного товара ETM",
-    "Итоговый поисковый запрос",
-    "Выбранные search_token",
-    "Категория поиска",
-    "Варианты Qdrant-запроса",
-    "Конфликты характеристик",
+    "Обоснование (почему товар подобран)",
+    "Корректно ли подобрана позиция (да / нет)",
+    "Примечание о подборе",
 ]
+
+MATCHING_NOTE_HINT = "В случае если товар подобран не верно, указать что именно"
 
 
 def _value(value: Any) -> Any:
@@ -47,18 +45,6 @@ def _export_cell_value(value: Any) -> Any:
     return value
 
 
-def _source_label(detail: dict[str, Any]) -> str:
-    reference = detail.get("sourceReference")
-    if not isinstance(reference, dict):
-        return ""
-    parts = [
-        str(reference.get("fileName") or "").strip(),
-        str(reference.get("sheet") or "").strip(),
-        f"row {reference.get('row')}" if reference.get("row") else "",
-    ]
-    return " / ".join(part for part in parts if part)
-
-
 def _characteristics_label(value: Any) -> str:
     if not isinstance(value, list):
         return ""
@@ -68,19 +54,9 @@ def _characteristics_label(value: Any) -> str:
             continue
         name = str(item.get("name") or "").strip()
         characteristic_value = str(item.get("value") or "").strip()
-        method = str(item.get("associationMethod") or "").strip()
-        confidence = item.get("associationConfidence")
         label = ": ".join(part for part in (name, characteristic_value) if part)
-        association = ", ".join(
-            part
-            for part in (
-                method,
-                f"{float(confidence):.2f}" if isinstance(confidence, (int, float)) else "",
-            )
-            if part
-        )
         if label:
-            result.append(f"{label} [{association}]" if association else label)
+            result.append(label)
     return "\n".join(result)
 
 
@@ -92,32 +68,6 @@ def _catalog_characteristics_label(value: Any) -> str:
         for key, item in value.items()
         if str(key).strip() and item is not None and str(item).strip()
     )
-
-
-def _list_label(value: Any) -> str:
-    if not isinstance(value, list):
-        return ""
-    return "\n".join(str(item).strip() for item in value if str(item).strip())
-
-
-def _conflicts_label(value: Any) -> str:
-    if not isinstance(value, list):
-        return ""
-    result: list[str] = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("normalizedName") or "").strip()
-        values = item.get("values")
-        rendered_values = []
-        if isinstance(values, list):
-            rendered_values = [
-                str(entry.get("value") or "").strip()
-                for entry in values
-                if isinstance(entry, dict) and str(entry.get("value") or "").strip()
-            ]
-        result.append(f"{name}: {' <> '.join(rendered_values)}")
-    return "\n".join(result)
 
 
 def build_product_matching_workbook(
@@ -139,6 +89,7 @@ def build_product_matching_workbook(
     if not isinstance(details, list):
         details = []
 
+    first_exported_position = True
     for index, detail in enumerate(details, start=1):
         if not isinstance(detail, dict):
             continue
@@ -167,28 +118,30 @@ def build_product_matching_workbook(
                     _value(detail.get("medianUnitPriceRub")),
                     _value(detail.get("priceCurrency") or result.get("Валюта")),
                     _value(detail.get("positionTotalPriceRub")),
-                    _value(result.get("Обоснование") or ""),
-                    _source_label(detail),
-                    _value(detail.get("positionKey")),
                     _characteristics_label(detail.get("sourceCharacteristics")),
                     _catalog_characteristics_label(catalog_params),
-                    _value(detail.get("productQuery")),
-                    _list_label(detail.get("searchCharacteristics")),
-                    _value(
-                        detail.get("searchCategoryCode")
-                        or detail.get("searchCategory")
-                    ),
-                    _list_label(detail.get("searchQueries")),
-                    _conflicts_label(detail.get("characteristicConflicts")),
+                    _value(result.get("Обоснование") or ""),
+                    "",
+                    MATCHING_NOTE_HINT if first_exported_position else "",
                 ]
             ]
         )
+        first_exported_position = False
+
+    # The buyer can explicitly mark a selection without typing arbitrary variants.
+    if worksheet.max_row >= 2:
+        validation = DataValidation(type="list", formula1='"Да,Нет"', allow_blank=True)
+        validation.error = "Выберите значение «Да» или «Нет»."
+        validation.errorTitle = "Некорректное значение"
+        validation.prompt = "Оцените, корректно ли подобрана позиция."
+        validation.promptTitle = "Проверка подбора"
+        worksheet.add_data_validation(validation)
+        validation.add(f"P2:P{worksheet.max_row}")
 
     worksheet.freeze_panes = "A2"
     worksheet.auto_filter.ref = worksheet.dimensions
     widths = [
-        8, 48, 14, 12, 16, 34, 16, 52, 24, 16, 10, 16, 72, 40, 24,
-        65, 65, 65, 36, 28, 65, 60,
+        8, 48, 14, 12, 16, 34, 16, 52, 24, 16, 10, 16, 65, 65, 72, 28, 58,
     ]
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(index)].width = width

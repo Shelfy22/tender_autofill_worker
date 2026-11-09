@@ -89,8 +89,8 @@ def _yes_no_code_value(value: Any) -> Any:
 # imported into a system whose dictionaries accept these stable reference codes.
 _TENDER_STATUS_CODES = {
     "Загружен Seldon": "110",
-    "Согласовано ИИ": "120",
-    "Отказано ИИ": "130",
+    "Согласовано ИИ": "220",
+    "Отказано ИИ": "230",
 }
 
 _TENDER_STATUS_REASON_CODES = {

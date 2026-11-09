@@ -172,7 +172,7 @@ def test_result_uses_target_system_codes_for_goz_lot_and_decision() -> None:
 
     assert result["fields"]["stateDefenseOrder"] == "yes"
     assert result["fields"]["lotDivisible"] == "yes"
-    assert result["fields"]["tenderStatus"] == "130"
+    assert result["fields"]["tenderStatus"] == "230"
     assert result["fields"]["tenderStatusReason"] == "ku_nmck_ls300"
     assert "nationalRegime" not in result["fields"]
 
@@ -200,23 +200,23 @@ def test_result_maps_all_new_status_and_reason_dictionary_codes() -> None:
     )
     cases = (
         ("Загружен Seldon", None, "110", None),
-        ("Согласовано ИИ", None, "120", None),
+        ("Согласовано ИИ", None, "220", None),
         (
             "Отказано ИИ",
             "Оргвопросы. Опрос рынка / Мониторинг / Анализ рынка / Анонс / КИМ",
-            "130",
+            "230",
             "cp_org_analiz",
         ),
         (
             "Отказано ИИ",
             "Оргвопросы. На момент согласования менее 3 рабочих дней до подачи заявки",
-            "130",
+            "230",
             "org_term_ls3",
         ),
         (
             "Отказано ИИ",
             "Оргвопросы. Отказ организатора от проведения тендера",
-            "130",
+            "230",
             "cp_org_tender_no",
         ),
         ("Загружен Seldon", "Прочее", "110", "cp_other"),

@@ -56,16 +56,22 @@ def test_build_product_matching_workbook_contains_expected_columns_and_values() 
     assert sheet["B2"].value == "Кабель ВВГнг 3x2.5"
     assert sheet["E2"].value == "A-1"
     assert sheet["H2"].value == "Кабель силовой"
-    assert "Соответствие" not in [cell.value for cell in sheet[1]]
-    assert sheet["M2"].value == "Совпали тип и сечение"
-    assert sheet["N2"].value == "spec.xlsx / Лист1 / row 7"
-    assert sheet["O2"].value == "pos_test"
-    assert sheet["P2"].value == "Сечение: 2,5 мм2 [same_row, 0.98]"
-    assert sheet["Q1"].value == "Характеристики выбранного товара ETM"
-    assert sheet["R2"].value == "Кабель ВВГнг 3x2,5"
-    assert sheet["S2"].value == "3x2,5"
-    assert sheet["T2"].value == "electrical_lighting"
-    assert sheet["U2"].value == "Кабель ВВГнг\nКабель ВВГнг 3x2,5"
+    headers = [cell.value for cell in sheet[1]]
+    assert headers == [
+        "N", "Название товара тендера", "Количество", "Ед. изм.", "Артикул", "Ссылка",
+        "Код ETM", "Наименование ETM", "Производитель", "Медианная цена", "Валюта",
+        "Сумма позиции", "Характеристики из документов",
+        "Характеристики выбранного товара ETM", "Обоснование (почему товар подобран)",
+        "Корректно ли подобрана позиция (да / нет)", "Примечание о подборе",
+    ]
+    assert sheet["M2"].value == "Сечение: 2,5 мм2"
+    assert sheet["N2"].value is None
+    assert sheet["O2"].value == "Совпали тип и сечение"
+    assert sheet["P2"].value is None
+    assert sheet["Q2"].value == "В случае если товар подобран не верно, указать что именно"
+    assert len(sheet.data_validations.dataValidation) == 1
+    assert sheet.data_validations.dataValidation[0].formula1 == '"Да,Нет"'
+    assert str(sheet.data_validations.dataValidation[0].sqref) == "P2"
 
 
 def test_export_shows_params_only_for_selected_catalog_product() -> None:
@@ -81,9 +87,12 @@ def test_export_shows_params_only_for_selected_catalog_product() -> None:
     )
 
     sheet = load_workbook(BytesIO(workbook_bytes)).active
-    assert sheet["Q2"].value == "Число жил: 3\nСечение: 2,5 мм2"
+    assert sheet["N2"].value == "Число жил: 3\nСечение: 2,5 мм2"
+    assert sheet["N3"].value is None
+    assert sheet["Q2"].value == "В случае если товар подобран не верно, указать что именно"
     assert sheet["Q3"].value is None
-    assert sheet.max_column == 22
+    assert sheet.max_column == 17
+    assert str(sheet.data_validations.dataValidation[0].sqref) == "P2:P3"
 
 
 def test_export_replaces_semicolons_with_colons_in_all_text_cells() -> None:
@@ -105,7 +114,5 @@ def test_export_replaces_semicolons_with_colons_in_all_text_cells() -> None:
     sheet = load_workbook(BytesIO(workbook_bytes)).active
 
     assert sheet["B2"].value == "cable: 3x2.5"
-    assert sheet["P2"].value == "core: material: copper: tinned"
-    assert sheet["S2"].value == "core: copper"
-    assert sheet["U2"].value == "cable: power"
+    assert sheet["M2"].value == "core: material: copper: tinned"
     assert all(";" not in str(cell.value) for row in sheet.iter_rows() for cell in row)
