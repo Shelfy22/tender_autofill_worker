@@ -47,6 +47,7 @@ def product_check(**overrides: object) -> dict[str, object]:
         "priceEvaluationComplete": False,
         "supplyTotalPriceRub": 0,
         "summary": "Покрытие 100%",
+        "statusNoteSummary": "Покрытие 100%",
     }
     value.update(overrides)
     return value
@@ -405,8 +406,8 @@ def test_unresolved_product_audit_does_not_create_disabled_coverage_rejection() 
 
     assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
-    assert "Товарный аудит обнаружил" in fields["tenderStatusNote"]
-    assert "не блокирует расчёт покрытия" in fields["tenderStatusNote"]
+    assert "Товарный аудит обнаружил" not in fields["tenderStatusNote"]
+    assert "Кабель АВБШв-1 4х120" not in fields["tenderStatusNote"]
     assert meta["tenderStatus"]["source"] == "LLM: решение ИИ"
     assert decision["manualReviewRequired"] is True
 
@@ -465,9 +466,9 @@ def test_missing_ipro_is_advisory_for_approved_tender_with_product_review() -> N
 
     assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
-    assert "Товарный аудит обнаружил" in fields["tenderStatusNote"]
-    assert "Выключатель —" in fields["tenderStatusNote"]
-    assert "IPro не найдена" in fields["tenderStatusNote"]
+    assert "Товарный аудит обнаружил" not in fields["tenderStatusNote"]
+    assert "Выключатель —" not in fields["tenderStatusNote"]
+    assert "IPro не найдена" not in fields["tenderStatusNote"]
     assert meta["tenderStatus"]["source"] == "LLM: решение ИИ"
     assert decision["counterpartyRequiresWork"] is True
     assert decision["manualReviewRequired"] is True
@@ -501,7 +502,7 @@ def test_product_review_is_advisory_when_tender_is_approved() -> None:
 
     assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
-    assert "Анализатор FPL1014 — Низкая уверенность" in fields["tenderStatusNote"]
+    assert "Анализатор FPL1014 — Низкая уверенность" not in fields["tenderStatusNote"]
     assert meta["tenderStatus"]["source"] == "LLM: решение ИИ"
     assert decision["manualReviewRequired"] is True
 
@@ -909,7 +910,7 @@ def test_llm_can_dismiss_deterministic_zip_reason_after_evidence_review() -> Non
     assert fields["tenderStatus"] == "Согласовано ИИ"
     assert decision["hardReasons"] == []
     assert decision["dismissedHardReasons"][0]["reason"] == REPAIR_KIT_REASON
-    assert "не требует поставки" in decision["note"]
+    assert "не требует поставки" not in decision["note"]
 
 
 def test_deterministic_zip_reason_remains_without_explicit_high_confidence_review() -> None:
@@ -1131,7 +1132,7 @@ def test_hard_rejection_has_priority_over_counterparty_work() -> None:
     )
     assert fields["tenderStatus"] == "Отказано ИИ"
     assert fields["tenderStatusReason"] == PRICE_REASON
-    assert "Дополнительная информация по контрагенту: нет контрагента" in fields["tenderStatusNote"]
+    assert "нет контрагента" not in fields["tenderStatusNote"]
     assert decision["counterpartyRequiresWork"] is True
     assert decision["counterpartyAdvisoryOnly"] is True
 
@@ -1159,7 +1160,7 @@ def test_missing_ipro_is_advisory_when_tender_would_otherwise_be_approved() -> N
 
     assert fields["tenderStatus"] == "Согласовано ИИ"
     assert "tenderStatusReason" not in fields
-    assert "ИНН/КПП не найдены в IPro" in fields["tenderStatusNote"]
+    assert "ИНН/КПП не найдены в IPro" not in fields["tenderStatusNote"]
     assert decision["counterpartyRequiresWork"] is True
     assert decision["counterpartyAdvisoryOnly"] is True
 
@@ -1186,7 +1187,7 @@ def test_llm_rejection_has_priority_over_counterparty_work() -> None:
 
     assert fields["tenderStatus"] == "Отказано ИИ"
     assert fields["tenderStatusReason"] == SUPPLY_WORK_REASON
-    assert "Дополнительная информация по контрагенту: контрагент отсутствует" in fields["tenderStatusNote"]
+    assert "контрагент отсутствует" not in fields["tenderStatusNote"]
     assert decision["counterpartyAdvisoryOnly"] is True
 
 

@@ -322,6 +322,11 @@ def summarize_product_coverage(
             f"не закрыто {total - supplied_count}. {rule_summary}"
         )
 
+    # This is the only product-coverage text intended for the employee-facing
+    # tender status note.  The sections appended below are useful diagnostics,
+    # but must remain in productCheck rather than overload the status note.
+    status_note_summary = coverage_summary
+
     if position_limit_applied:
         coverage_summary += (
             f" Coverage рассчитан по первым {total} из {source_total} товарных позиций."
@@ -396,6 +401,7 @@ def summarize_product_coverage(
         ),
         "priceSummary": price_summary,
         "documentPriceSummary": document_price_summary,
+        "statusNoteSummary": status_note_summary,
         "documentPriceDiagnostics": {
             "mode": "diagnostic_only",
             "usedForSupplyValueThreshold": False,

@@ -179,6 +179,8 @@ def test_large_tender_coverage_uses_limited_sample_without_price_rejection() -> 
     assert result["supplyValueHardReject"] is False
     assert result["supplyValueEvaluationMode"] == "sampled_catalog_positions"
     assert "первым 130 из 1000" in result["summary"]
+    assert "первым 130 из 1000" not in result["statusNoteSummary"]
+    assert "Покрытие ассортимента" in result["statusNoteSummary"]
 
 
 def test_calculated_price_can_be_kept_as_information_without_threshold() -> None:

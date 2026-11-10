@@ -1615,34 +1615,18 @@ def apply_final_decision(
 
     preferred_llm_alternative = llm_reason_candidates[0] if llm_reason_candidates else None
     note_parts: list[str] = []
-    for item in dismissed_hard_reasons:
-        review = semantic_reviews[item.reason]
-        note_parts.append(
-            "LLM сняла кандидата причины после проверки evidence "
-            f"«{item.reason}»: {review.rationale.strip()}"
-        )
     for item in semantic_manual_review_reasons:
         review = semantic_reviews[item.reason]
         note_parts.append(
             "Требуется ручная оценка кандидата причины "
             f"«{item.reason}»: {review.rationale.strip()} Фрагмент: {item.evidence}"
         )
-    summary = re.sub(r"\s+", " ", str(product_check.get("summary") or "")).strip()
+    summary = re.sub(
+        r"\s+", " ", str(product_check.get("statusNoteSummary") or "").strip()
+    ).strip()
     if summary:
         note_parts.append(summary)
     reason_origin = "none"
-    unresolved_labels: list[str] = []
-    if validation_requires_review:
-        unresolved = product_validation.get("unresolved", [])
-        for item in unresolved:
-            if not isinstance(item, dict):
-                continue
-            product_label = str(item.get("product") or "").strip()
-            review_reason = str(item.get("reason") or "").strip()
-            if product_label and review_reason:
-                unresolved_labels.append(f"{product_label} — {review_reason}")
-            elif product_label or review_reason:
-                unresolved_labels.append(product_label or review_reason)
 
     if hard:
         status = "Отказано ИИ"
@@ -1668,7 +1652,6 @@ def apply_final_decision(
     elif llm_decision and llm_decision.decision == "reject" and llm_primary:
         status, reason, confidence = "Отказано ИИ", llm_primary, llm_decision.confidence
         reason_origin = "llm"
-        note_parts.append(llm_decision.note or f"Подтверждён критерий отказа: {llm_primary}.")
     elif remote_territory_manual_reasons:
         status, reason, confidence = "Загружен Seldon", None, "medium"
         reason_origin = "remote_territory_manual_review"
@@ -1683,37 +1666,15 @@ def apply_final_decision(
         reason_origin = "semantic_hard_reason_manual_review"
     elif llm_decision and llm_decision.decision == "reject":
         status, reason, confidence = "Согласовано ИИ", None, llm_decision.confidence
-        note_parts.append(
-            "LLM reject содержал только запрещённую/неподтверждённую controlled-причину."
-        )
     elif llm_decision and llm_decision.decision == "approve":
         status, reason, confidence = "Согласовано ИИ", None, llm_decision.confidence
-        note_parts.append(llm_decision.note or "Критерии отказа не подтверждены.")
     else:
         status, reason, confidence = "Загружен Seldon", "Прочее", "low"
         reason_origin = "fallback"
-        note_parts.append("LLM решения по статусу не вернул валидный JSON; обязательные критерии не сработали.")
-
-    if validation_requires_review:
-        note_parts.append(
-            "Товарный аудит обнаружил неразрешённые строки или конфликтующие дубли. "
-            "Информация сохранена для проверки и не блокирует расчёт покрытия "
-            "или итоговое решение по причинам статуса."
-        )
-        if unresolved_labels:
-            note_parts.append("Проверить: " + "; ".join(unresolved_labels[:10]) + ".")
-
+    # Product-audit and IPro diagnostics remain in result_json (productCheck
+    # and checks), but are intentionally excluded from the employee-facing
+    # tenderStatusNote.
     counterparty_advisory_only = counterparty_requires_work
-    if counterparty_requires_work:
-        counterparty_evidence = (
-            counterparty_lookup.get("reason")
-            or "Контрагент с указанным ИНН не найден в IPro."
-        )
-        note_parts.append(
-            "Дополнительная информация по контрагенту: "
-            f"{counterparty_evidence} Проверка IPro носит справочный характер и не "
-            "меняет статус тендера."
-        )
 
     additional_reasons: list[dict[str, str]] = []
 
