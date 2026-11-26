@@ -6,26 +6,23 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.datavalidation import DataValidation
 
 
 HEADERS = [
     "N",
-    "Название товара тендера",
-    "Количество",
-    "Ед. изм.",
-    "Артикул",
-    "Ссылка",
-    "Код ETM",
-    "Наименование ETM",
+    "Название товара в тендере",
+    "Наименование товара ЭТМ",
+    "Код ЭТМ",
+    "Ссылка ЭТМ",
     "Производитель",
+    "Количество",
     "Медианная цена",
     "Валюта",
-    "Сумма позиции",
-    "Характеристики из документов",
-    "Характеристики выбранного товара ETM",
+    "Сумма",
+    "Характеристики из документации",
+    "Характеристики выбранного товара ЭТМ",
     "Обоснование (почему товар подобран)",
-    "Корректно ли подобрана позиция (да / нет)",
+    "Корректность подбора",
     "Примечание о подборе",
 ]
 
@@ -108,13 +105,11 @@ def build_product_matching_workbook(
                 for value in [
                     index,
                     _value(detail.get("sourceProduct") or detail.get("productQuery")),
-                    _value(detail.get("quantity")),
-                    _value(detail.get("unit")),
-                    _value(article),
-                    _value(link),
-                    _value(product_id),
                     _value(result.get("Наименование") or ""),
+                    _value(product_id),
+                    _value(link),
                     _value(result.get("Производитель") or ""),
+                    _value(detail.get("quantity")),
                     _value(detail.get("medianUnitPriceRub")),
                     _value(detail.get("priceCurrency") or result.get("Валюта")),
                     _value(detail.get("positionTotalPriceRub")),
@@ -128,20 +123,10 @@ def build_product_matching_workbook(
         )
         first_exported_position = False
 
-    # The buyer can explicitly mark a selection without typing arbitrary variants.
-    if worksheet.max_row >= 2:
-        validation = DataValidation(type="list", formula1='"Да,Нет"', allow_blank=True)
-        validation.error = "Выберите значение «Да» или «Нет»."
-        validation.errorTitle = "Некорректное значение"
-        validation.prompt = "Оцените, корректно ли подобрана позиция."
-        validation.promptTitle = "Проверка подбора"
-        worksheet.add_data_validation(validation)
-        validation.add(f"P2:P{worksheet.max_row}")
-
     worksheet.freeze_panes = "A2"
     worksheet.auto_filter.ref = worksheet.dimensions
     widths = [
-        8, 48, 14, 12, 16, 34, 16, 52, 24, 16, 10, 16, 65, 65, 72, 28, 58,
+        8, 48, 52, 16, 34, 24, 14, 16, 10, 16, 65, 65, 72, 28, 58,
     ]
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(index)].width = width

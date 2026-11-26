@@ -601,7 +601,7 @@ class TenderPipeline:
             if self.settings.yandex_disk_token is not None:
                 tender_id = job.seldon_id or job.etp_id or job.job_record_key
                 filename = safe_filename(
-                    f"autopodbor_{tender_id}.xlsx",
+                    f"{tender_id}.xlsx",
                     "autopodbor.xlsx",
                 )
                 try:
