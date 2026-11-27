@@ -1,5 +1,5 @@
 from app.models import NormalizedJob
-from app.services.result import build_result_json
+from app.services.result import build_processing_fallback_result, build_result_json
 
 
 def test_reason_codes_accept_both_russian_yo_spellings():
@@ -44,6 +44,29 @@ def test_result_json_contract_for_finalizer() -> None:
     assert result["reportFields"]["Код ТО"] == "Dep_TO-1"
     assert result["reportFields"]["ID"] == "42"
     assert result["sourceTender"]["seldonId"] == 42
+
+
+def test_processing_fallback_keeps_only_seldon_fields_and_loaded_status() -> None:
+    job = NormalizedJob(
+        job_record_key="daily:b:1:42",
+        batch_id="b",
+        report_id=1,
+        seldon_id="42",
+        to_code="1F",
+        report_fields={"ID": "42", "Название": "Из Seldon"},
+        seldon_purchase={"seldonId": 42, "notificationNumber": "N-1"},
+    )
+
+    result = build_processing_fallback_result(job, RuntimeError("LLM timeout"))
+
+    assert result["fields"] == {"tenderStatus": "110", "toCode": "Dep_1F"}
+    assert "tenderStatusReason" not in result["fields"]
+    assert "tenderStatusNote" not in result["fields"]
+    assert result["reportFields"]["Название"] == "Из Seldon"
+    assert result["debug"]["processingFallback"] == {
+        "errorType": "RuntimeError",
+        "errorMessage": "LLM timeout",
+    }
 
 
 def test_result_omits_retired_report_fields_and_headers() -> None:

@@ -105,6 +105,18 @@ def test_table_schema_drops_price_like_quantity_mapping() -> None:
     assert updated.headerMap == {"product": "C"}
 
 
+def test_table_schema_truncates_excessive_llm_characteristic_columns() -> None:
+    schema = SpreadsheetTableSchemaResponse(
+        tableRole="technical_specification",
+        characteristicColumns=[chr(ord("A") + index) for index in range(26)],
+    )
+
+    assert len(schema.characteristicColumns) == 24
+    assert schema.characteristicColumns == [
+        chr(ord("A") + index) for index in range(24)
+    ]
+
+
 def test_table_schema_uses_product_audit_reasoning_llm_method() -> None:
     class StubLlm:
         def classify_spreadsheet_table_schema(self, profile):

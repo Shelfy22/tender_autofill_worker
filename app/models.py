@@ -1008,7 +1008,16 @@ class SpreadsheetTableSchemaResponse(BaseModel):
     def normalize_characteristic_columns(cls, value: Any) -> list[str]:
         if not isinstance(value, list):
             return []
-        return list(dict.fromkeys(cls.normalize_column(item) for item in value if cls.normalize_column(item)))
+        columns = list(
+            dict.fromkeys(
+                cls.normalize_column(item) for item in value if cls.normalize_column(item)
+            )
+        )
+        # This list comes from an LLM table-schema response.  A model can mark
+        # every column in a wide spreadsheet as a characteristic; retaining
+        # the first 24 preserves the response contract without failing a whole
+        # tender because of a diagnostic-only overclassification.
+        return columns[:24]
 
 
 class ParsedDocument(BaseModel):

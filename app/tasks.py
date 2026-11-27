@@ -16,6 +16,8 @@ from app.pipeline import TenderPipeline
 from app.services.documents import safe_filename
 from app.services.product_matching import LocalDocument, run_product_matching_from_files
 from app.services.product_matching_jobs import ProductMatchingJobStore
+from app.services.normalization import normalize_job_payload
+from app.services.result import build_processing_fallback_result
 from app.services.yandex_disk import upload_product_matching_report
 
 
@@ -125,10 +127,37 @@ def process_tender(self: Task, record_key: str, batch_id: str) -> dict[str, obje
             with tempfile.TemporaryDirectory(
                 prefix=f"tender-{claim.attempt}-", dir=settings.temp_root
             ) as directory:
-                result = TenderPipeline(settings, Path(directory), observer=observer).run(claim)
+                fallback_error: BaseException | None = None
+                try:
+                    result = TenderPipeline(settings, Path(directory), observer=observer).run(claim)
+                except SoftTimeLimitExceeded as exc:
+                    fallback_error = exc
+                    logger.exception(
+                        "job_soft_timeout_fallback",
+                        extra={"event": {"stage": "processing_fallback", "error": str(exc)}},
+                    )
+                    result = build_processing_fallback_result(
+                        normalize_job_payload(claim), exc
+                    )
+                except Exception as exc:
+                    fallback_error = exc
+                    logger.exception(
+                        "job_processing_fallback",
+                        extra={"event": {"stage": "processing_fallback", "error": str(exc)}},
+                    )
+                    result = build_processing_fallback_result(
+                        normalize_job_payload(claim), exc
+                    )
                 completed = repository.complete_job(record_key, task_id, result)
                 if not completed:
                     raise RuntimeError("Job result не записан: processing claim больше не принадлежит task")
+                if fallback_error is not None:
+                    observer.event(
+                        event_type="job",
+                        status="fallback",
+                        stage="processing_fallback",
+                        error=fallback_error,
+                    )
                 observer.finish_completed(result)
                 logger.info(
                     "job_completed",
@@ -140,13 +169,10 @@ def process_tender(self: Task, record_key: str, batch_id: str) -> dict[str, obje
                         }
                     },
                 )
-                return {"status": "completed", "record_key": record_key}
-    except SoftTimeLimitExceeded as exc:
-        message = f"Python Worker soft timeout: {settings.celery_soft_time_limit_seconds}s"
-        repository.fail_job(record_key, task_id, message)
-        observer.finish_failed(exc)
-        logger.exception("job_soft_timeout", extra={"event": {"stage": "failed", "error": message}})
-        raise exc
+                return {
+                    "status": "completed_with_fallback" if fallback_error else "completed",
+                    "record_key": record_key,
+                }
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
         repository.fail_job(record_key, task_id, message)

@@ -240,3 +240,61 @@ def build_result_json(
         processedAt=datetime.now(timezone.utc),
     )
     return result.model_dump(mode="json")
+
+
+def build_processing_fallback_result(
+    job: NormalizedJob,
+    error: BaseException,
+) -> dict[str, Any]:
+    """Return a safe Seldon-only result after an unexpected processing error.
+
+    A failed analysis must never become an automatic rejection.  The outgoing
+    fields intentionally contain only the manual-review status (and the
+    source-derived department code added by :func:`build_result_json`).  The
+    technical error is retained under ``debug`` for operators, not in the
+    employee-facing status note or reason.
+    """
+    error_type = type(error).__name__
+    error_message = str(error).strip()[:4_000]
+    decision = {
+        "status": "Загружен Seldon",
+        "reason": None,
+        "note": "",
+        "confidence": "low",
+        "reasonOrigin": "processing_error_fallback",
+        "counterpartyRequiresWork": False,
+        "counterpartyAdvisoryOnly": True,
+        "hardReasons": [],
+        "manualReviewReasons": [],
+        "semanticHardReasonReviews": [],
+        "semanticManualReviewReasons": [],
+        "dismissedHardReasons": [],
+        "hardReasonReviews": [],
+        "hardNonAssortmentReasons": [],
+        "additionalReasons": [],
+    }
+    return build_result_json(
+        job,
+        fields={"tenderStatus": "Загружен Seldon"},
+        meta={
+            "tenderStatus": {
+                "source": "Ошибка обработки: ручная проверка",
+                "confidence": "low",
+                "evidence": error_type,
+            }
+        },
+        product_check=None,
+        decision=decision,
+        warnings=[],
+        logs=[],
+        debug={
+            "toCode": job.to_code,
+            "remainingDays": job.remaining_days,
+            "reportId": job.report_id,
+            "tenderDecision": decision,
+            "processingFallback": {
+                "errorType": error_type,
+                "errorMessage": error_message,
+            },
+        },
+    )
